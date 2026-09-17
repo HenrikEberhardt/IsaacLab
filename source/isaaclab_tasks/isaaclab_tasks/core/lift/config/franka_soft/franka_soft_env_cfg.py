@@ -148,7 +148,7 @@ class PhysicsCfg(PresetCfg):
                     name="rigid",
                     solver_cfg=MJWarpSolverCfg(
                         cone="elliptic",
-                        ls_iterations=20,
+                        ls_iterations=30,
                         integrator="implicitfast",
                     ),
                     bodies=[r"/World/envs/env_[^/]+/Robot"],
@@ -645,10 +645,12 @@ class FrankaSoftEnvCfg(ManagerBasedRLEnvCfg):
 
     # Scene settings
     scene: FrankaSoftSceneCfg = FrankaSoftSceneCfg()
+
     # Basic settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
+
     # MDP settings
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
@@ -665,8 +667,9 @@ class FrankaSoftEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics = PhysicsCfg()
 
-        self.viewer.eye = (0.75, 0.25, 0.65)
-        self.viewer.lookat = (0.0, 0.75, 0.4)
+        #  visualizer settings
+        self.viewer.eye = (1.2, -0.9, 0.9)
+        self.viewer.lookat = (0.4, 0.0, 0.15)
         self.sim.default_visualizer_cfg = _FrankaSoftVisualizerCfg(
             eye=self.viewer.eye,
             lookat=self.viewer.lookat,
