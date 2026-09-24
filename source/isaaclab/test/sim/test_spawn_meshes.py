@@ -123,6 +123,7 @@ def test_mesh_edge_refinement_default():
         (sim_utils.MeshCapsuleCfg, {"radius": 1.0, "height": 2.0}, 3.0),
         (sim_utils.MeshConeCfg, {"radius": 1.0, "height": 2.0}, 3.0),
         (sim_utils.MeshRectangleCfg, {"size": (1.0, 1.0)}, 3.0),
+        (sim_utils.MeshTubeCfg, {"radius": 1.0, "height": 2.0}, 3.0),
     ],
 )
 def test_spawn_mesh_with_edge_refinement(sim, monkeypatch, cfg_type, kwargs, edge_refinement):
@@ -203,6 +204,78 @@ def test_spawn_rectangle(sim, size):
     assert prim.GetPrimTypeInfo().GetTypeName() == "Mesh"
     assert len(prim.GetAttribute("points").Get()) == 4
     assert len(prim.GetAttribute("faceVertexCounts").Get()) == 2
+
+
+@pytest.mark.parametrize("cap_start,cap_end,num_poles", [(False, False, 0), (True, False, 1), (True, True, 2)])
+def test_spawn_tube(sim, cap_start, cap_end, num_poles):
+    """Test spawning of UsdGeomMesh as a hollow tube prim."""
+    num_segments = 16
+    radius, height = 0.5, 2.0
+    # Spawn tube
+    cfg = sim_utils.MeshTubeCfg(
+        radius=radius, height=height, num_segments=num_segments, cap_start=cap_start, cap_end=cap_end
+    )
+    prim = cfg.func("/World/Tube", cfg)
+
+    # Check validity
+    assert prim.IsValid()
+    assert sim.stage.GetPrimAtPath("/World/Tube").IsValid()
+    assert prim.GetPrimTypeInfo().GetTypeName() == "Xform"
+    # Check properties
+    prim = sim.stage.GetPrimAtPath("/World/Tube/geometry/mesh")
+    assert prim.GetPrimTypeInfo().GetTypeName() == "Mesh"
+    # the shell is a stack of equal rings, so only the caps break the segment count
+    points = np.asarray(prim.GetAttribute("points").Get())
+    assert (len(points) - num_poles) % num_segments == 0
+    assert set(prim.GetAttribute("faceVertexCounts").Get()) == {3}
+    # each cap extends the default Z axis by one radius, and neither touches the radial extent
+    extents = points.max(axis=0) - points.min(axis=0)
+    assert extents[2] == pytest.approx(height + num_poles * radius, rel=1e-3)
+    assert extents[0] == pytest.approx(2.0 * radius, rel=1e-3)
+
+
+def test_tube_resolution_follows_num_segments(sim, monkeypatch):
+    """Test that a slender tube is refined by its segment count rather than by edge refinement.
+
+    Edge refinement targets the bounding-box diagonal divided by the factor. For a slender tube that
+    target stays above the circumferential edge length, so the mesh comes out unchanged.
+    """
+    monkeypatch.setattr(mesh_spawner.schemas, "define_deformable_body_properties", lambda *a, **k: None)
+
+    def num_points(prim_path: str, num_segments: int, edge_refinement: float) -> int:
+        cfg = sim_utils.MeshTubeCfg(
+            radius=0.03,
+            height=0.15,
+            num_segments=num_segments,
+            cap_start=True,
+            edge_refinement=edge_refinement,
+            deformable_props=sim_utils.DeformableBodyPropertiesCfg(),
+            physics_material=sim_utils.PhysxSurfaceDeformableBodyMaterialCfg(),
+        )
+        cfg.func(prim_path, cfg)
+        return len(sim.stage.GetPrimAtPath(f"{prim_path}/geometry/mesh").GetAttribute("points").Get())
+
+    coarse = num_points("/World/TubeCoarse", 12, 1.0)
+    refined = num_points("/World/TubeRefined", 12, 8.0)
+    dense = num_points("/World/TubeDense", 24, 1.0)
+
+    assert refined == coarse
+    assert dense > coarse
+
+
+@pytest.mark.parametrize(
+    "kwargs,match",
+    [
+        ({"radius": 0.0, "height": 1.0}, "Tube radius must be positive"),
+        ({"radius": 1.0, "height": 0.0}, "Tube height must be positive"),
+        ({"radius": 1.0, "height": 1.0, "num_segments": 2}, "at least 3 circumferential segments"),
+    ],
+)
+def test_invalid_tube(sim, kwargs, match):
+    """Test spawning a tube with degenerate dimensions."""
+    cfg = sim_utils.MeshTubeCfg(**kwargs)
+    with pytest.raises(ValueError, match=match):
+        cfg.func("/World/InvalidTube", cfg)
 
 
 def test_invalid_edge_refinement(sim):

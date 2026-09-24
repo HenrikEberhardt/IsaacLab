@@ -10,6 +10,7 @@ __all__ = [
     "spawn_mesh_cylinder",
     "spawn_mesh_rectangle",
     "spawn_mesh_sphere",
+    "spawn_mesh_tube",
     "MeshCapsuleCfg",
     "MeshCfg",
     "MeshConeCfg",
@@ -17,6 +18,7 @@ __all__ = [
     "MeshCylinderCfg",
     "MeshRectangleCfg",
     "MeshSphereCfg",
+    "MeshTubeCfg",
 ]
 
 from .meshes import (
@@ -26,6 +28,7 @@ from .meshes import (
     spawn_mesh_cylinder,
     spawn_mesh_rectangle,
     spawn_mesh_sphere,
+    spawn_mesh_tube,
 )
 from .meshes_cfg import (
     MeshCapsuleCfg,
@@ -35,4 +38,5 @@ from .meshes_cfg import (
     MeshCylinderCfg,
     MeshRectangleCfg,
     MeshSphereCfg,
+    MeshTubeCfg,
 )
