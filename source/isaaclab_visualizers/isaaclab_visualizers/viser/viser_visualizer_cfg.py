@@ -26,7 +26,7 @@ class ViserVisualizerCfg(VisualizerCfg):
     visualizer_type: str = "viser"
     """Type identifier for Viser visualizer."""
 
-    port: int = 8750
+    port: int = 8080
     """Port of the local viser web server."""
 
     bind_address: str = "0.0.0.0"

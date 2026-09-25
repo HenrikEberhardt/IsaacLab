@@ -668,10 +668,8 @@ class FrankaSoftEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics = PhysicsCfg()
 
         #  visualizer settings
-        #self.viewer.eye = (1.2, -0.9, 0.9)
-        #self.viewer.lookat = (0.4, 0.0, 0.15)
-        self.viewer.eye = (2.0, 1.2, 1.0)
-        self.viewer.lookat = (0.0, 0.0, 0.0)
+        self.viewer.eye = (1.2, -0.9, 0.9)
+        self.viewer.lookat = (0.4, 0.0, 0.15)
 
         self.sim.default_visualizer_cfg = _FrankaSoftVisualizerCfg(
             eye=self.viewer.eye,
