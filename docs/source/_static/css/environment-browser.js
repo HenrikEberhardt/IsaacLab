@@ -93,6 +93,8 @@
             ["IsaacContrib-Lift-Cube-Franka-IK-Rel", "", "", "", "", "tasks/manipulation/franka_lift.jpg"],
             ["IsaacContrib-Lift-Cube-OpenArm", "rl_games,rsl_rl", "", "", "", "tasks/manipulation/openarm_uni_lift.jpg"],
             ["IsaacContrib-Lift-Sock-Franka", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "", "ik,joint"],
+            ["IsaacContrib-Lift-Sock-Franka-HeadCam", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "isaacsim_rtx,newton_renderer,ovrtx", "depth,ik,joint,rgb"],
+            ["IsaacContrib-Lift-Sock-Franka-WristCam", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "isaacsim_rtx,newton_renderer,ovrtx", "depth,ik,joint,rgb"],
             ["IsaacContrib-Multitask-Manipulation", "rsl_rl", "", "", "", "tasks/manipulation/multitask_manipulation.jpg"],
             ["IsaacContrib-Navigation-3DObstacles-ARL-Robot-1", "rl_games,rsl_rl,skrl", "", "", "", "tasks/drone_arl/arl_robot_1_navigation.jpg"],
             ["IsaacContrib-Navigation-Flat-AnymalC", "rsl_rl,skrl", "", "", "", "tasks/navigation/anymal_c_nav.jpg"],
