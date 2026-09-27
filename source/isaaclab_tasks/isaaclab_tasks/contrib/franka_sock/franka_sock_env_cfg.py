@@ -483,15 +483,17 @@ PANDA_HAND_PRIM_PATH = (
 WRIST_CAMERA_DEPTH_RANGE = (0.05, 1.0)
 HEAD_CAMERA_DEPTH_RANGE = (0.3, 2.0)
 
-# RealSense D405-like camera on the hand (7 cm off the gripper axis, 3 cm below the flang and pitched 25 deg toward the axis)
+# RealSense D405-like camera on the hand (7 cm off the gripper axis, 3 cm below the flange and pitched
+# 25 deg toward the axis)
 WRIST_CAMERA_CFG = CameraCfg(
     prim_path=f"{PANDA_HAND_PRIM_PATH}/WristCamera",
-    update_latest_camera_pose=True,  # the Newton Warp rendeer only moves camera prims when we update the attached camera
+    # the Newton Warp renderer only moves camera prims when we update the attached camera
+    update_latest_camera_pose=True,
     offset=CameraCfg.OffsetCfg(pos=(0.07, 0.0, 0.03), rot=(-0.15305, -0.15305, 0.69035, 0.69035), convention="ros"),
     data_types=["rgb", "distance_to_image_plane"],
     spawn=sim_utils.PinholeCameraCfg(
         focal_length=18.90, clipping_range=(0.01, 3.0)
-    ),  # camera parameters of theh RealSense
+    ),  # camera parameters of the RealSense
     width=128,  # default values for the image quality used in most papers
     height=128,
     renderer_cfg=MultiBackendRendererCfg(),
@@ -516,23 +518,26 @@ def _camera_video(
 ) -> list[VideoRecorderCfg]:
     """Return a video recorder for one data type of the first environment's camera."""
 
-    # Create a video recorder for the specified camera (wirst head) and data type (depth, rgb).
+    # Create a video recorder for the specified camera (wrist, head) and data type (depth, rgb).
     recorder = VideoRecorderCfg(
         source=f"sensor:{sensor_name}:{data_type}", output_filename_prefix=f"{sensor_name}_{data_type}"
     )
 
-    #Only depth camera has a depth field
+    # Only depth camera has a depth field
     if depth_range is not None:
         recorder.depth_colormap_min, recorder.depth_colormap_max = depth_range
     return [recorder]
 
 
 def _camera_streaming_viser_cfg(camera_cfg: CameraCfg, depth_range: tuple[float, float]) -> ViserVisualizerCfg:
-    """Return a Viser server that streams a camera's RGB and depth images for the first 16 environments to the 8751 port to avoid overlap with the default 8750 port."""
+    """Return a Viser server that streams a camera's RGB and depth images for the first 16 environments.
+
+    It serves on the 8751 port to avoid overlap with the default 8750 port.
+    """
     return ViserVisualizerCfg(
         port=8751,
         streaming_view=True,
-        streaming_sensor_prim_path=expand_env_regex_ns(camera_cfg.prim_path),  # stream wirst or head camera
+        streaming_sensor_prim_path=expand_env_regex_ns(camera_cfg.prim_path),  # stream wrist or head camera
         streaming_gt_types=("rgb", "depth"),
         streaming_envs=16,
         streaming_depth_min=depth_range[0],
@@ -540,6 +545,16 @@ def _camera_streaming_viser_cfg(camera_cfg: CameraCfg, depth_range: tuple[float,
         max_visible_envs=16,
         randomly_sample_visible_envs=False,  # stream the first 16 environments
     )
+
+
+def _camera_visualizer_cfgs(visualizer_cfgs: list, camera_cfg: CameraCfg, depth_range: tuple[float, float]) -> list:
+    """Return the task's visualizers without Kit plus the camera streaming Viser server.
+
+    Kit cannot share a process with OVRTX, and a Kit visualizer in the config starts Kit even with
+    ``--viz none``, so the camera tasks leave it out to run kitless.
+    """
+    kitless = [cfg for cfg in visualizer_cfgs if not isinstance(cfg, KitVisualizerCfg)]
+    return [*kitless, _camera_streaming_viser_cfg(camera_cfg, depth_range)]
 
 
 @configclass
@@ -627,7 +642,9 @@ class FrankaSockWristCameraEnvCfg(FrankaSockEnvCfg):
         super().__post_init__()
         # Warm up the RTX render product/annotator (Newton skips the PhysX assets_loading render loop).
         self.num_rerenders_on_reset = 2
-        self.sim.visualizer_cfgs.append(_camera_streaming_viser_cfg(WRIST_CAMERA_CFG, WRIST_CAMERA_DEPTH_RANGE))
+        self.sim.visualizer_cfgs = _camera_visualizer_cfgs(
+            self.sim.visualizer_cfgs, WRIST_CAMERA_CFG, WRIST_CAMERA_DEPTH_RANGE
+        )
 
 
 @configclass
@@ -641,4 +658,6 @@ class FrankaSockHeadCameraEnvCfg(FrankaSockEnvCfg):
         super().__post_init__()
         # Warm up the RTX render product/annotator (Newton skips the PhysX assets_loading render loop).
         self.num_rerenders_on_reset = 2
-        self.sim.visualizer_cfgs.append(_camera_streaming_viser_cfg(HEAD_CAMERA_CFG, HEAD_CAMERA_DEPTH_RANGE))
+        self.sim.visualizer_cfgs = _camera_visualizer_cfgs(
+            self.sim.visualizer_cfgs, HEAD_CAMERA_CFG, HEAD_CAMERA_DEPTH_RANGE
+        )

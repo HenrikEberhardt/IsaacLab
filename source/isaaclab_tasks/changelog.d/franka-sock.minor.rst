@@ -29,7 +29,9 @@ Added
   ``IsaacContrib-Lift-Sock-Franka`` plus one 128 x 128 RGB and depth camera for viewing and recording.
   The wrist camera models a RealSense D405 on the Franka hand and follows the hand every step. The head
   camera models a RealSense D455 fixed 0.8 m above the robot base and pitched down toward the table.
-  Both variants keep the state task's observations and agent, so its checkpoints still load.
+  Both variants keep the state task's observations and agent, so its checkpoints still load. They leave
+  out the state task's Kit visualizer, so they run without Kit on the Newton Warp and OVRTX
+  (``renderer=ovrtx``) renderers; ``renderer=isaacsim_rtx`` still starts Kit.
 * Added a second Viser server on port 8751 to both camera variants. It streams the camera's RGB and
   depth images. ``--video`` still records the viewport by default; pass ``env.video_recorders=rgb`` or
   ``env.video_recorders=depth`` to record the camera instead.
