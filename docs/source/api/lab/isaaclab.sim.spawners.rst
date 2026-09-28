@@ -118,6 +118,7 @@ Meshes
     MeshCylinderCfg
     MeshRectangleCfg
     MeshSphereCfg
+    MeshTubeCfg
 
 .. autoclass:: MeshCfg
     :members:
@@ -161,6 +162,13 @@ Meshes
 .. autofunction:: spawn_mesh_sphere
 
 .. autoclass:: MeshSphereCfg
+    :members:
+    :show-inheritance:
+    :exclude-members: __init__, func
+
+.. autofunction:: spawn_mesh_tube
+
+.. autoclass:: MeshTubeCfg
     :members:
     :show-inheritance:
     :exclude-members: __init__, func

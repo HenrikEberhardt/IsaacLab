@@ -310,9 +310,155 @@ def spawn_mesh_rectangle(
     return stage.GetPrimAtPath(prim_path)
 
 
+@clone
+def spawn_mesh_tube(
+    prim_path: str,
+    cfg: meshes_cfg.MeshTubeCfg,
+    translation: tuple[float, float, float] | None = None,
+    orientation: tuple[float, float, float, float] | None = None,
+    **kwargs,
+) -> Usd.Prim:
+    """Create a USD-Mesh hollow tube prim with the given attributes.
+
+    Unlike :meth:`spawn_mesh_cylinder`, the tube is an open-ended shell. Either end can be closed
+    with a hemispherical cap, which makes it suitable for sleeve-like surface deformables such as
+    socks, where one end is closed and the other stays open.
+
+    .. note::
+        This function is decorated with :func:`clone` that resolves prim path into list of paths
+        if the input prim path is a regex pattern. This is done to support spawning multiple assets
+        from a single and cloning the USD prim at the given path expression.
+
+    Args:
+        prim_path: The prim path or pattern to spawn the asset at. If the prim path is a regex pattern,
+            then the asset is spawned at all the matching prim paths.
+        cfg: The configuration instance.
+        translation: The translation to apply to the prim w.r.t. its parent prim. Defaults to None, in which case
+            this is set to the origin.
+        orientation: The orientation in (x, y, z, w) to apply to the prim w.r.t. its parent prim. Defaults to None,
+            in which case this is set to identity.
+        **kwargs: Additional keyword arguments, like ``clone_in_fabric``.
+
+    Returns:
+        The created prim.
+
+    Raises:
+        ValueError: If a prim already exists at the given path.
+        ValueError: If the radius or height is not positive, or the segment count is less than three.
+    """
+    # create the tube shell about the Z axis
+    tube = _tube_mesh(cfg.radius, cfg.height, cfg.num_segments, cfg.cap_start, cfg.cap_end)
+    # align axis from "Z" to input by rotating the tube
+    axis = cfg.axis.upper()
+    if axis == "X":
+        tube.apply_transform(trimesh.transformations.rotation_matrix(np.pi / 2, [0, 1, 0]))
+    elif axis == "Y":
+        tube.apply_transform(trimesh.transformations.rotation_matrix(-np.pi / 2, [1, 0, 0]))
+
+    # obtain stage handle
+    stage = get_current_stage()
+    # spawn the tube as a mesh
+    _spawn_mesh_geom_from_mesh(prim_path, cfg, tube, translation, orientation, None, stage=stage)
+    # return the prim
+    return stage.GetPrimAtPath(prim_path)
+
+
 """
 Helper functions.
 """
+
+
+def _tube_mesh(radius: float, height: float, num_segments: int, cap_start: bool, cap_end: bool) -> trimesh.Trimesh:
+    """Build a hollow tube shell about the Z axis, optionally capped with hemispheres.
+
+    The shell is a stack of rings of ``num_segments`` vertices each, ordered by increasing Z and
+    joined into quads. A cap collapses into a single pole vertex, so the caps reuse the quad
+    winding and add one triangle fan each. The ring closes on itself without a duplicated seam
+    vertex, which keeps the shell watertight along its length.
+
+    Axial and latitudinal resolution follow the circumferential edge length, so the triangles stay
+    near-equilateral and the mesh subdivides predictably.
+
+    Args:
+        radius: Radius of the tube [m].
+        height: Length of the cylindrical section, excluding the caps [m].
+        num_segments: Number of circumferential segments.
+        cap_start: Whether to close the negative-Z end with a hemisphere.
+        cap_end: Whether to close the positive-Z end with a hemisphere.
+
+    Returns:
+        The tube mesh, with outward-facing triangle windings.
+
+    Raises:
+        ValueError: If the radius or height is not positive, or the segment count is less than three.
+    """
+    if radius <= 0.0:
+        raise ValueError(f"Tube radius must be positive, got {radius}.")
+    if height <= 0.0:
+        raise ValueError(f"Tube height must be positive, got {height}.")
+    if num_segments < 3:
+        raise ValueError(f"Tube must have at least 3 circumferential segments, got {num_segments}.")
+
+    theta = np.linspace(0.0, 2.0 * np.pi, num_segments, endpoint=False)
+    cos_theta, sin_theta = np.cos(theta), np.sin(theta)
+    segment_length = 2.0 * np.pi * radius / num_segments
+
+    def ring(ring_radius: float, ring_z: float) -> np.ndarray:
+        return np.stack([ring_radius * cos_theta, ring_radius * sin_theta, np.full(num_segments, ring_z)], axis=1)
+
+    # hemisphere latitudes, excluding the pole and the equator: those are the pole vertex and the
+    # adjacent wall ring, which the caps share rather than duplicate
+    num_latitudes = max(1, int(np.ceil(0.5 * np.pi * radius / segment_length)))
+    latitudes = 0.5 * np.pi * np.arange(1, num_latitudes) / num_latitudes
+
+    rings = []
+    if cap_start:
+        # ordered pole-to-equator so Z increases, matching the wall
+        for phi in latitudes[::-1]:
+            rings.append(ring(radius * np.cos(phi), -0.5 * height - radius * np.sin(phi)))
+    num_rings = max(2, int(round(height / segment_length)) + 1)
+    for ring_z in np.linspace(-0.5 * height, 0.5 * height, num_rings):
+        rings.append(ring(radius, ring_z))
+    if cap_end:
+        for phi in latitudes:
+            rings.append(ring(radius * np.cos(phi), 0.5 * height + radius * np.sin(phi)))
+
+    vertices = [np.concatenate(rings, axis=0)]
+    faces = []
+
+    # quads between consecutive rings, split into outward-facing triangles
+    next_index = np.roll(np.arange(num_segments), -1)
+    for lower in range(len(rings) - 1):
+        lower_offset, upper_offset = lower * num_segments, (lower + 1) * num_segments
+        lower_j = lower_offset + np.arange(num_segments)
+        lower_next = lower_offset + next_index
+        upper_j = upper_offset + np.arange(num_segments)
+        upper_next = upper_offset + next_index
+        faces.append(np.stack([lower_j, lower_next, upper_next], axis=1))
+        faces.append(np.stack([lower_j, upper_next, upper_j], axis=1))
+
+    # each cap collapses into a pole vertex, degenerating one triangle of the quad into a fan
+    num_ring_vertices = len(rings) * num_segments
+    if cap_start:
+        pole = num_ring_vertices
+        vertices.append(np.array([[0.0, 0.0, -0.5 * height - radius]]))
+        faces.append(np.stack([np.full(num_segments, pole), next_index, np.arange(num_segments)], axis=1))
+    if cap_end:
+        pole = num_ring_vertices + (1 if cap_start else 0)
+        vertices.append(np.array([[0.0, 0.0, 0.5 * height + radius]]))
+        last_offset = num_ring_vertices - num_segments
+        faces.append(
+            np.stack(
+                [last_offset + np.arange(num_segments), last_offset + next_index, np.full(num_segments, pole)], axis=1
+            )
+        )
+
+    # process=False keeps the vertex order stable, which the nodal state of a deformable relies on
+    return trimesh.Trimesh(
+        vertices=np.concatenate(vertices, axis=0).astype(np.float32),
+        faces=np.concatenate(faces, axis=0),
+        process=False,
+    )
 
 
 def _refine_surface_mesh(mesh: trimesh.Trimesh, cfg: meshes_cfg.MeshCfg) -> trimesh.Trimesh:

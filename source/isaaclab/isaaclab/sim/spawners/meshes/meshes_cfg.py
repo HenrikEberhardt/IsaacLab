@@ -173,3 +173,38 @@ class MeshRectangleCfg(MeshCfg):
 
     size: tuple[float, float] = MISSING
     """Edge lengths of the rectangle along the X and Y axes [m]."""
+
+
+@configclass
+class MeshTubeCfg(MeshCfg):
+    """Configuration parameters for a hollow tube mesh prim.
+
+    Unlike :class:`MeshCylinderCfg`, which is a closed solid, this is an open-ended shell whose
+    ends can be capped independently. See :meth:`spawn_mesh_tube` for more information.
+    """
+
+    func: Callable | str = "{DIR}.meshes:spawn_mesh_tube"
+
+    radius: float = MISSING
+    """Radius of the tube [m]."""
+    height: float = MISSING
+    """Length of the cylindrical section, excluding the caps [m].
+
+    A cap extends the tube by :attr:`radius` beyond this length, as it does for
+    :class:`MeshCapsuleCfg`.
+    """
+    axis: Literal["X", "Y", "Z"] = "Z"
+    """Axis of the tube. Defaults to "Z"."""
+    num_segments: int = 16
+    """Number of circumferential segments. Defaults to 16.
+
+    This sets the resolution of the whole shell, since the axial and latitudinal spacing follow the
+    circumferential edge length. For a slender tube, :attr:`~MeshCfg.edge_refinement` is usually
+    ineffective, because the bounding-box diagonal it divides is already close to the tube length
+    while the circumferential edges are much shorter. Prefer this parameter, and note that a
+    volume deformable still needs :attr:`~MeshCfg.edge_refinement` for tetrahedralization.
+    """
+    cap_start: bool = False
+    """Whether to close the negative-axis end with a hemisphere. Defaults to False."""
+    cap_end: bool = False
+    """Whether to close the positive-axis end with a hemisphere. Defaults to False."""
