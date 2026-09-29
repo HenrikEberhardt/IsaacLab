@@ -16,7 +16,9 @@ from isaaclab_newton.physics import (
     NewtonSoftContactCfg,
     VBDSolverCfg,
 )
+from isaaclab_newton.sim.schemas import MujocoJointCfg
 from isaaclab_physx.physics import PhysxCfg
+from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 
 import isaaclab.sim as sim_utils
 from isaaclab.assets import RigidObjectCfg
@@ -56,15 +58,20 @@ if TYPE_CHECKING:
 # Cloth and cube geometry
 ##
 
-# center of the cloth and the cube on the table, where the sock spawns [m]
-CLOTH_CENTER_XY = (0.45, 0.0)
+# center of the cloth and the cube on the table [m]; 15 cm farther out than the sock, so the arm reaches the
+# crease near the robot without folding up against its joint limits
+CLOTH_CENTER_XY = (0.60, 0.0)
 CLOTH_SIZE = (0.30, 0.30)
 
 # Edge refinement is how many particles along the longest edge (diagonal) => (edge_refinement + 1)^2.
-CLOTH_EDGE_REFINEMENT =30.0
+CLOTH_EDGE_REFINEMENT = 30.0
 CLOTH_SPAWN_HEIGHT = 0.004
-# crease across the near-left corner (-x toward the robot, +y), center ed at 6.5 cm from the corner
-CLOTH_CREASE_CFG = {"ridge_corner": (-1.0, 1.0), "ridge_height": 0.03, "ridge_width": 0.04, "ridge_distance": 0.065}
+# crease across the near-right corner (-x toward the robot, -y to its right), centered 6.5 cm from the corner,
+# so pulling the crease to the robot's right drags the sheet away from the corner
+CLOTH_CREASE_CFG = {"ridge_corner": (-1.0, -1.0), "ridge_height": 0.03, "ridge_width": 0.04, "ridge_distance": 0.065}
+# opening of each finger when the IK gripper closes [m]: a pinched fold of the crease is about 1.5 cm wide, so the
+# fingers close onto the fold without pushing through it
+GRIPPER_CLOSED_OPENING = 0.007
 
 # edge length of the cube [m]
 CUBE_SIZE = 0.05
@@ -90,7 +97,9 @@ class _ClothCubeVBDSolverCfg(VBDSolverCfg):
     """VBD solver configuration that also integrates the free cube as a rigid body."""
 
     rigid_compliant_alm: bool = True
-    """Whether VBD uses the compliant augmented Lagrangian formulation for rigid bodies. Newton recommends it over the deprecated legacy AVBD path, which is used when the flag is omitted.
+    """Whether VBD uses the compliant augmented Lagrangian formulation for rigid bodies.
+
+    Newton recommends it over the deprecated legacy AVBD path, which is used when the flag is omitted.
     """
 
 
@@ -213,6 +222,13 @@ class FrankaNonpClothSceneCfg(FrankaSockSceneCfg):
         spawn=CUBE_SPAWN_CFG,
     )
 
+    def __post_init__(self) -> None:
+        super().__post_init__()
+
+        # MuJoCo ignores the inherited ``disable_gravity``, so the low-PD arm sagged about 4 cm below its
+        # IK targets under full gravity; compensate gravity through the actuators instead, as a real Franka does
+        self.robot.spawn.joint_drive_props = [MujocoJointCfg(actuatorgravcomp=True)]
+
 
 @configclass
 class FrankaNonpClothScenePresetCfg(PresetCfg):
@@ -273,6 +289,16 @@ class FrankaNonpClothEnvCfg(FrankaSockEnvCfg):
 
         # cloth and cube physics presets, see :class:`PhysicsCfg`
         self.sim.physics = PhysicsCfg()
+        # Close the gripper onto the crease's fold: the shared soft-lift default (0.01 m per finger) stays clear of
+        # it, and closing fully pushes the fingers through the cloth once they stop colliding with a held cloth.
+        self.actions.ik.gripper_action.close_command_expr = {"panda_finger_joint1": GRIPPER_CLOSED_OPENING}
+
+        # Visualizers requested with --viz that the sock's visualizer list does not configure, such as the OVRTX
+        # newton_rtx, take their camera from the default visualizer config; give it the sock's view, so videos
+        # show the same view whichever visualizer records them.
+        sock_view = next(cfg for cfg in self.sim.visualizer_cfgs if isinstance(cfg, NewtonGLVisualizerCfg))
+        for name in ("eye", "lookat", "focal_length", "max_visible_envs", "randomly_sample_visible_envs"):
+            setattr(self.sim.default_visualizer_cfg, name, getattr(sock_view, name))
 
 
 ##

@@ -26,12 +26,15 @@ def reset_deformable_with_object(
     object_cfg: SceneEntityCfg,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
 ) -> None:
-    """Reset a deformable object and a rigid object resting on it by one shared random offset. => box is placed with same offset on the cloth
+    """Reset a deformable object and a rigid object resting on it by one shared random offset.
+
+    => box is placed with same offset on the cloth
 
     Args:
         env: The environment instance.
         env_ids: The environment indices to reset.
-        position_range: Shared displacement bounds [m] keyed by ``x``, ``y``, ``z``. Missing keys => defaults to no displacement.
+        position_range: Shared displacement bounds [m] keyed by ``x``, ``y``, ``z``. Missing keys => defaults to
+            no displacement.
         object_cfg: Scene entity of the rigid object that moves with the deformable.
         asset_cfg: Scene entity of the deformable object to reset.
     """

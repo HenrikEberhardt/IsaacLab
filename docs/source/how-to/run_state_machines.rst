@@ -36,6 +36,19 @@ Newton visualizer opens by default:
    uv run --extra tetrahedralization python scripts/environments/state_machine/lift_franka_soft.py \
       --num_envs 1
 
+Drag a creased cloth
+--------------------
+
+This example uses the Newton backend to pinch the crease of ``IsaacContrib-Franka-nonp-cloth``, drag the
+cloth and the cube resting on it to a random point on a line in front of the robot, and release it. By
+default, position-level constraints lock the grasped cloth vertices to the gripper; pass
+``--grasp_mode friction`` to hold the cloth with the closed gripper and friction alone:
+
+.. code-block:: bash
+
+   uv run python scripts/environments/state_machine/franka_nonp_cloth_sm.py \
+      --num_envs 4
+
 Open a cabinet drawer
 ---------------------
 

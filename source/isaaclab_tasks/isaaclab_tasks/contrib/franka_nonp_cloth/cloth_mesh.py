@@ -86,7 +86,8 @@ def spawn_creased_mesh_rectangle(
 ) -> Usd.Prim:
     """Spawn a rectangle mesh that carries a ridge across one corner in its rest shape.
 
-    The rectangle is refined as for :class:`~isaaclab.sim.MeshRectangleCfg`, and its vertices are then raised with :func:`corner_ridge_positions`.
+    The rectangle is refined as for :class:`~isaaclab.sim.MeshRectangleCfg`, and its vertices are then raised
+    with :func:`corner_ridge_positions`.
 
     Returns:
         The created prim.
