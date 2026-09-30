@@ -19,7 +19,7 @@ from . import agents
 
 gym.register(
     id="IsaacContrib-Franka-nonp-cloth",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.franka_nonp_cloth_env:FrankaNonpClothEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.franka_nonp_cloth_env_cfg:FrankaNonpClothEnvCfg",
@@ -30,7 +30,7 @@ gym.register(
 
 gym.register(
     id="IsaacContrib-Franka-nonp-cloth-WristCam",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.franka_nonp_cloth_env:FrankaNonpClothEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.franka_nonp_cloth_env_cfg:FrankaNonpClothWristCameraEnvCfg",
@@ -41,7 +41,7 @@ gym.register(
 
 gym.register(
     id="IsaacContrib-Franka-nonp-cloth-HeadCam",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point=f"{__name__}.franka_nonp_cloth_env:FrankaNonpClothEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.franka_nonp_cloth_env_cfg:FrankaNonpClothHeadCameraEnvCfg",

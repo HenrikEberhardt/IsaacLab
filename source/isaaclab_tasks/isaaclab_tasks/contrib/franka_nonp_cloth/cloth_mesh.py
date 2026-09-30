@@ -76,6 +76,20 @@ def corner_ridge_positions(
     return wrinkled
 
 
+def crease_node_mask(nodes: torch.Tensor, crest_band: float) -> torch.Tensor:
+    """Select the nodes on the crest of a creased sheet: those within ``crest_band`` of its highest node.
+
+    Args:
+        nodes: Node positions [m], shape [..., N, 3].
+        crest_band: Height below the highest node that still counts as crest [m].
+
+    Returns:
+        Whether each node lies on the crest, shape [..., N].
+    """
+    height = nodes[..., 2]
+    return height >= height.amax(dim=-1, keepdim=True) - crest_band
+
+
 @sim_utils.clone
 def spawn_creased_mesh_rectangle(
     prim_path: str,

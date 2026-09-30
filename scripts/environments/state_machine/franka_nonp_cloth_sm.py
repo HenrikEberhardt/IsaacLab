@@ -7,12 +7,13 @@
 Script to drag a creased cloth, and the cube resting on it, with a robotic arm.
 
 The state machine hovers above the crease of the ``IsaacContrib-Franka-nonp-cloth`` sheet, descends with an
-open gripper, pinches the crease, drags it to a target point, and releases it. Each episode draws the target
-at random on a line in front of the robot base. The state machine is implemented in the kernel function
-`infer_state_machine`, which uses the `warp` library to run all environments in parallel on the GPU.
+open gripper, pinches the crease, drags it to a target point, and releases it. The target is the task's drag
+command, which each episode draws at random on a line in front of the robot base. The state machine is
+implemented in the kernel function `infer_state_machine`, which uses the `warp` library to run all environments in
+parallel on the GPU.
 
 By default, the gripper holds the cloth with position-level bilateral constraints, as in the FLASH cloth
-gripping model: once the fingers close, every cloth vertex within :data:`GRASP_PROXIMITY` of the middle or the
+gripping model: once the fingers close, every cloth vertex within 1.5 cm of the middle or the
 tip of a finger is locked to the gripper by the equality constraint ``x_i - p_grip,i(t) = 0``, a zero-length
 rigid link to the gripper point where the vertex was grasped, and is released again when the gripper opens.
 With grasped vertices spread along both fingers, the cloth cannot rotate about the grasp. While the constraint
@@ -46,6 +47,9 @@ from isaaclab.envs import mdp
 from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
 
 import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.contrib.franka_nonp_cloth.cloth_mesh import crease_node_mask
+from isaaclab_tasks.contrib.franka_nonp_cloth.franka_nonp_cloth_env_cfg import IK_DAMPING
+from isaaclab_tasks.contrib.franka_nonp_cloth.mdp import GripperConstraint
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
 # add argparse arguments
@@ -79,14 +83,6 @@ sys.argv = [sys.argv[0]] + hydra_args
 # initialize warp
 wp.init()
 
-# Drag targets are drawn uniformly on this line in front of the robot base, which the gripper reaches over its
-# whole width at table height. The line lies closer to the robot than any crease, so every drag pulls the sheet
-# toward the robot instead of folding it over itself [m].
-TARGET_LINE_X = 0.35
-TARGET_LINE_Y = (-0.30, 0.30)
-# Damping of the differential IK. The task's IK preset (0.6) settles too slowly for the low-PD Franka to reach
-# down onto the crease.
-IK_DAMPING = 0.1
 # height of the approach pose above the crease, and of the retreat pose above the release pose [m]
 HOVER_HEIGHT = 0.10
 # depth of the grasp point below the crest, so the finger pads straddle the fold [m]
@@ -95,12 +91,6 @@ GRASP_DEPTH = 0.012
 DRAG_LIFT = 0.01
 # cloth nodes within this height of the highest node form the crest of the crease [m]
 CREST_BAND = 0.005
-# Gripper anchors along each finger, as offsets from the fingertip point (0.1034 m below the hand) toward the
-# fingertips [m]. A Franka finger runs from its joint 0.0584 m below the hand to its tip at about 0.112 m, so
-# its middle lies 1.8 cm above the fingertip point and its tip 0.7 cm below it.
-FINGER_ANCHOR_DEPTHS = {"middle": -0.018, "tip": 0.007}
-# cloth vertices within this distance of a gripper anchor are grasped when the gripper closes [m]
-GRASP_PROXIMITY = 0.015
 # height above the grasp at which the retreating gripper collides with the cloth again [m]
 CONTACT_CLEARANCE = 0.05
 
@@ -304,7 +294,6 @@ class DragClothSm:
         self.gripper_close_opening = torch.full((self.num_envs,), gripper_close_opening, device=self.device)
         # drag target of each episode, in the robot base frame [m]
         self.drag_target = torch.zeros((self.num_envs, 3), device=self.device)
-        self.sample_drag_targets()
 
         # convert to warp
         self.sm_dt_wp = wp.from_torch(self.sm_dt, wp.float32)
@@ -315,26 +304,18 @@ class DragClothSm:
         self.gripper_close_opening_wp = wp.from_torch(self.gripper_close_opening, wp.float32)
         self.drag_target_wp = wp.from_torch(self.drag_target, wp.vec3)
 
-    def sample_drag_targets(self, env_ids: Sequence[int] | None = None):
-        """Draw new drag targets uniformly on the target line."""
-        if env_ids is None:
-            env_ids = slice(None)
-        num_targets = self.drag_target[env_ids].shape[0]
-        self.drag_target[env_ids, 0] = TARGET_LINE_X
-        self.drag_target[env_ids, 1] = math_utils.sample_uniform(*TARGET_LINE_Y, (num_targets,), device=self.device)
-
     def hold_gripper(self, env_ids: Sequence[int], opening: torch.Tensor):
         """Keep the closed gripper at the given finger opening [m] until the next reset."""
         self.gripper_close_opening[env_ids] = opening
 
-    def reset_idx(self, env_ids: Sequence[int] = None):
-        """Reset the state machine and draw new drag targets."""
+    def reset_idx(self, env_ids: Sequence[int] | None, drag_target: torch.Tensor):
+        """Reset the state machine and set the new drag targets, in the robot base frame [m], shape [E, 3]."""
         if env_ids is None:
             env_ids = slice(None)
         self.sm_state[env_ids] = 0
         self.sm_wait_time[env_ids] = 0.0
         self.gripper_close_opening[env_ids] = self.default_gripper_close_opening
-        self.sample_drag_targets(env_ids)
+        self.drag_target[env_ids] = drag_target
 
     def compute(self, ee_pose: torch.Tensor, grasp_pose: torch.Tensor) -> torch.Tensor:
         """Compute the desired state of the robot's end-effector and the gripper."""
@@ -385,9 +366,8 @@ def crease_grasp_pose(nodes: torch.Tensor, top_down_quat: torch.Tensor) -> torch
     Returns:
         The grasp pose (position [m] and quaternion (x, y, z, w)) in the robot base frame, shape [N, 7].
     """
-    height = nodes[..., 2]
-    crest_height = height.amax(dim=1)
-    crest = (height >= crest_height.unsqueeze(1) - CREST_BAND).unsqueeze(-1)
+    crest_height = nodes[..., 2].amax(dim=1)
+    crest = crease_node_mask(nodes, CREST_BAND).unsqueeze(-1)
     crest_xy = (nodes[..., :2] * crest).sum(dim=1) / crest.sum(dim=1)
     across = crest_xy - nodes[..., :2].mean(dim=1)
     # the top-down orientation closes the fingers along world -y; yaw that axis onto the crease normal
@@ -398,148 +378,6 @@ def crease_grasp_pose(nodes: torch.Tensor, top_down_quat: torch.Tensor) -> torch
     quat = math_utils.quat_mul(math_utils.quat_from_euler_xyz(zeros, zeros, yaw), top_down_quat.expand(len(yaw), 4))
     position = torch.cat([crest_xy, (crest_height - GRASP_DEPTH).unsqueeze(-1)], dim=-1)
     return torch.cat([position, quat], dim=-1)
-
-
-class GripperConstraint:
-    """Lock grasped cloth vertices to the gripper with position-level bilateral constraints.
-
-    This follows the cloth gripping model of FLASH. When the gripper closes, every cloth vertex within
-    :attr:`proximity` of one of the gripper's anchors joins the grasped set. While the constraint is active, each
-    grasped vertex is driven as a kinematic node at the gripper point where it was grasped, which enforces the
-    equality constraint ``x_i - p_grip,i(t) = 0``, a zero-length rigid link. Opening the gripper deactivates the
-    constraint and returns the vertices to the cloth's internal elastic forces and gravity.
-
-    The gripper points move rigidly with the hand. Locking each vertex to its own grasp point, instead of pulling
-    all grasped vertices onto the anchors themselves, keeps the grasped patch intact: collapsing up to 1.5 cm of
-    cloth onto a few points degenerates its triangles, and VBD's elastic forces then blow up.
-
-    While the constraint is active, the gripper stops colliding with the cloth in that environment, as the
-    virtual gripper of FLASH does: the constraint is then its whole interaction with the grasped cloth. The
-    fingers would otherwise press against the immovable locked vertices, and that contact destabilizes the
-    coupling between the robot and the cloth solver. The state machine holds the fingers at the opening they closed
-    to on the fold, so they keep resting on it instead of closing through it. The gripper collides with the cloth
-    again only once :meth:`restore_contacts` is called after it has left the cloth; turning the contacts on with the
-    fingers inside the cloth blows up the coupling the same way.
-
-    Each finger carries one anchor per entry of :data:`FINGER_ANCHOR_DEPTHS`, at its middle and at its tip, on the
-    inner pad surface, so the grasped vertices are the cloth pinched against the pads along both fingers and the
-    grasped cloth cannot rotate about the grasp.
-
-    When the constraint is disabled, the grasped set is still recorded, to report how far the cloth slips in a
-    friction-only grasp.
-    """
-
-    def __init__(self, env, enabled: bool, particle_radius: float, proximity: float = GRASP_PROXIMITY):
-        """Initialize the constraint.
-
-        Args:
-            env: The unwrapped environment.
-            enabled: Whether to enforce the constraint on the grasped vertices.
-            particle_radius: Collision radius of the cloth vertices [m].
-            proximity: Distance from an anchor within which a vertex is grasped [m].
-        """
-        self.enabled = enabled
-        self.proximity = proximity
-        self.particle_radius = particle_radius
-        # the Newton coupler manager of the task can switch the gripper's cloth contacts per environment
-        self._set_gripper_contacts = getattr(env.sim.physics_manager, "set_proxy_particle_contacts", None)
-        self._robot = env.scene["robot"]
-        self._cloth = env.scene["deformable"]
-        self._finger_ids, _ = self._robot.find_bodies(["panda_leftfinger", "panda_rightfinger"], preserve_order=True)
-        self._finger_joint_ids, _ = self._robot.find_joints(
-            ["panda_finger_joint1", "panda_finger_joint2"], preserve_order=True
-        )
-        self._hand_id = self._robot.find_bodies("panda_hand")[0][0]
-
-        num_envs, device = env.num_envs, env.device
-        # one anchor per finger and depth: left middle, left tip, right middle, right tip
-        depths = torch.tensor(list(FINGER_ANCHOR_DEPTHS.values()), device=device)
-        self.anchor_finger = torch.arange(2, device=device).repeat_interleave(len(depths))
-        self.anchor_depth = depths.repeat(2)
-        num_vertices = self._cloth.max_sim_vertices_per_body
-        # grasp point of each vertex in the hand frame [m]
-        self.grasp_offsets = torch.zeros((num_envs, num_vertices, 3), device=device)
-        self.grasped = torch.zeros((num_envs, num_vertices), dtype=torch.bool, device=device)
-        self.grasp_vertex_pos = torch.zeros((num_envs, num_vertices, 3), device=device)
-        self.active = torch.zeros(num_envs, dtype=torch.bool, device=device)
-        self.contacts_disabled = torch.zeros(num_envs, dtype=torch.bool, device=device)
-
-    def activate(self, env_ids: torch.Tensor, tcp_pos_w: torch.Tensor):
-        """Grasp the cloth vertices near the gripper anchors.
-
-        Args:
-            env_ids: Environments that just closed the gripper.
-            tcp_pos_w: World position of the fingertip point between the fingers [m], shape [E, 3].
-        """
-        hand = self._robot.data.body_link_pose_w.torch[env_ids, self._hand_id]
-        hand_pos, hand_quat = hand[:, :3], hand[:, 3:7]
-        # the fingers close along the hand's y axis and point along its z axis
-        hand_axes = torch.eye(3, device=hand.device)
-        closing_axis = math_utils.quat_apply(hand_quat, hand_axes[1].expand_as(tcp_pos_w))
-        approach_axis = math_utils.quat_apply(hand_quat, hand_axes[2].expand_as(tcp_pos_w))
-        # each finger's inner pad surface lies its joint opening away from the fingertip point, on its side
-        finger_pos = self._robot.data.body_link_pose_w.torch[env_ids][:, self._finger_ids, :3]
-        side = torch.sign(((finger_pos - tcp_pos_w.unsqueeze(1)) * closing_axis.unsqueeze(1)).sum(dim=-1))
-        opening = self._robot.data.joint_pos.torch[env_ids][:, self._finger_joint_ids]
-        lateral = side * (opening - self.particle_radius).clamp_min(0.0)
-        anchors = (
-            tcp_pos_w.unsqueeze(1)
-            + lateral[:, self.anchor_finger].unsqueeze(-1) * closing_axis.unsqueeze(1)
-            + self.anchor_depth.view(1, -1, 1) * approach_axis.unsqueeze(1)
-        )
-
-        # grasp every vertex within the proximity threshold of an anchor, at its current position on the gripper
-        vertices = self._cloth.data.nodal_pos_w.torch[env_ids]
-        distance = (vertices.unsqueeze(1) - anchors.unsqueeze(2)).norm(dim=-1).amin(dim=1)
-        num_vertices = vertices.shape[1]
-        self.grasped[env_ids] = distance <= self.proximity
-        self.grasp_offsets[env_ids] = math_utils.quat_apply_inverse(
-            hand_quat.unsqueeze(1).expand(-1, num_vertices, -1), vertices - hand_pos.unsqueeze(1)
-        )
-        self.grasp_vertex_pos[env_ids] = vertices
-        self.active[env_ids] = True
-        if self.enabled and self._set_gripper_contacts is not None:
-            self._set_gripper_contacts(env_ids.tolist(), enabled=False)
-            self.contacts_disabled[env_ids] = True
-
-    def deactivate(self, env_ids: torch.Tensor):
-        """Release the grasped vertices of the given environments.
-
-        The gripper keeps passing through the cloth until :meth:`restore_contacts` is called.
-        """
-        self.active[env_ids] = False
-
-    def restore_contacts(self, env_ids: torch.Tensor):
-        """Let the gripper collide with the cloth again, once it has left the cloth."""
-        env_ids = env_ids[self.contacts_disabled[env_ids]]
-        if len(env_ids) > 0 and self._set_gripper_contacts is not None:
-            self._set_gripper_contacts(env_ids.tolist(), enabled=True)
-            self.contacts_disabled[env_ids] = False
-
-    def grasp_points(self, env_ids: torch.Tensor) -> torch.Tensor:
-        """Return the current world position of each vertex's grasp point on the gripper [m], shape [E, P, 3]."""
-        hand = self._robot.data.body_link_pose_w.torch[env_ids, self._hand_id]
-        num_vertices = self.grasp_offsets.shape[1]
-        hand_quat = hand[:, 3:7].unsqueeze(1).expand(-1, num_vertices, -1)
-        return hand[:, :3].unsqueeze(1) + math_utils.quat_apply(hand_quat, self.grasp_offsets[env_ids])
-
-    def slip(self, env_ids: torch.Tensor) -> torch.Tensor:
-        """Return the mean distance of the grasped vertices from their grasp points [m], shape [E]."""
-        grasped = self.grasped[env_ids]
-        vertices = self._cloth.data.nodal_pos_w.torch[env_ids]
-        distance = (vertices - self.grasp_points(env_ids)).norm(dim=-1)
-        return (distance * grasped).sum(dim=1) / grasped.sum(dim=1).clamp_min(1)
-
-    def kinematic_targets(self) -> torch.Tensor:
-        """Return nodal kinematic targets that lock the grasped vertices to the gripper, shape [N, P, 4]."""
-        vertices = self._cloth.data.nodal_pos_w.torch
-        targets = torch.cat([vertices, torch.ones_like(vertices[..., :1])], dim=-1)
-        locked = self.grasped & self.active.unsqueeze(1)
-        if locked.any():
-            env_ids = torch.arange(vertices.shape[0], device=vertices.device)
-            targets[..., :3] = torch.where(locked.unsqueeze(-1), self.grasp_points(env_ids), vertices)
-            targets[..., 3] = torch.where(locked, 0.0, 1.0)
-        return targets
 
 
 def main():
@@ -555,11 +393,17 @@ def main():
     for term_name in list(vars(env_cfg.terminations)):
         if term_name != "time_out":
             setattr(env_cfg.terminations, term_name, None)
-    # simulate full gravity from the start instead of the training curriculum's ramp from zero
-    env_cfg.curriculum.gravity = None
+    # No rewards or curricula: the task's rewards read its cloth grasp action, which the state machine replaces, and
+    # the curricula depend on them. Without them the simulation keeps full gravity and full-length drags.
+    for group in (env_cfg.rewards, env_cfg.curriculum):
+        for term_name in list(vars(group)):
+            setattr(group, term_name, None)
+    env_cfg.commands.deformable_pose.drag_fraction = 1.0
     # the state machine emits absolute end-effector poses, so pick the task's own IK action preset
     env_cfg.actions = type(env_cfg)().actions.ik
     env_cfg.actions.arm_action.controller.ik_params = {"lambda_val": IK_DAMPING}
+    # the state machine grasps the cloth itself, so drop the observation of the task's cloth grasp action
+    env_cfg.observations.policy.grasp_state = None
     # Command the finger opening directly instead of the preset's open/close switch, so the gripper can hold the
     # opening at which it closed on the cloth. The task's IK preset sets the open and closed openings; a friction
     # grasp closes fully instead, since it needs the fingers to squeeze the fold.
@@ -639,6 +483,9 @@ def main():
         finger_joint_id = robot.find_joints("panda_finger_joint1")[0][0]
         ee_frame_sensor = unwrapped.scene["ee_frame"]
         cube_grasp_pos = torch.zeros((unwrapped.num_envs, 3), device=device)
+        # drag to the task's target, which its markers show
+        drag_command = unwrapped.command_manager.get_term("deformable_pose")
+        drag_sm.reset_idx(None, drag_command.command[:, :3])
 
         for _ in range(args_cli.num_steps):
             # run everything in inference mode
@@ -650,7 +497,7 @@ def main():
                 # reset state machine and release the cloth of reset environments
                 if dones.any():
                     done_ids = dones.nonzero(as_tuple=False).squeeze(-1)
-                    drag_sm.reset_idx(done_ids)
+                    drag_sm.reset_idx(done_ids, drag_command.command[done_ids, :3])
                     constraint.deactivate(done_ids)
                     # the reset moves the arm away from the cloth
                     constraint.restore_contacts(done_ids)

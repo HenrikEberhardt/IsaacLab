@@ -7,7 +7,7 @@
 
 import torch
 
-from isaaclab_tasks.contrib.franka_nonp_cloth.cloth_mesh import corner_ridge_positions
+from isaaclab_tasks.contrib.franka_nonp_cloth.cloth_mesh import corner_ridge_positions, crease_node_mask
 
 # flat 0.40 m x 0.30 m sheet on a 1 mm grid, centered away from the origin
 _SIZE = (0.40, 0.30)
@@ -82,3 +82,22 @@ def test_ridge_peak_height_and_location():
     t_wrinkled, corner_dist = _diagonal_coordinate(wrinkled, inputs["corner_signs"])
     peak_t = t_wrinkled.gather(-1, peak.unsqueeze(-1)).squeeze(-1)
     torch.testing.assert_close(peak_t, corner_dist - inputs["distance"], rtol=0.0, atol=2 * _SPACING)
+
+
+def test_crease_node_mask_selects_ridge_crest():
+    """The crest nodes form a band along the ridge top, centered at the requested distance from the corner."""
+    inputs = _ridge_inputs()
+    crest_band = 0.005
+    flat, _, _ = _flat_sheet(2)
+    wrinkled = corner_ridge_positions(flat, **inputs)
+    crest = crease_node_mask(wrinkled, crest_band)
+
+    t, corner_dist = _diagonal_coordinate(wrinkled, inputs["corner_signs"])
+    ridge_center = (corner_dist - inputs["distance"]).unsqueeze(-1)
+    # the sin^2 bump rises above height - crest_band over this half-width of its footprint
+    half_width = inputs["width"] * torch.asin((crest_band / inputs["height"]).sqrt()) / torch.pi
+    offset = (t - ridge_center).abs()
+    for env in range(2):
+        assert crest[env].sum() > 10
+        assert offset[env][crest[env]].max() <= half_width[env] + _SPACING
+        torch.testing.assert_close(t[env][crest[env]].mean(), ridge_center[env, 0], rtol=0.0, atol=_SPACING)
