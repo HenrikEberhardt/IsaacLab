@@ -1,0 +1,360 @@
+--- git commit ---
+8c70c2b6b4737695e0ab92e4b37b4c55848be69a
+
+
+--- git status ---
+On branch franka_sock
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   source/isaaclab_tasks/changelog.d/franka-sock.minor.rst
+	modified:   source/isaaclab_tasks/isaaclab_tasks/contrib/franka_sock/franka_sock_env_cfg.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	source/isaaclab_visualizers/changelog.d/
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/source/isaaclab_tasks/changelog.d/franka-sock.minor.rst b/source/isaaclab_tasks/changelog.d/franka-sock.minor.rst
+index c75bc345a..c540817d3 100644
+--- a/source/isaaclab_tasks/changelog.d/franka-sock.minor.rst
++++ b/source/isaaclab_tasks/changelog.d/franka-sock.minor.rst
+@@ -5,3 +5,23 @@ Added
+   modelled as a surface deformable tube with a closed toe and an open cuff. The task reuses the
+   observations, actions, commands, terminations, and curriculum of ``Isaac-Lift-Cloth-Franka``, and
+   drops that task's support rails because the tube keeps a graspable cross-section on its own.
++
++Changed
++^^^^^^^
++
++* Improved the rendering of ``IsaacContrib-Lift-Sock-Franka``:
++
++  * The divider walls now span from the floor to 1 m above the table (previously just the 0.6 m
++    above the table top), and each environment draws a different NVIDIA Nucleus MDL material on
++    its walls through heterogeneous cloning, rather than the Replicator-based texture-randomization
++    events, which require ``replicate_physics=False`` and are unsupported on the Newton backend
++    this task defaults to.
++  * The table and ground now show PBR materials (wood and polished concrete) instead of being
++    invisible/checker-textured; success is now shown by a small marker disc on a table corner
++    instead of tinting the whole table, since the table is no longer invisible.
++  * Added a directional light alongside the existing dome light, and switched the dome light to a
++    partly-cloudy sky, for more defined shadows.
++  * The sock's bending stiffness (``edge_ke``) is reduced from 30 to 2 so it drapes and folds like
++    fabric instead of holding a rigid tube shape, with the mesh resolution raised from 20 to 28
++    segments to keep the folds smooth. ``SOCK_RESTING_HEIGHT`` (and the reward's lift threshold
++    derived from it) is updated to match the flatter settled shape this produces.
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_sock/franka_sock_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_sock/franka_sock_env_cfg.py
+index b1f658afb..d0827070c 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_sock/franka_sock_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_sock/franka_sock_env_cfg.py
+@@ -10,6 +10,11 @@ only structural difference from ``Isaac-Lift-Cloth-Franka``. Because the tube ho
+ the gripper can pinch its wall directly and the cloth task's support rails are not needed, so the
+ reset event, observations, actions, commands, terminations, and curriculum are all inherited
+ unchanged.
++
++The scene also carries this task's own visuals, layered on top of the inherited soft-lift scene: PBR
++materials on the table, ground, and sock; floor-to-ceiling divider walls with a different material
++drawn per environment (see :class:`FrankaSockSceneCfg`); and a directional light added to the
++inherited dome light.
+ """
+ 
+ from __future__ import annotations
+@@ -30,17 +35,20 @@ from isaaclab_physx.sim.spawners.materials import PhysxSurfaceDeformableBodyMate
+ import isaaclab.sim as sim_utils
+ from isaaclab.assets import AssetBaseCfg
+ from isaaclab.assets.deformable_object import DeformableObjectCfg
++
++# New libraries to import textures from NVIDIA_NUCLEUS_DIR and cloner for random environments
++from isaaclab.cloner import random as random_clone_strategy
+ from isaaclab.managers import RewardTermCfg as RewTerm
+ from isaaclab.managers import SceneEntityCfg
+ from isaaclab.markers import VisualizationMarkersCfg
+ from isaaclab.physics import PhysxAutoCfg
+ from isaaclab.utils import configclass
++from isaaclab.utils.assets import NVIDIA_NUCLEUS_DIR
+ 
+ from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyCfg, CouplerProxyMappingCfg
+ 
+ from isaaclab_tasks.core.lift import mdp
+ from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import (
+-    TABLE_SPAWN_CFG,
+     FrankaSoftEnvCfg,
+     _FrankaSoftSceneCfg,
+ )
+@@ -53,23 +61,25 @@ from isaaclab_tasks.utils import PresetCfg
+ # Sock geometry
+ ##
+ 
+-# Radius of the sock tube [m]. Also its resting half-height, which is what sets the lift threshold.
++# Radius of the sock tube [m].
+ SOCK_RADIUS = 0.03
+ # Length of the sock's cylindrical section, excluding the toe cap [m].
+ SOCK_LENGTH = 0.15
+-# Circumferential resolution. This, and not ``edge_refinement``, controls the mesh density: the
+-# tube is slender enough that its bounding-box diagonal stays far above the circumferential edge
+-# length, so the diagonal-based refinement never triggers.
+-SOCK_NUM_SEGMENTS = 20
+-# Spawn height [m]: the lowest node sits 2 mm above the table top at z = 0, so the first substep
+-# resolves contact rather than a penetration.
++# length, so the diagonal-based refinement never triggers. Raised from the original 20.
++SOCK_NUM_SEGMENTS = 28
++# Spawn height [m]: resolves contact rather than a penetration as it is spawn 2mm above the table.
+ SOCK_SPAWN_HEIGHT = SOCK_RADIUS + 0.002
+-# Centroid height of the settled sock [m], measured by letting it fall under full gravity. It sits
+-# below SOCK_RADIUS because the resting tube sags to about 0.053 m across instead of 0.06 m.
+-SOCK_RESTING_HEIGHT = 0.025
++# Resting height [m]: the sock's centroid is at this height when it is lying flat on the table
++SOCK_RESTING_HEIGHT = 0.0113
+ # Clearance above the resting centroid that counts as lifted [m].
+-SOCK_LIFT_CLEARANCE = 0.05
++SOCK_LIFT_CLEARANCE = 0.10
+ 
++# Fabric visual material shared by both physics-backend presets.
++SOCK_VISUAL_MATERIAL = sim_utils.MdlFileCfg(
++    mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Textiles/Cloth_Gray.mdl",
++    project_uvw=True,
++    texture_scale=(4.0, 4.0),
++)
+ 
+ ##
+ # Scene definition
+@@ -150,18 +160,17 @@ class DeformableCfg(PresetCfg):
+             cap_end=False,
+             edge_refinement=1.0,
+             deformable_props=NewtonDeformableBodyPropertiesCfg(),
+-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.35, 0.45)),
++            visual_material=SOCK_VISUAL_MATERIAL,
+             physics_material=NewtonSurfaceDeformableBodyMaterialCfg(
+                 density=1.0,
+                 particle_radius=0.002,
+                 tri_ke=5e2,
+                 tri_ka=5e2,
+                 tri_kd=1e-3,
+-                # much stiffer in bending than the cloth's 0.5: a zero-pressure tube with cloth-like
+-                # bending collapses into a flat double layer, which is the shape the rails exist to
+-                # work around in the cloth task
+-                edge_ke=30.0,
+-                edge_kd=1e-3,
++                # Larger stiffness and damping than the cloth task, to keep the sock from collapsing
++                # under its own weight.
++                edge_ke=2.0,
++                edge_kd=5e-3,
+             ),
+         ),
+     )
+@@ -179,7 +188,7 @@ class DeformableCfg(PresetCfg):
+             edge_refinement=1.0,
+             deformable_props=PhysxDeformableBodyPropertiesCfg(),
+             collision_props=[PhysxCollisionCfg(rest_offset=0.002, contact_offset=0.01)],
+-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.85, 0.35, 0.45)),
++            visual_material=SOCK_VISUAL_MATERIAL,
+             physics_material=PhysxSurfaceDeformableBodyMaterialCfg(
+                 density=1000.0,
+                 surface_thickness=0.001,
+@@ -201,8 +210,14 @@ class DeformableCfg(PresetCfg):
+ WALL_THICKNESS = 0.02
+ """Thickness of a divider panel [m]."""
+ 
+-WALL_HEIGHT = 0.6
+-"""Height of a divider panel above the table top [m]."""
++# Table top is at z = 0. Floor is 1.05m below the table
++FLOOR_BELOW_TABLE_TOP = 1.05
++
++# Divder wall 1m above the table
++WALL_HEIGHT = FLOOR_BELOW_TABLE_TOP + 1.0
++
++# Divider panel center height, in the table-top-relative z frame used by the rest of the scene [m].
++WALL_CENTER_Z = 0.5 * (1.0 - FLOOR_BELOW_TABLE_TOP)
+ 
+ # Divider panels between environments. Visual only: no collision, rigid, mass, or physics material,
+ # so they never enter the contact solve. Their length spans one environment, which is only known
+@@ -212,6 +227,54 @@ WALL_SPAWN_CFG = sim_utils.CuboidCfg(
+     visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.26, 0.28, 0.33), roughness=0.9),
+ )
+ 
++# A different material is drawn per wall per environment (see ``__post_init__``), through the same
++# heterogeneous-cloning path as ``scripts/demos/visual_color_randomization.py``, rather than the
++# Replicator-based ``randomize_visual_texture_material`` event, which requires
++# ``replicate_physics=False`` and is unsupported on the Newton backend used by this task's default
++# preset. Paths verified to exist under the NVIDIA Nucleus material library.
++WALL_MATERIAL_PATHS = [
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wall_Board/Plaster.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wall_Board/Gypsum.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wall_Board/MDF.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Masonry/Brick_Wall_Red.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Masonry/Brick_Wall_Brown.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Masonry/Stucco.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Masonry/Concrete_Smooth.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wood/Plywood.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wood/Timber_Cladding.mdl",
++    "{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wood/Walnut_Planks.mdl",
++]
++
++# Table top material. Kept separate from the wall/ground materials so the table (formerly invisible;
++# see ``SUCCESS_VISUALIZER_CFG``) reads clearly against them.
++TABLE_VISUAL_MATERIAL = sim_utils.MdlFileCfg(
++    mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Wood/Oak.mdl",
++    project_uvw=True,
++    texture_scale=(0.5, 0.5),
++)
++
++# Ground material and collider. A thin box rather than the default ``GroundPlaneCfg`` (which has no
++# ``visual_material`` field, only a multiplicative tint of its baked-in checker texture), reusing
++# the same static-collider recipe as the table (``CollisionPropertiesCfg`` with no rigid body,
++# giving a fixed collider) rather than a flat mesh, which would need a convex-hull approximation on
++# a degenerate zero-thickness quad.
++GROUND_THICKNESS = 0.05
++GROUND_SPAWN_CFG = sim_utils.CuboidCfg(
++    size=(100.0, 100.0, GROUND_THICKNESS),
++    collision_props=sim_utils.CollisionPropertiesCfg(),
++    visual_material=sim_utils.MdlFileCfg(
++        mdl_path="{NVIDIA_NUCLEUS_DIR}/Materials/Base/Masonry/Concrete_Polished.mdl",
++        project_uvw=True,
++        texture_scale=(0.15, 0.15),
++    ),
++)
++
++# Small success-readout discs on a table corner, out of the way of the sock's workspace around
++# (0.45, 0.0). Replaces the previous scheme of tinting the whole (invisible) table red/green, which
++# is no longer possible now that the table shows its own wood material.
++SUCCESS_PAD_POS = (0.95, -0.35, 0.0)
++SUCCESS_PAD_SPAWN_CFG = sim_utils.CuboidCfg(size=(0.06, 0.06, 0.002), visible=False)
++
+ 
+ @configclass
+ class FrankaSockSceneCfg(_FrankaSoftSceneCfg):
+@@ -230,6 +293,27 @@ class FrankaSockSceneCfg(_FrankaSoftSceneCfg):
+         spawn=WALL_SPAWN_CFG,
+     )
+ 
++    # static anchor for the success-readout markers (see ``SUCCESS_VISUALIZER_CFG``); never
++    # rendered itself, since the markers are drawn separately by ``VisualizationMarkers``
++    success_pad: AssetBaseCfg = AssetBaseCfg(
++        prim_path="{ENV_REGEX_NS}/SuccessPad",
++        init_state=AssetBaseCfg.InitialStateCfg(pos=SUCCESS_PAD_POS),
++        spawn=SUCCESS_PAD_SPAWN_CFG,
++    )
++
++    # directional key light layered on top of the inherited dome light, for the raking shadows the
++    # divider walls need to read as separate rooms
++    sun_light: AssetBaseCfg = AssetBaseCfg(
++        prim_path="/World/sunLight",
++        init_state=AssetBaseCfg.InitialStateCfg(rot=(0.3007, 0.0, 0.0, 0.9537)),
++        spawn=sim_utils.DistantLightCfg(
++            intensity=3000.0,
++            angle=0.3,
++            color_temperature=5500.0,
++            enable_color_temperature=True,
++        ),
++    )
++
+     def __post_init__(self) -> None:
+         super().__post_init__()
+ 
+@@ -238,11 +322,46 @@ class FrankaSockSceneCfg(_FrankaSoftSceneCfg):
+         self.robot.actuators["panda_hand"].stiffness = 2000.0
+         self.robot.actuators["panda_hand"].damping = 100.0
+ 
+-        # place the dividers on the environment boundary, resting on the table top at z = 0
++        # a different material per divider per environment, drawn independently for the two walls
++        # (see ``WALL_MATERIAL_PATHS``); default cloning is deterministic round-robin, so this is
++        # switched to random sampling of the heterogeneous combination
++        self.clone_cfg.clone_strategy = random_clone_strategy
++
++        # place the dividers on the environment boundary, from the floor to 1 m above the table.
++        # insetting by half the wall thickness keeps neighbouring envs' walls from coinciding, which
++        # would otherwise z-fight once each side draws a different material
+         half_spacing = 0.5 * self.env_spacing
++        wall_y_inset = half_spacing - 0.5 * WALL_THICKNESS
+         for wall, sign in ((self.wall_neg_y, -1.0), (self.wall_pos_y, 1.0)):
+-            wall.spawn = WALL_SPAWN_CFG.replace(size=(self.env_spacing, WALL_THICKNESS, WALL_HEIGHT))
+-            wall.init_state.pos = (0.5, sign * half_spacing, 0.5 * WALL_HEIGHT)
++            wall.spawn = sim_utils.MultiAssetSpawnerCfg(
++                assets_cfg=[
++                    WALL_SPAWN_CFG.replace(
++                        size=(self.env_spacing, WALL_THICKNESS, WALL_HEIGHT),
++                        visual_material=sim_utils.MdlFileCfg(mdl_path=path, project_uvw=True, texture_scale=(1.0, 1.0)),
++                    )
++                    for path in WALL_MATERIAL_PATHS
++                ]
++            )
++            wall.init_state.pos = (0.5, sign * wall_y_inset, WALL_CENTER_Z)
++
++        # visible wood table, replacing the invisible collider the success markers used to re-skin
++        self.table.spawn = self.table.spawn.replace(visible=True, visual_material=TABLE_VISUAL_MATERIAL)
++
++        # PBR floor with a physical (if oversized) collider, in place of the default checker ground
++        # plane, which has no visual_material field
++        self.ground.spawn = GROUND_SPAWN_CFG
++        self.ground.init_state.pos = (
++            self.ground.init_state.pos[0],
++            self.ground.init_state.pos[1],
++            self.ground.init_state.pos[2] - 0.5 * GROUND_THICKNESS,
++        )
++
++        # softer, warmer sky than the default preview-render sky; the sun light above carries most
++        # of the key lighting, so the dome mostly provides ambient fill now
++        self.sky_light.spawn.intensity = 500.0
++        self.sky_light.spawn.texture_file = (
++            f"{NVIDIA_NUCLEUS_DIR}/Assets/Skies/Cloudy/kloofendal_48d_partly_cloudy_4k.hdr"
++        )
+ 
+ 
+ @configclass
+@@ -265,17 +384,24 @@ class FrankaSockScenePresetCfg(PresetCfg):
+ # MDP settings
+ ##
+ 
+-# Success visualizer for the invisible table, re-skinned from the shared soft-task markers. The two
+-# prototypes must stay clearly distinguishable, since their color is the only success readout.
++# Success visualizer: a small disc on the ``success_pad`` table corner, rather than re-skinning the
++# whole table as the shared soft-task markers do. With the table now showing its own wood material
++# (see ``FrankaSockSceneCfg.__post_init__``), a table-sized overlay would hide it whenever the
++# markers are visible, which is always (see ``ObjectUniformPoseCommand.__init__``).
++SUCCESS_MARKER_SPAWN_CFG = sim_utils.CylinderCfg(radius=0.04, height=0.004)
+ SUCCESS_VISUALIZER_CFG = VisualizationMarkersCfg(
+     prim_path="/Visuals/SuccessMarkers",
+     markers={
+-        "failure": TABLE_SPAWN_CFG.replace(
+-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.62, 0.24, 0.26), roughness=0.5),
++        "failure": SUCCESS_MARKER_SPAWN_CFG.replace(
++            visual_material=sim_utils.PreviewSurfaceCfg(
++                diffuse_color=(0.62, 0.24, 0.26), emissive_color=(0.31, 0.12, 0.13), roughness=0.5
++            ),
+             visible=True,
+         ),
+-        "success": TABLE_SPAWN_CFG.replace(
+-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.24, 0.62, 0.34), roughness=0.5),
++        "success": SUCCESS_MARKER_SPAWN_CFG.replace(
++            visual_material=sim_utils.PreviewSurfaceCfg(
++                diffuse_color=(0.24, 0.62, 0.34), emissive_color=(0.12, 0.31, 0.17), roughness=0.5
++            ),
+             visible=True,
+         ),
+     },
+@@ -319,11 +445,21 @@ class FrankaSockEnvCfg(FrankaSoftEnvCfg):
+         super().__post_init__()
+         # override the soft-beam physics with the sock presets
+         self.sim.physics = PhysicsCfg()
+-        # re-skin the table that doubles as the success readout
++        # success is shown on the small success_pad disc rather than the (now visible) table itself
++        self.commands.deformable_pose.success_vis_asset_name = "success_pad"
+         self.commands.deformable_pose.success_visualizer_cfg = SUCCESS_VISUALIZER_CFG
+         # the cloth closes the gripper fully for a thin sheet; the sock wall is thicker, so the
+         # shared 0.01 m close command is kept
+ 
++        # the shared soft-lift viewer sits close to the divider walls' inner face now that they run
++        # floor-to-ceiling (see FrankaSockSceneCfg), so it grazes the wall instead of framing the
++        # room; pull back to a 3/4 view from in front of the table, inside the two side walls
++        self.viewer.eye = (-0.9, -0.5, 0.9)
++        self.viewer.lookat = (0.6, 0.0, 0.05)
++        self.sim.default_visualizer_cfg = self.sim.default_visualizer_cfg.replace(
++            eye=self.viewer.eye, lookat=self.viewer.lookat
++        )
++
+     def play_mode(self):
+         super().play_mode()
+         # show the end-effector frame when inspecting a policy; too costly to leave on for training.

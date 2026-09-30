@@ -1,0 +1,161 @@
+--- git commit ---
+a8b4da3c29ae528b39d4b3c9444d782ce58d886d
+
+
+--- git status ---
+On branch develop
+Your branch is up to date with 'origin/develop'.
+
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_cloth_env_cfg.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_soft_env_cfg.py
+	modified:   source/isaaclab_visualizers/isaaclab_visualizers/viser/viser_visualizer_cfg.py
+	modified:   uv.lock
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_cloth_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_cloth_env_cfg.py
+index 029632ce9..06dbf4a74 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_cloth_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_cloth_env_cfg.py
+@@ -62,7 +62,7 @@ class PhysicsCfg(PresetCfg):
+                     name="rigid",
+                     solver_cfg=MJWarpSolverCfg(
+                         cone="elliptic",
+-                        ls_iterations=20,
++                        ls_iterations=40,
+                         integrator="implicitfast",
+                     ),
+                     bodies=[r"/World/envs/env_[^/]+/Robot", r"/World/envs/env_[^/]+/Support(Neg|Pos)Y"],
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_soft_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_soft_env_cfg.py
+index 49356c09f..d9f35efe6 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_soft_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/core/lift/config/franka_soft/franka_soft_env_cfg.py
+@@ -148,7 +148,7 @@ class PhysicsCfg(PresetCfg):
+                     name="rigid",
+                     solver_cfg=MJWarpSolverCfg(
+                         cone="elliptic",
+-                        ls_iterations=20,
++                        ls_iterations=40,
+                         integrator="implicitfast",
+                     ),
+                     bodies=[r"/World/envs/env_[^/]+/Robot"],
+@@ -660,8 +660,8 @@ class FrankaSoftEnvCfg(ManagerBasedRLEnvCfg):
+         self.sim.render_interval = self.decimation
+         self.sim.physics = PhysicsCfg()
+ 
+-        self.viewer.eye = (0.75, 0.25, 0.65)
+-        self.viewer.lookat = (0.0, 0.75, 0.4)
++        self.viewer.eye = (1.2, -0.9, 0.9)
++        self.viewer.lookat = (0.4, 0.0, 0.15)
+         self.sim.default_visualizer_cfg = _FrankaSoftVisualizerCfg(
+             eye=self.viewer.eye,
+             lookat=self.viewer.lookat,
+diff --git a/source/isaaclab_visualizers/isaaclab_visualizers/viser/viser_visualizer_cfg.py b/source/isaaclab_visualizers/isaaclab_visualizers/viser/viser_visualizer_cfg.py
+index 564c37188..20d3bd4a7 100644
+--- a/source/isaaclab_visualizers/isaaclab_visualizers/viser/viser_visualizer_cfg.py
++++ b/source/isaaclab_visualizers/isaaclab_visualizers/viser/viser_visualizer_cfg.py
+@@ -26,7 +26,7 @@ class ViserVisualizerCfg(VisualizerCfg):
+     visualizer_type: str = "viser"
+     """Type identifier for Viser visualizer."""
+ 
+-    port: int = 8080
++    port: int = 8734
+     """Port of the local viser web server."""
+ 
+     bind_address: str = "0.0.0.0"
+diff --git a/uv.lock b/uv.lock
+index d0b63e702..a1cbc1713 100644
+--- a/uv.lock
++++ b/uv.lock
+@@ -1754,12 +1754,12 @@ wheels = [
+ 
+ [[package]]
+ name = "isaaclab"
+-version = "24.1.1"
++version = "24.2.1"
+ source = { editable = "source/isaaclab" }
+ 
+ [[package]]
+ name = "isaaclab-assets"
+-version = "0.8.0"
++version = "0.8.1"
+ source = { editable = "source/isaaclab_assets" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2137,7 +2137,7 @@ requires-dist = [{ name = "isaaclab", editable = "source/isaaclab" }]
+ 
+ [[package]]
+ name = "isaaclab-mimic"
+-version = "2.0.6"
++version = "2.0.8"
+ source = { editable = "source/isaaclab_mimic" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2154,7 +2154,7 @@ requires-dist = [
+ 
+ [[package]]
+ name = "isaaclab-newton"
+-version = "6.2.0"
++version = "6.3.0"
+ source = { editable = "source/isaaclab_newton" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2165,7 +2165,7 @@ requires-dist = [{ name = "isaaclab", editable = "source/isaaclab" }]
+ 
+ [[package]]
+ name = "isaaclab-ov"
+-version = "3.1.0"
++version = "3.1.1"
+ source = { editable = "source/isaaclab_ov" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2180,7 +2180,7 @@ requires-dist = [
+ 
+ [[package]]
+ name = "isaaclab-physx"
+-version = "7.1.1"
++version = "7.1.3"
+ source = { editable = "source/isaaclab_physx" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2202,7 +2202,7 @@ requires-dist = [{ name = "isaaclab", editable = "source/isaaclab" }]
+ 
+ [[package]]
+ name = "isaaclab-rl"
+-version = "0.17.2"
++version = "0.17.4"
+ source = { editable = "source/isaaclab_rl" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2219,7 +2219,7 @@ requires-dist = [
+ 
+ [[package]]
+ name = "isaaclab-tasks"
+-version = "20.1.2"
++version = "20.3.0"
+ source = { editable = "source/isaaclab_tasks" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2249,7 +2249,7 @@ requires-dist = [
+ 
+ [[package]]
+ name = "isaaclab-teleop"
+-version = "0.8.4"
++version = "0.9.0"
+ source = { editable = "source/isaaclab_teleop" }
+ dependencies = [
+     { name = "isaaclab" },
+@@ -2260,7 +2260,7 @@ requires-dist = [{ name = "isaaclab", editable = "source/isaaclab" }]
+ 
+ [[package]]
+ name = "isaaclab-visualizers"
+-version = "1.10.4"
++version = "1.11.0"
+ source = { editable = "source/isaaclab_visualizers" }
+ dependencies = [
+     { name = "isaaclab" },

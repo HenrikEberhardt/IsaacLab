@@ -1,0 +1,1002 @@
+--- git commit ---
+ccbabaa3ccdf87ee8e6c4801968cca2db52723a5
+
+
+--- git status ---
+On branch non-prehensile-cloth
+Changes not staged for commit:
+  (use "git add <file>..." to update what will be committed)
+  (use "git restore <file>..." to discard changes in working directory)
+	modified:   docs/source/_static/css/environment-browser.js
+	modified:   scripts/environments/state_machine/franka_nonp_cloth_sm.py
+	modified:   source/isaaclab_tasks/changelog.d/non-prehensile-cloth.minor.rst
+	modified:   source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/__init__.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/agents/rsl_rl_ppo_cfg.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/cloth_mesh.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/franka_nonp_cloth_env_cfg.py
+	modified:   source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/__init__.pyi
+	modified:   source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/events.py
+	modified:   source/isaaclab_tasks/test/contrib/test_franka_nonp_cloth_cloth_mesh.py
+
+Untracked files:
+  (use "git add <file>..." to include in what will be committed)
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/franka_nonp_cloth_env.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/actions.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/actions_cfg.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/cloth_grasp.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/commands.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/commands_cfg.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/observations.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/rewards.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/terminations.py
+	source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/top_down.py
+	source/isaaclab_tasks/test/contrib/test_franka_nonp_cloth_top_down.py
+
+no changes added to commit (use "git add" and/or "git commit -a") 
+
+
+--- git diff ---
+diff --git a/docs/source/_static/css/environment-browser.js b/docs/source/_static/css/environment-browser.js
+index c10871ec0..debe62b5e 100644
+--- a/docs/source/_static/css/environment-browser.js
++++ b/docs/source/_static/css/environment-browser.js
+@@ -84,9 +84,9 @@
+             ["IsaacContrib-Forge-NutThread-Direct", "rl_games", "", "", "", "tasks/factory/nut_thread.jpg"],
+             ["IsaacContrib-Forge-PegInsert-Direct", "rl_games", "", "", "", "tasks/factory/peg_insert.jpg"],
+             ["IsaacContrib-Franka-Pour", "rsl_rl", "", "", "", "tasks/manipulation/franka_pour.jpg"],
+-            ["IsaacContrib-Franka-nonp-cloth", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "", "ik,joint"],
+-            ["IsaacContrib-Franka-nonp-cloth-HeadCam", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "isaacsim_rtx,newton_renderer,ovrtx", "depth,ik,joint,rgb"],
+-            ["IsaacContrib-Franka-nonp-cloth-WristCam", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "isaacsim_rtx,newton_renderer,ovrtx", "depth,ik,joint,rgb"],
++            ["IsaacContrib-Franka-nonp-cloth", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "", "ik,ik_rel"],
++            ["IsaacContrib-Franka-nonp-cloth-HeadCam", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "isaacsim_rtx,newton_renderer,ovrtx", "depth,ik,ik_rel,rgb"],
++            ["IsaacContrib-Franka-nonp-cloth-WristCam", "rsl_rl", "isaacsim_physx,newton_mjwarp_vbd_proxy", "isaacsim_rtx,newton_renderer,ovrtx", "depth,ik,ik_rel,rgb"],
+             ["IsaacContrib-Humanoid-AMP-Dance-Direct", "skrl", "", "", "", "tasks/others/humanoid_amp.jpg"],
+             ["IsaacContrib-Humanoid-AMP-Run-Direct", "skrl", "", "", "", "tasks/others/humanoid_amp.jpg"],
+             ["IsaacContrib-Humanoid-AMP-Walk-Direct", "skrl", "", "", "", "tasks/others/humanoid_amp.jpg"],
+diff --git a/scripts/environments/state_machine/franka_nonp_cloth_sm.py b/scripts/environments/state_machine/franka_nonp_cloth_sm.py
+index b6e1fb876..f81f7531a 100644
+--- a/scripts/environments/state_machine/franka_nonp_cloth_sm.py
++++ b/scripts/environments/state_machine/franka_nonp_cloth_sm.py
+@@ -7,12 +7,13 @@
+ Script to drag a creased cloth, and the cube resting on it, with a robotic arm.
+ 
+ The state machine hovers above the crease of the ``IsaacContrib-Franka-nonp-cloth`` sheet, descends with an
+-open gripper, pinches the crease, drags it to a target point, and releases it. Each episode draws the target
+-at random on a line in front of the robot base. The state machine is implemented in the kernel function
+-`infer_state_machine`, which uses the `warp` library to run all environments in parallel on the GPU.
++open gripper, pinches the crease, drags it to a target point, and releases it. The target is the task's drag
++command, which each episode draws at random on a line in front of the robot base. The state machine is
++implemented in the kernel function `infer_state_machine`, which uses the `warp` library to run all environments in
++parallel on the GPU.
+ 
+ By default, the gripper holds the cloth with position-level bilateral constraints, as in the FLASH cloth
+-gripping model: once the fingers close, every cloth vertex within :data:`GRASP_PROXIMITY` of the middle or the
++gripping model: once the fingers close, every cloth vertex within 1.5 cm of the middle or the
+ tip of a finger is locked to the gripper by the equality constraint ``x_i - p_grip,i(t) = 0``, a zero-length
+ rigid link to the gripper point where the vertex was grasped, and is released again when the gripper opens.
+ With grasped vertices spread along both fingers, the cloth cannot rotate about the grasp. While the constraint
+@@ -46,6 +47,9 @@ from isaaclab.envs import mdp
+ from isaaclab.envs.utils.video_recorder_cfg import VideoRecorderCfg
+ 
+ import isaaclab_tasks  # noqa: F401
++from isaaclab_tasks.contrib.franka_nonp_cloth.cloth_mesh import crease_node_mask
++from isaaclab_tasks.contrib.franka_nonp_cloth.franka_nonp_cloth_env_cfg import IK_DAMPING
++from isaaclab_tasks.contrib.franka_nonp_cloth.mdp import GripperConstraint
+ from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
+ 
+ # add argparse arguments
+@@ -79,14 +83,6 @@ sys.argv = [sys.argv[0]] + hydra_args
+ # initialize warp
+ wp.init()
+ 
+-# Drag targets are drawn uniformly on this line in front of the robot base, which the gripper reaches over its
+-# whole width at table height. The line lies closer to the robot than any crease, so every drag pulls the sheet
+-# toward the robot instead of folding it over itself [m].
+-TARGET_LINE_X = 0.35
+-TARGET_LINE_Y = (-0.30, 0.30)
+-# Damping of the differential IK. The task's IK preset (0.6) settles too slowly for the low-PD Franka to reach
+-# down onto the crease.
+-IK_DAMPING = 0.1
+ # height of the approach pose above the crease, and of the retreat pose above the release pose [m]
+ HOVER_HEIGHT = 0.10
+ # depth of the grasp point below the crest, so the finger pads straddle the fold [m]
+@@ -95,12 +91,6 @@ GRASP_DEPTH = 0.012
+ DRAG_LIFT = 0.01
+ # cloth nodes within this height of the highest node form the crest of the crease [m]
+ CREST_BAND = 0.005
+-# Gripper anchors along each finger, as offsets from the fingertip point (0.1034 m below the hand) toward the
+-# fingertips [m]. A Franka finger runs from its joint 0.0584 m below the hand to its tip at about 0.112 m, so
+-# its middle lies 1.8 cm above the fingertip point and its tip 0.7 cm below it.
+-FINGER_ANCHOR_DEPTHS = {"middle": -0.018, "tip": 0.007}
+-# cloth vertices within this distance of a gripper anchor are grasped when the gripper closes [m]
+-GRASP_PROXIMITY = 0.015
+ # height above the grasp at which the retreating gripper collides with the cloth again [m]
+ CONTACT_CLEARANCE = 0.05
+ 
+@@ -304,7 +294,6 @@ class DragClothSm:
+         self.gripper_close_opening = torch.full((self.num_envs,), gripper_close_opening, device=self.device)
+         # drag target of each episode, in the robot base frame [m]
+         self.drag_target = torch.zeros((self.num_envs, 3), device=self.device)
+-        self.sample_drag_targets()
+ 
+         # convert to warp
+         self.sm_dt_wp = wp.from_torch(self.sm_dt, wp.float32)
+@@ -315,26 +304,18 @@ class DragClothSm:
+         self.gripper_close_opening_wp = wp.from_torch(self.gripper_close_opening, wp.float32)
+         self.drag_target_wp = wp.from_torch(self.drag_target, wp.vec3)
+ 
+-    def sample_drag_targets(self, env_ids: Sequence[int] | None = None):
+-        """Draw new drag targets uniformly on the target line."""
+-        if env_ids is None:
+-            env_ids = slice(None)
+-        num_targets = self.drag_target[env_ids].shape[0]
+-        self.drag_target[env_ids, 0] = TARGET_LINE_X
+-        self.drag_target[env_ids, 1] = math_utils.sample_uniform(*TARGET_LINE_Y, (num_targets,), device=self.device)
+-
+     def hold_gripper(self, env_ids: Sequence[int], opening: torch.Tensor):
+         """Keep the closed gripper at the given finger opening [m] until the next reset."""
+         self.gripper_close_opening[env_ids] = opening
+ 
+-    def reset_idx(self, env_ids: Sequence[int] = None):
+-        """Reset the state machine and draw new drag targets."""
++    def reset_idx(self, env_ids: Sequence[int] | None, drag_target: torch.Tensor):
++        """Reset the state machine and set the new drag targets, in the robot base frame [m], shape [E, 3]."""
+         if env_ids is None:
+             env_ids = slice(None)
+         self.sm_state[env_ids] = 0
+         self.sm_wait_time[env_ids] = 0.0
+         self.gripper_close_opening[env_ids] = self.default_gripper_close_opening
+-        self.sample_drag_targets(env_ids)
++        self.drag_target[env_ids] = drag_target
+ 
+     def compute(self, ee_pose: torch.Tensor, grasp_pose: torch.Tensor) -> torch.Tensor:
+         """Compute the desired state of the robot's end-effector and the gripper."""
+@@ -385,9 +366,8 @@ def crease_grasp_pose(nodes: torch.Tensor, top_down_quat: torch.Tensor) -> torch
+     Returns:
+         The grasp pose (position [m] and quaternion (x, y, z, w)) in the robot base frame, shape [N, 7].
+     """
+-    height = nodes[..., 2]
+-    crest_height = height.amax(dim=1)
+-    crest = (height >= crest_height.unsqueeze(1) - CREST_BAND).unsqueeze(-1)
++    crest_height = nodes[..., 2].amax(dim=1)
++    crest = crease_node_mask(nodes, CREST_BAND).unsqueeze(-1)
+     crest_xy = (nodes[..., :2] * crest).sum(dim=1) / crest.sum(dim=1)
+     across = crest_xy - nodes[..., :2].mean(dim=1)
+     # the top-down orientation closes the fingers along world -y; yaw that axis onto the crease normal
+@@ -400,148 +380,6 @@ def crease_grasp_pose(nodes: torch.Tensor, top_down_quat: torch.Tensor) -> torch
+     return torch.cat([position, quat], dim=-1)
+ 
+ 
+-class GripperConstraint:
+-    """Lock grasped cloth vertices to the gripper with position-level bilateral constraints.
+-
+-    This follows the cloth gripping model of FLASH. When the gripper closes, every cloth vertex within
+-    :attr:`proximity` of one of the gripper's anchors joins the grasped set. While the constraint is active, each
+-    grasped vertex is driven as a kinematic node at the gripper point where it was grasped, which enforces the
+-    equality constraint ``x_i - p_grip,i(t) = 0``, a zero-length rigid link. Opening the gripper deactivates the
+-    constraint and returns the vertices to the cloth's internal elastic forces and gravity.
+-
+-    The gripper points move rigidly with the hand. Locking each vertex to its own grasp point, instead of pulling
+-    all grasped vertices onto the anchors themselves, keeps the grasped patch intact: collapsing up to 1.5 cm of
+-    cloth onto a few points degenerates its triangles, and VBD's elastic forces then blow up.
+-
+-    While the constraint is active, the gripper stops colliding with the cloth in that environment, as the
+-    virtual gripper of FLASH does: the constraint is then its whole interaction with the grasped cloth. The
+-    fingers would otherwise press against the immovable locked vertices, and that contact destabilizes the
+-    coupling between the robot and the cloth solver. The state machine holds the fingers at the opening they closed
+-    to on the fold, so they keep resting on it instead of closing through it. The gripper collides with the cloth
+-    again only once :meth:`restore_contacts` is called after it has left the cloth; turning the contacts on with the
+-    fingers inside the cloth blows up the coupling the same way.
+-
+-    Each finger carries one anchor per entry of :data:`FINGER_ANCHOR_DEPTHS`, at its middle and at its tip, on the
+-    inner pad surface, so the grasped vertices are the cloth pinched against the pads along both fingers and the
+-    grasped cloth cannot rotate about the grasp.
+-
+-    When the constraint is disabled, the grasped set is still recorded, to report how far the cloth slips in a
+-    friction-only grasp.
+-    """
+-
+-    def __init__(self, env, enabled: bool, particle_radius: float, proximity: float = GRASP_PROXIMITY):
+-        """Initialize the constraint.
+-
+-        Args:
+-            env: The unwrapped environment.
+-            enabled: Whether to enforce the constraint on the grasped vertices.
+-            particle_radius: Collision radius of the cloth vertices [m].
+-            proximity: Distance from an anchor within which a vertex is grasped [m].
+-        """
+-        self.enabled = enabled
+-        self.proximity = proximity
+-        self.particle_radius = particle_radius
+-        # the Newton coupler manager of the task can switch the gripper's cloth contacts per environment
+-        self._set_gripper_contacts = getattr(env.sim.physics_manager, "set_proxy_particle_contacts", None)
+-        self._robot = env.scene["robot"]
+-        self._cloth = env.scene["deformable"]
+-        self._finger_ids, _ = self._robot.find_bodies(["panda_leftfinger", "panda_rightfinger"], preserve_order=True)
+-        self._finger_joint_ids, _ = self._robot.find_joints(
+-            ["panda_finger_joint1", "panda_finger_joint2"], preserve_order=True
+-        )
+-        self._hand_id = self._robot.find_bodies("panda_hand")[0][0]
+-
+-        num_envs, device = env.num_envs, env.device
+-        # one anchor per finger and depth: left middle, left tip, right middle, right tip
+-        depths = torch.tensor(list(FINGER_ANCHOR_DEPTHS.values()), device=device)
+-        self.anchor_finger = torch.arange(2, device=device).repeat_interleave(len(depths))
+-        self.anchor_depth = depths.repeat(2)
+-        num_vertices = self._cloth.max_sim_vertices_per_body
+-        # grasp point of each vertex in the hand frame [m]
+-        self.grasp_offsets = torch.zeros((num_envs, num_vertices, 3), device=device)
+-        self.grasped = torch.zeros((num_envs, num_vertices), dtype=torch.bool, device=device)
+-        self.grasp_vertex_pos = torch.zeros((num_envs, num_vertices, 3), device=device)
+-        self.active = torch.zeros(num_envs, dtype=torch.bool, device=device)
+-        self.contacts_disabled = torch.zeros(num_envs, dtype=torch.bool, device=device)
+-
+-    def activate(self, env_ids: torch.Tensor, tcp_pos_w: torch.Tensor):
+-        """Grasp the cloth vertices near the gripper anchors.
+-
+-        Args:
+-            env_ids: Environments that just closed the gripper.
+-            tcp_pos_w: World position of the fingertip point between the fingers [m], shape [E, 3].
+-        """
+-        hand = self._robot.data.body_link_pose_w.torch[env_ids, self._hand_id]
+-        hand_pos, hand_quat = hand[:, :3], hand[:, 3:7]
+-        # the fingers close along the hand's y axis and point along its z axis
+-        hand_axes = torch.eye(3, device=hand.device)
+-        closing_axis = math_utils.quat_apply(hand_quat, hand_axes[1].expand_as(tcp_pos_w))
+-        approach_axis = math_utils.quat_apply(hand_quat, hand_axes[2].expand_as(tcp_pos_w))
+-        # each finger's inner pad surface lies its joint opening away from the fingertip point, on its side
+-        finger_pos = self._robot.data.body_link_pose_w.torch[env_ids][:, self._finger_ids, :3]
+-        side = torch.sign(((finger_pos - tcp_pos_w.unsqueeze(1)) * closing_axis.unsqueeze(1)).sum(dim=-1))
+-        opening = self._robot.data.joint_pos.torch[env_ids][:, self._finger_joint_ids]
+-        lateral = side * (opening - self.particle_radius).clamp_min(0.0)
+-        anchors = (
+-            tcp_pos_w.unsqueeze(1)
+-            + lateral[:, self.anchor_finger].unsqueeze(-1) * closing_axis.unsqueeze(1)
+-            + self.anchor_depth.view(1, -1, 1) * approach_axis.unsqueeze(1)
+-        )
+-
+-        # grasp every vertex within the proximity threshold of an anchor, at its current position on the gripper
+-        vertices = self._cloth.data.nodal_pos_w.torch[env_ids]
+-        distance = (vertices.unsqueeze(1) - anchors.unsqueeze(2)).norm(dim=-1).amin(dim=1)
+-        num_vertices = vertices.shape[1]
+-        self.grasped[env_ids] = distance <= self.proximity
+-        self.grasp_offsets[env_ids] = math_utils.quat_apply_inverse(
+-            hand_quat.unsqueeze(1).expand(-1, num_vertices, -1), vertices - hand_pos.unsqueeze(1)
+-        )
+-        self.grasp_vertex_pos[env_ids] = vertices
+-        self.active[env_ids] = True
+-        if self.enabled and self._set_gripper_contacts is not None:
+-            self._set_gripper_contacts(env_ids.tolist(), enabled=False)
+-            self.contacts_disabled[env_ids] = True
+-
+-    def deactivate(self, env_ids: torch.Tensor):
+-        """Release the grasped vertices of the given environments.
+-
+-        The gripper keeps passing through the cloth until :meth:`restore_contacts` is called.
+-        """
+-        self.active[env_ids] = False
+-
+-    def restore_contacts(self, env_ids: torch.Tensor):
+-        """Let the gripper collide with the cloth again, once it has left the cloth."""
+-        env_ids = env_ids[self.contacts_disabled[env_ids]]
+-        if len(env_ids) > 0 and self._set_gripper_contacts is not None:
+-            self._set_gripper_contacts(env_ids.tolist(), enabled=True)
+-            self.contacts_disabled[env_ids] = False
+-
+-    def grasp_points(self, env_ids: torch.Tensor) -> torch.Tensor:
+-        """Return the current world position of each vertex's grasp point on the gripper [m], shape [E, P, 3]."""
+-        hand = self._robot.data.body_link_pose_w.torch[env_ids, self._hand_id]
+-        num_vertices = self.grasp_offsets.shape[1]
+-        hand_quat = hand[:, 3:7].unsqueeze(1).expand(-1, num_vertices, -1)
+-        return hand[:, :3].unsqueeze(1) + math_utils.quat_apply(hand_quat, self.grasp_offsets[env_ids])
+-
+-    def slip(self, env_ids: torch.Tensor) -> torch.Tensor:
+-        """Return the mean distance of the grasped vertices from their grasp points [m], shape [E]."""
+-        grasped = self.grasped[env_ids]
+-        vertices = self._cloth.data.nodal_pos_w.torch[env_ids]
+-        distance = (vertices - self.grasp_points(env_ids)).norm(dim=-1)
+-        return (distance * grasped).sum(dim=1) / grasped.sum(dim=1).clamp_min(1)
+-
+-    def kinematic_targets(self) -> torch.Tensor:
+-        """Return nodal kinematic targets that lock the grasped vertices to the gripper, shape [N, P, 4]."""
+-        vertices = self._cloth.data.nodal_pos_w.torch
+-        targets = torch.cat([vertices, torch.ones_like(vertices[..., :1])], dim=-1)
+-        locked = self.grasped & self.active.unsqueeze(1)
+-        if locked.any():
+-            env_ids = torch.arange(vertices.shape[0], device=vertices.device)
+-            targets[..., :3] = torch.where(locked.unsqueeze(-1), self.grasp_points(env_ids), vertices)
+-            targets[..., 3] = torch.where(locked, 0.0, 1.0)
+-        return targets
+-
+-
+ def main():
+     # parse configuration via Hydra, so presets can be selected on the CLI
+     env_cfg, _ = resolve_task_config(args_cli.task, "")
+@@ -555,11 +393,17 @@ def main():
+     for term_name in list(vars(env_cfg.terminations)):
+         if term_name != "time_out":
+             setattr(env_cfg.terminations, term_name, None)
+-    # simulate full gravity from the start instead of the training curriculum's ramp from zero
+-    env_cfg.curriculum.gravity = None
++    # No rewards or curricula: the task's rewards read its cloth grasp action, which the state machine replaces, and
++    # the curricula depend on them. Without them the simulation keeps full gravity and full-length drags.
++    for group in (env_cfg.rewards, env_cfg.curriculum):
++        for term_name in list(vars(group)):
++            setattr(group, term_name, None)
++    env_cfg.commands.deformable_pose.drag_fraction = 1.0
+     # the state machine emits absolute end-effector poses, so pick the task's own IK action preset
+     env_cfg.actions = type(env_cfg)().actions.ik
+     env_cfg.actions.arm_action.controller.ik_params = {"lambda_val": IK_DAMPING}
++    # the state machine grasps the cloth itself, so drop the observation of the task's cloth grasp action
++    env_cfg.observations.policy.grasp_state = None
+     # Command the finger opening directly instead of the preset's open/close switch, so the gripper can hold the
+     # opening at which it closed on the cloth. The task's IK preset sets the open and closed openings; a friction
+     # grasp closes fully instead, since it needs the fingers to squeeze the fold.
+@@ -639,6 +483,9 @@ def main():
+         finger_joint_id = robot.find_joints("panda_finger_joint1")[0][0]
+         ee_frame_sensor = unwrapped.scene["ee_frame"]
+         cube_grasp_pos = torch.zeros((unwrapped.num_envs, 3), device=device)
++        # drag to the task's target, which its markers show
++        drag_command = unwrapped.command_manager.get_term("deformable_pose")
++        drag_sm.reset_idx(None, drag_command.command[:, :3])
+ 
+         for _ in range(args_cli.num_steps):
+             # run everything in inference mode
+@@ -650,7 +497,7 @@ def main():
+                 # reset state machine and release the cloth of reset environments
+                 if dones.any():
+                     done_ids = dones.nonzero(as_tuple=False).squeeze(-1)
+-                    drag_sm.reset_idx(done_ids)
++                    drag_sm.reset_idx(done_ids, drag_command.command[done_ids, :3])
+                     constraint.deactivate(done_ids)
+                     # the reset moves the arm away from the cloth
+                     constraint.restore_contacts(done_ids)
+diff --git a/source/isaaclab_tasks/changelog.d/non-prehensile-cloth.minor.rst b/source/isaaclab_tasks/changelog.d/non-prehensile-cloth.minor.rst
+index ad39df8d2..a1bf69cd9 100644
+--- a/source/isaaclab_tasks/changelog.d/non-prehensile-cloth.minor.rst
++++ b/source/isaaclab_tasks/changelog.d/non-prehensile-cloth.minor.rst
+@@ -7,9 +7,8 @@ Added
+   cloth material lies on the table 0.60 m in front of the robot, and a 5 cm solid PLA cube (0.155 kg) sits on
+   top of it. The sheet carries a 3 cm crease across the corner nearest the robot on its right, which gives the
+   gripper a fold to pinch. Each reset moves the cloth and the cube by one shared random offset, so the cube
+-  starts centred on the cloth. The tasks reuse the room, lighting, cameras, visualizers, and MDP of the
+-  ``IsaacContrib-Lift-Sock-Franka`` tasks; task-specific rewards, commands, and observations are still to
+-  come.
++  starts centred on the cloth. The tasks reuse the room, lighting, cameras, and visualizers of the
++  ``IsaacContrib-Lift-Sock-Franka`` tasks.
+ * Simulated the cube of the ``IsaacContrib-Franka-nonp-cloth`` tasks with the same Newton VBD solver as the
+   cloth, so cloth and cube contacts are solved together while MJWarp still simulates the robot. A coupler
+   manager derives the cube's free-joint coordinates from the VBD body state after every substep, so the
+@@ -36,3 +35,30 @@ Added
+   constraints that lock the grasped cloth vertices to the gripper, and holds the fingers at the opening where
+   they closed on the fold; ``--grasp_mode friction`` squeezes the fold with the fully closed gripper and relies
+   on friction alone.
++* Added the reinforcement learning MDP of the ``IsaacContrib-Franka-nonp-cloth`` tasks, which replaces the one
++  inherited from the ``IsaacContrib-Lift-Sock-Franka`` tasks. The policy pinches the crease and drags it to a
++  target that each episode draws on the line the state machine uses, 0.35 m in front of the robot base with
++  y between -0.30 m and 0.30 m. The target and the crease are drawn as spheres that turn green, together with the
++  table rim, once the crease is within 3 cm of the target. The rewards are staged. Before the grasp they pay for
++  reaching the point 1.2 cm below the crest where the fingers straddle the fold, turning the gripper to close across
++  the crease, and closing the fingers at that point, and a small penalty discourages closing them farther than
++  2.5 cm from it; while the gripper holds the crease these terms pay their maximum, and a grasp term and the
++  crease's horizontal distance to the target pay on top. A bonus pays once the crease is within 3 cm of the
++  target, and ``Metrics/success_rate`` logs the share of episodes in which it got there. A drag-distance curriculum
++  starts the targets 20 % of the way from the crease to the line, but at least 6 cm from it, and moves them out as
++  episodes succeed. The action-rate penalty rises to -0.01 after 15,000 steps, instead of the soft lift tasks'
++  -0.1, which would outweigh the approach rewards. Episodes last 10 s under full gravity, since the gravity
++  curriculum of the soft lift tasks would leave the cube too light to ride on the cloth.
++* Added ``ClothGraspActionCfg``, a binary gripper action that grasps the cloth inside the environment as the state
++  machine does: once the closing fingers reach 1.5 cm each, it locks the cloth vertices pinched between them to the
++  gripper, and once the opening fingers reach 3.2 cm each, it releases them. The fingers take three steps to cover
++  either way, so single noisy gripper actions neither grasp nor drop the cloth. The state machine now imports the
++  shared ``GripperConstraint`` from the task and drags to the task's target command, so the target marker shows
++  where it drags.
++* Gave the ``IsaacContrib-Franka-nonp-cloth`` tasks two action presets: the default ``ik_rel`` for training and
++  ``ik``, an absolute end-effector pose, for the state machine. ``ik_rel`` combines the cloth grasp gripper with
++  ``TopDownDifferentialIKActionCfg``, a differential inverse kinematics action that keeps the hand pointing straight
++  down and only moves it and turns it about the vertical axis, a 4-dimensional arm action.
++* Started the ``IsaacContrib-Franka-nonp-cloth`` robot with its hand pointing straight down. The soft lift tasks'
++  default arm pose tilts the hand by 46 deg; the tasks turn joints 6 and 7 to point it down at zero yaw, and each
++  reset draws a random arm pose that keeps it pointing down.
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/__init__.py b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/__init__.py
+index d69c150f9..58415813a 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/__init__.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/__init__.py
+@@ -19,7 +19,7 @@ from . import agents
+ 
+ gym.register(
+     id="IsaacContrib-Franka-nonp-cloth",
+-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
++    entry_point=f"{__name__}.franka_nonp_cloth_env:FrankaNonpClothEnv",
+     disable_env_checker=True,
+     kwargs={
+         "env_cfg_entry_point": f"{__name__}.franka_nonp_cloth_env_cfg:FrankaNonpClothEnvCfg",
+@@ -30,7 +30,7 @@ gym.register(
+ 
+ gym.register(
+     id="IsaacContrib-Franka-nonp-cloth-WristCam",
+-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
++    entry_point=f"{__name__}.franka_nonp_cloth_env:FrankaNonpClothEnv",
+     disable_env_checker=True,
+     kwargs={
+         "env_cfg_entry_point": f"{__name__}.franka_nonp_cloth_env_cfg:FrankaNonpClothWristCameraEnvCfg",
+@@ -41,7 +41,7 @@ gym.register(
+ 
+ gym.register(
+     id="IsaacContrib-Franka-nonp-cloth-HeadCam",
+-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
++    entry_point=f"{__name__}.franka_nonp_cloth_env:FrankaNonpClothEnv",
+     disable_env_checker=True,
+     kwargs={
+         "env_cfg_entry_point": f"{__name__}.franka_nonp_cloth_env_cfg:FrankaNonpClothHeadCameraEnvCfg",
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/agents/rsl_rl_ppo_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/agents/rsl_rl_ppo_cfg.py
+index a500e459c..5c73f3e1c 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/agents/rsl_rl_ppo_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/agents/rsl_rl_ppo_cfg.py
+@@ -5,9 +5,11 @@
+ 
+ from isaaclab.utils import configclass
+ 
+-from isaaclab_tasks.core.lift.config.franka_soft.agents.rsl_rl_ppo_cfg import FrankaDeformablePPORunnerCfg
++from isaaclab_tasks.core.lift.config.franka_soft.agents.rsl_rl_ppo_cfg import ALGO_CFG, FrankaDeformablePPORunnerCfg
+ 
+ 
+ @configclass
+ class FrankaNonpClothPPORunnerCfg(FrankaDeformablePPORunnerCfg):
+-    experiment_name = "franka_nonp_cloth"
++    experiment_name = "nonprehensile_cloth"
++    # a longer horizon than the soft lift tasks, for the 300-step episodes with their long drag
++    algorithm = ALGO_CFG.replace(learning_rate=1.0e-3, gamma=0.99)
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/cloth_mesh.py b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/cloth_mesh.py
+index 61ffcb66f..a07d4d048 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/cloth_mesh.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/cloth_mesh.py
+@@ -76,6 +76,20 @@ def corner_ridge_positions(
+     return wrinkled
+ 
+ 
++def crease_node_mask(nodes: torch.Tensor, crest_band: float) -> torch.Tensor:
++    """Select the nodes on the crest of a creased sheet: those within ``crest_band`` of its highest node.
++
++    Args:
++        nodes: Node positions [m], shape [..., N, 3].
++        crest_band: Height below the highest node that still counts as crest [m].
++
++    Returns:
++        Whether each node lies on the crest, shape [..., N].
++    """
++    height = nodes[..., 2]
++    return height >= height.amax(dim=-1, keepdim=True) - crest_band
++
++
+ @sim_utils.clone
+ def spawn_creased_mesh_rectangle(
+     prim_path: str,
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/franka_nonp_cloth_env_cfg.py b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/franka_nonp_cloth_env_cfg.py
+index 16bf8ec8a..ab1a80843 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/franka_nonp_cloth_env_cfg.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/franka_nonp_cloth_env_cfg.py
+@@ -23,8 +23,14 @@ from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
+ import isaaclab.sim as sim_utils
+ from isaaclab.assets import RigidObjectCfg
+ from isaaclab.assets.deformable_object import DeformableObjectCfg
++from isaaclab.controllers import DifferentialIKControllerCfg
++from isaaclab.managers import CurriculumTermCfg as CurrTerm
+ from isaaclab.managers import EventTermCfg as EventTerm
++from isaaclab.managers import ObservationGroupCfg as ObsGroup
++from isaaclab.managers import ObservationTermCfg as ObsTerm
++from isaaclab.managers import RewardTermCfg as RewTerm
+ from isaaclab.managers import SceneEntityCfg
++from isaaclab.managers import TerminationTermCfg as DoneTerm
+ from isaaclab.physics import PhysxAutoCfg
+ from isaaclab.sensors import CameraCfg
+ from isaaclab.utils import configclass
+@@ -36,6 +42,7 @@ from isaaclab_tasks.contrib.franka_sock.franka_sock_env_cfg import (
+     HEAD_CAMERA_DEPTH_RANGE,
+     ROOM_SIZE,
+     SOCK_VISUAL_MATERIAL,
++    SUCCESS_VISUALIZER_CFG,
+     WRIST_CAMERA_CFG,
+     WRIST_CAMERA_DEPTH_RANGE,
+     FrankaSockEnvCfg,
+@@ -45,7 +52,12 @@ from isaaclab_tasks.contrib.franka_sock.franka_sock_env_cfg import (
+     _camera_visualizer_cfgs,
+ )
+ from isaaclab_tasks.contrib.franka_sock.franka_sock_env_cfg import DeformableCfg as FrankaSockDeformableCfg
++from isaaclab_tasks.contrib.lift import mdp as lift_mdp
++from isaaclab_tasks.core.lift import mdp as soft_lift_mdp
++from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import CurriculumCfg as FrankaSoftCurriculumCfg
+ from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import EventCfg as FrankaSoftEventCfg
++from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import TerminationsCfg as FrankaSoftTerminationsCfg
++from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import _IkActionsCfg as FrankaSoftIkActionsCfg
+ from isaaclab_tasks.utils import PresetCfg
+ 
+ from . import mdp
+@@ -87,6 +99,47 @@ _CLOTH_PARTICLE_RADIUS = _SOCK_DEFORMABLE_CFG.newton_mjwarp_vbd_proxy.spawn.phys
+ # the cube spawns 2 mm above the cloth's particle shell
+ CUBE_SPAWN_HEIGHT = CLOTH_SPAWN_HEIGHT + _CLOTH_PARTICLE_RADIUS + 0.5 * CUBE_SIZE + 0.002
+ 
++##
++# Task geometry
++##
++
++# Drag targets are drawn uniformly on this line in front of the robot base, which the gripper reaches over its
++# whole width at table height. The line lies closer to the robot than any crease, so every drag pulls the sheet
++# toward the robot instead of folding it over itself [m].
++DRAG_TARGET_X = 0.35
++DRAG_TARGET_Y = (-0.30, 0.30)
++# resting height of the crest, at which the drag target is drawn [m]
++CREASE_HEIGHT = CLOTH_SPAWN_HEIGHT + CLOTH_CREASE_CFG["ridge_height"]
++# horizontal distance of the crease from its target within which the drag succeeded [m]
++CREASE_SUCCESS_THRESHOLD = 0.03
++# Damping of the differential IK. The soft lift tasks' IK preset (0.6) settles too slowly for the low-PD Franka to
++# reach down onto the crease.
++IK_DAMPING = 0.1
++# long enough for the low-PD Franka to pinch the crease and drag it across the table [s]
++EPISODE_LENGTH_S = 10.0
++# Arm pose with the hand pointing straight down at zero yaw, see :func:`~.mdp.top_down_yaw` [rad]. It is the soft lift
++# tasks' default pose, whose hand is tilted 46 deg, with joint 6 turned to q6 = q2 - q4 + 0.0035, which points the
++# hand's z-axis down to within 0.2 deg, and joint 7 turned to pi / 4.
++TOP_DOWN_ARM_JOINT_POS = {
++    "panda_joint1": 0.0,
++    "panda_joint2": -0.569,
++    "panda_joint3": 0.0,
++    "panda_joint4": -2.810,
++    "panda_joint5": 0.0,
++    "panda_joint6": 2.2445,
++    "panda_joint7": 0.7854,
++}
++# Joint offsets of the top-down reset [rad]. They start the fingertip point 0.18-0.35 m above the table and
++# 0.19-0.52 m from the crease, with the hand turned up to about 50 deg either way.
++TOP_DOWN_RESET_OFFSETS = {
++    "panda_joint1": (-0.25, 0.25),
++    "panda_joint2": (-0.15, 0.15),
++    "panda_joint4": (-0.15, 0.15),
++    "panda_joint7": (-0.6, 0.6),
++}
++# share of the full drag at which the drag-distance curriculum starts
++INITIAL_DRAG_FRACTION = 0.2
++
+ ##
+ # Scene definition
+ ##
+@@ -132,7 +185,8 @@ class PhysicsCfg(PresetCfg):
+                 ),
+                 CouplerEntryCfg(
+                     name="soft",
+-                    solver_cfg=_ClothCubeVBDSolverCfg(iterations=10, rigid_body_particle_contact_buffer_size=1024),
++                    # twice the sock task's buffer: a hand pressed into the crumpled cloth overflowed 1024
++                    solver_cfg=_ClothCubeVBDSolverCfg(iterations=10, rigid_body_particle_contact_buffer_size=2048),
+                     bodies=[r"/World/envs/env_[^/]+/Cube"],
+                     all_particles=True,
+                     include_static_shapes=True,
+@@ -228,6 +282,10 @@ class FrankaNonpClothSceneCfg(FrankaSockSceneCfg):
+         # MuJoCo ignores the inherited ``disable_gravity``, so the low-PD arm sagged about 4 cm below its
+         # IK targets under full gravity; compensate gravity through the actuators instead, as a real Franka does
+         self.robot.spawn.joint_drive_props = [MujocoJointCfg(actuatorgravcomp=True)]
++        # start with the hand pointing straight down, as the top-down arm action and reset keep it
++        self.robot.init_state = self.robot.init_state.replace(
++            joint_pos={**self.robot.init_state.joint_pos, **TOP_DOWN_ARM_JOINT_POS}
++        )
+ 
+ 
+ @configclass
+@@ -252,10 +310,180 @@ class FrankaNonpClothScenePresetCfg(PresetCfg):
+ ##
+ 
+ 
++@configclass
++class CommandsCfg:
++    """The target to drag the crease of the cloth to."""
++
++    # named as the sock task's command, whose configuration sets its success visualizer
++    deformable_pose = mdp.CreaseDragCommandCfg(
++        asset_name="robot",
++        object_name="deformable",
++        # longer than an episode, so the target drawn at a reset holds for the whole episode
++        resampling_time_range=(2 * EPISODE_LENGTH_S, 2 * EPISODE_LENGTH_S),
++        debug_vis=True,
++        ranges=mdp.CreaseDragCommandCfg.Ranges(
++            pos_x=(DRAG_TARGET_X, DRAG_TARGET_X),
++            pos_y=DRAG_TARGET_Y,
++            pos_z=(CREASE_HEIGHT, CREASE_HEIGHT),
++            roll=(0.0, 0.0),
++            pitch=(0.0, 0.0),
++            yaw=(0.0, 0.0),
++        ),
++        success_threshold=CREASE_SUCCESS_THRESHOLD,
++        # raised to the full drag by the drag-distance curriculum
++        drag_fraction=INITIAL_DRAG_FRACTION,
++        # the sock task's green rim around the table shows once the crease reaches its target
++        success_vis_asset_name="table",
++        success_visualizer_cfg=SUCCESS_VISUALIZER_CFG,
++    )
++
++
++@configclass
++class _IkRelActionsCfg:
++    """4-dim relative top-down end-effector motion (translation and yaw) via differential IK + 1-dim binary gripper
++    that grasps the cloth."""
++
++    arm_action = mdp.TopDownDifferentialIKActionCfg(
++        asset_name="robot",
++        joint_names=["panda_joint.*"],
++        body_name="panda_hand",
++        controller=DifferentialIKControllerCfg(
++            command_type="pose",
++            use_relative_mode=True,
++            ik_method="dls",
++            ik_params={"lambda_val": IK_DAMPING},
++        ),
++        # motion per step at a unit action: 2 cm and 0.05 rad, i.e. 0.6 m/s and 1.5 rad/s
++        scale=(0.02, 0.02, 0.02, 0.05),
++        body_offset=mdp.TopDownDifferentialIKActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.107]),
++        # The robot does not collide with the table, which only the cloth solver knows about, so keep the fingertips,
++        # about 5 mm below this frame, at least 7 mm above it. The crease grasp puts this frame about 18 mm high.
++        min_height=0.012,
++    )
++
++    gripper_action = mdp.ClothGraspActionCfg(
++        asset_name="robot",
++        joint_names=["panda_finger_joint1"],
++        open_command_expr={"panda_finger_joint1": 0.04},
++        close_command_expr={"panda_finger_joint1": GRIPPER_CLOSED_OPENING},
++    )
++
++
++@configclass
++class ActionsCfg(PresetCfg):
++    """Action-space presets: relative top-down task-space IK for RL, absolute task-space IK for the state machine."""
++
++    ik_rel: _IkRelActionsCfg = _IkRelActionsCfg()
++
++    ik: FrankaSoftIkActionsCfg = FrankaSoftIkActionsCfg()
++
++    default = ik_rel
++
++
++@configclass
++class ObservationsCfg:
++    """Policy observations: arm state, crease, cube, drag target, their relative positions and yaw, grasp state,
++    cloth points, and last action."""
++
++    @configclass
++    class PolicyCfg(ObsGroup):
++        joint_pos = ObsTerm(func=mdp.joint_pos_rel)
++        joint_vel = ObsTerm(func=mdp.joint_vel_rel)
++        ee_position = ObsTerm(func=mdp.ee_position_in_robot_root_frame)
++        crease_position = ObsTerm(
++            func=mdp.crease_position_in_robot_root_frame, params={"command_name": "deformable_pose"}
++        )
++        cube_position = ObsTerm(
++            func=lift_mdp.object_position_in_robot_root_frame, params={"object_cfg": SceneEntityCfg("cube")}
++        )
++        target_position = ObsTerm(func=mdp.generated_commands, params={"command_name": "deformable_pose"})
++        crease_from_ee = ObsTerm(func=mdp.crease_relative_to_ee, params={"command_name": "deformable_pose"})
++        target_from_crease = ObsTerm(func=mdp.target_relative_to_crease, params={"command_name": "deformable_pose"})
++        crease_yaw_error = ObsTerm(func=mdp.crease_yaw_error, params={"command_name": "deformable_pose"})
++        grasp_state = ObsTerm(func=mdp.grasp_state)
++        deformable_sampled_points = ObsTerm(
++            func=soft_lift_mdp.DeformableSampledPointsInRobotRootFrame,
++            params={"asset_cfg": SceneEntityCfg("deformable"), "num_points": 20},
++        )
++        actions = ObsTerm(func=mdp.last_action)
++
++        def __post_init__(self) -> None:
++            self.enable_corruption = True
++            self.concatenate_terms = True
++
++    policy: PolicyCfg = PolicyCfg()
++
++
++@configclass
++class RewardsCfg:
++    """Staged rewards to pinch the crease and drag it to its target.
++
++    Before the grasp, the reach, yaw alignment, and closing terms guide the gripper onto the crease and close it there.
++    While the gripper holds the crease they pay their maximum, so grasping never costs reward, and only then do the
++    goal terms pay for moving the crease toward its target. Letting go of the crease drops the grasp and goal terms
++    again.
++    """
++
++    # wide enough to pull the gripper in from its start 0.2-0.5 m away from the crease
++    reaching_crease = RewTerm(
++        func=mdp.crease_ee_distance, params={"std": 0.3, "command_name": "deformable_pose"}, weight=1.0
++    )
++
++    # wide enough to pay for descending from a hover onto the crease: 0.24 at 5 cm above its grasp point
++    reaching_crease_fine = RewTerm(
++        func=mdp.crease_ee_distance, params={"std": 0.05, "command_name": "deformable_pose"}, weight=1.0
++    )
++
++    yaw_alignment = RewTerm(func=mdp.crease_yaw_alignment, params={"command_name": "deformable_pose"}, weight=1.0)
++
++    # closing the fingers pays only within about a finger's width of the grasp point
++    closing_at_crease = RewTerm(
++        func=mdp.crease_closing, params={"std": 0.015, "command_name": "deformable_pose"}, weight=1.0
++    )
++
++    grasping_crease = RewTerm(func=mdp.crease_grasped, params={"command_name": "deformable_pose"}, weight=2.0)
++
++    crease_goal_tracking = RewTerm(
++        func=mdp.crease_goal_distance, params={"std": 0.2, "command_name": "deformable_pose"}, weight=4.0
++    )
++
++    crease_goal_tracking_fine = RewTerm(
++        func=mdp.crease_goal_distance, params={"std": 0.03, "command_name": "deformable_pose"}, weight=4.0
++    )
++
++    success = RewTerm(
++        func=mdp.CreaseGoalReached,
++        params={"command_name": "deformable_pose", "success_threshold": CREASE_SUCCESS_THRESHOLD},
++        weight=10.0,
++    )
++
++    # Closing the gripper away from the crease pays nothing, but it pushes the fold instead of straddling it and spends
++    # the close's one grasp try; keep the gripper open on the approach. Zero within 2.5 cm of the grasp point, about
++    # half the weight at 5.3 cm and the full weight beyond 15 cm.
++    closing_away_from_crease = RewTerm(
++        func=mdp.crease_closing_away,
++        params={"margin": 0.025, "std": 0.05, "command_name": "deformable_pose"},
++        weight=-0.5,
++    )
++
++    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
++
++    joint_vel = RewTerm(
++        func=mdp.joint_vel_l2, params={"asset_cfg": SceneEntityCfg("robot", joint_names="panda_joint.*")}, weight=-1e-4
++    )
++
++
+ @configclass
+ class FrankaNonpClothEventCfg(FrankaSoftEventCfg):
+     """Reset events for the Franka non-prehensile cloth environment."""
+ 
++    # random arm poses with the hand pointing straight down, instead of the soft lift tasks' per-joint scaling
++    reset_robot_arm_joints = EventTerm(
++        func=mdp.reset_franka_top_down,
++        mode="reset",
++        params={"joint_offset_ranges": TOP_DOWN_RESET_OFFSETS, "asset_cfg": SceneEntityCfg("robot")},
++    )
++
+     # the cube moves with the cloth, so it stays on it; x starts closer than the sock's -0.15 m,
+     # since the longer cloth would otherwise reach the robot base
+     reset_deformable = EventTerm(
+@@ -269,6 +497,47 @@ class FrankaNonpClothEventCfg(FrankaSoftEventCfg):
+     )
+ 
+ 
++@configclass
++class TerminationsCfg(FrankaSoftTerminationsCfg):
++    """The soft lift tasks' terminations, and an end to episodes whose simulation state is no longer finite."""
++
++    nonfinite_state = DoneTerm(func=mdp.nonfinite_state)
++
++
++@configclass
++class CurriculumCfg(FrankaSoftCurriculumCfg):
++    """A softer action-rate ramp than the soft lift tasks' and a drag-distance curriculum.
++
++    The drag target starts :data:`INITIAL_DRAG_FRACTION` of the way from the crease to the target line. Each
++    environment's difficulty rises after an episode in which the crease reached its target and falls otherwise; the
++    mean difficulty moves the targets out to the full drag.
++    """
++
++    # The soft lift tasks raise the action-rate penalty 100x, to -0.1, after 15,000 env steps (about 625 iterations of
++    # 24 steps). Over the 5 actions that is up to about -1 per step, as much as the whole approach reward, so raise it
++    # only to -0.01.
++    action_rate = CurrTerm(
++        func=mdp.modify_reward_weight, params={"term_name": "action_rate", "weight": -1e-2, "num_steps": 15000}
++    )
++
++    drag_difficulty = CurrTerm(
++        func=soft_lift_mdp.DifficultyScheduler, params={"init_difficulty": 0, "min_difficulty": 0, "max_difficulty": 10}
++    )
++
++    drag_fraction = CurrTerm(
++        func=mdp.modify_term_cfg,
++        params={
++            "address": "commands.deformable_pose.drag_fraction",
++            "modify_fn": soft_lift_mdp.initial_final_interpolate_fn,
++            "modify_params": {
++                "initial_value": INITIAL_DRAG_FRACTION,
++                "final_value": 1.0,
++                "difficulty_term_str": "drag_difficulty",
++            },
++        },
++    )
++
++
+ ##
+ # Environment configuration
+ ##
+@@ -278,15 +547,28 @@ class FrankaNonpClothEventCfg(FrankaSoftEventCfg):
+ class FrankaNonpClothEnvCfg(FrankaSockEnvCfg):
+     """Manager-based RL environment: Franka Panda moving a cube by pulling the cloth it rests on.
+ 
+-    Only the scene differs from the sock task so far; the rewards, commands, and observations are the sock's.
++    The policy pinches the crease of the cloth and drags it to a target on a line in front of the robot, as the
++    ``franka_nonp_cloth_sm.py`` state machine does. The gripper grasps the cloth with the state machine's
++    position-level constraint, see :class:`~.mdp.ClothGraspActionCfg`.
+     """
+ 
+     scene: FrankaNonpClothScenePresetCfg = FrankaNonpClothScenePresetCfg()
++    observations: ObservationsCfg = ObservationsCfg()
++    actions: ActionsCfg = ActionsCfg()
++    commands: CommandsCfg = CommandsCfg()
++    rewards: RewardsCfg = RewardsCfg()
++    terminations: TerminationsCfg = TerminationsCfg()
+     events: FrankaNonpClothEventCfg = FrankaNonpClothEventCfg()
++    curriculum: CurriculumCfg = CurriculumCfg()
+ 
+     def __post_init__(self) -> None:
+         super().__post_init__()
+ 
++        self.episode_length_s = EPISODE_LENGTH_S
++        # Full gravity from the start: without it the cube does not press on the cloth, so friction cannot carry it
++        # along with the drag.
++        self.curriculum.gravity = None
++
+         # cloth and cube physics presets, see :class:`PhysicsCfg`
+         self.sim.physics = PhysicsCfg()
+         # Close the gripper onto the crease's fold: the shared soft-lift default (0.01 m per finger) stays clear of
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/__init__.pyi b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/__init__.pyi
+index 5b197f19e..6416e63dc 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/__init__.pyi
++++ b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/__init__.pyi
+@@ -4,8 +4,57 @@
+ # SPDX-License-Identifier: BSD-3-Clause
+ 
+ __all__ = [
++    "ClothGraspActionCfg",
++    "TopDownDifferentialIKActionCfg",
++    "FINGER_ANCHOR_DEPTHS",
++    "GRASP_PROXIMITY",
++    "GripperConstraint",
++    "CreaseDragCommandCfg",
+     "reset_deformable_with_object",
++    "reset_franka_top_down",
++    "crease_position_in_robot_root_frame",
++    "crease_relative_to_ee",
++    "crease_yaw_error",
++    "ee_position_in_robot_root_frame",
++    "ee_yaw_error_to_crease",
++    "grasp_state",
++    "nonfinite_state",
++    "target_relative_to_crease",
++    "CreaseGoalReached",
++    "crease_closing",
++    "crease_closing_away",
++    "crease_ee_distance",
++    "crease_goal_distance",
++    "crease_grasped",
++    "crease_yaw_alignment",
++    "TOP_DOWN_QUAT",
++    "gripper_yaw_error",
++    "top_down_quat",
++    "top_down_yaw",
+ ]
+ 
+-from .events import reset_deformable_with_object
++from .actions_cfg import ClothGraspActionCfg, TopDownDifferentialIKActionCfg
++from .cloth_grasp import FINGER_ANCHOR_DEPTHS, GRASP_PROXIMITY, GripperConstraint
++from .commands_cfg import CreaseDragCommandCfg
++from .events import reset_deformable_with_object, reset_franka_top_down
++from .observations import (
++    crease_position_in_robot_root_frame,
++    crease_relative_to_ee,
++    crease_yaw_error,
++    ee_position_in_robot_root_frame,
++    ee_yaw_error_to_crease,
++    grasp_state,
++    target_relative_to_crease,
++)
++from .terminations import nonfinite_state
++from .rewards import (
++    CreaseGoalReached,
++    crease_closing,
++    crease_closing_away,
++    crease_ee_distance,
++    crease_goal_distance,
++    crease_grasped,
++    crease_yaw_alignment,
++)
++from .top_down import TOP_DOWN_QUAT, gripper_yaw_error, top_down_quat, top_down_yaw
+ from isaaclab.envs.mdp import *
+diff --git a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/events.py b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/events.py
+index a8eaecd42..b1d82f9cf 100644
+--- a/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/events.py
++++ b/source/isaaclab_tasks/isaaclab_tasks/contrib/franka_nonp_cloth/mdp/events.py
+@@ -15,7 +15,7 @@ from isaaclab.managers import SceneEntityCfg
+ from isaaclab.utils.math import sample_uniform
+ 
+ if TYPE_CHECKING:
+-    from isaaclab.assets import DeformableObject, RigidObject
++    from isaaclab.assets import Articulation, DeformableObject, RigidObject
+     from isaaclab.envs import ManagerBasedEnv
+ 
+ 
+@@ -54,3 +54,47 @@ def reset_deformable_with_object(
+     rigid_object.write_root_velocity_to_sim_index(
+         root_velocity=torch.zeros_like(rigid_object.data.default_root_vel.torch[env_ids]), env_ids=env_ids
+     )
++
++
++def reset_franka_top_down(
++    env: ManagerBasedEnv,
++    env_ids: torch.Tensor,
++    joint_offset_ranges: dict[str, tuple[float, float]],
++    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
++) -> None:
++    """Reset a Franka arm to a random pose with its hand still pointing the way it points in the default pose.
++
++    Offsets drawn uniformly from ``joint_offset_ranges`` [rad] are added to the default joint positions. With joints 3
++    and 5 at zero, joints 2, 4 and 6 turn about parallel axes, and the hand's pitch is ``-q2 + q4 + q6`` plus a
++    constant, so joint 6 takes up the pitch that the offsets of joints 2 and 4 add. Joints 1 and 7 only turn the hand
++    about the vertical axis. Offsets of joints 3, 5, or 6 would tilt the hand, so they are rejected.
++
++    Args:
++        env: The environment instance.
++        env_ids: The environment indices to reset.
++        joint_offset_ranges: Offset bounds [rad] keyed by the names of ``panda_joint1``, ``panda_joint2``,
++            ``panda_joint4``, and ``panda_joint7``. Missing joints keep their default positions.
++        asset_cfg: Scene entity of the Franka arm.
++    """
++    robot: Articulation = env.scene[asset_cfg.name]
++    tilting = set(joint_offset_ranges) & {"panda_joint3", "panda_joint5", "panda_joint6"}
++    if tilting:
++        raise ValueError(f"Offsets of {sorted(tilting)} would tilt the hand away from its default direction.")
++
++    joint_pos = robot.data.default_joint_pos.torch[env_ids].clone()
++    offset_ids, _ = robot.find_joints(list(joint_offset_ranges), preserve_order=True)
++    ranges = torch.tensor(list(joint_offset_ranges.values()), device=joint_pos.device)
++    offsets = sample_uniform(ranges[:, 0], ranges[:, 1], (len(env_ids), len(offset_ids)), device=joint_pos.device)
++    joint_pos[:, offset_ids] += offsets
++    # keep the pitch of the hand: dq6 = dq2 - dq4
++    (j2, j4, j6), _ = robot.find_joints(["panda_joint2", "panda_joint4", "panda_joint6"], preserve_order=True)
++    default_pos = robot.data.default_joint_pos.torch[env_ids]
++    joint_pos[:, j6] += (joint_pos[:, j2] - default_pos[:, j2]) - (joint_pos[:, j4] - default_pos[:, j4])
++
++    limits = robot.data.soft_joint_pos_limits.torch[env_ids]
++    joint_pos = joint_pos.clamp(limits[..., 0], limits[..., 1])
++    arm_ids, _ = robot.find_joints("panda_joint[1-7]")
++    robot.write_joint_position_to_sim_index(position=joint_pos[:, arm_ids], joint_ids=arm_ids, env_ids=env_ids)
++    robot.write_joint_velocity_to_sim_index(
++        velocity=torch.zeros_like(joint_pos[:, arm_ids]), joint_ids=arm_ids, env_ids=env_ids
++    )
+diff --git a/source/isaaclab_tasks/test/contrib/test_franka_nonp_cloth_cloth_mesh.py b/source/isaaclab_tasks/test/contrib/test_franka_nonp_cloth_cloth_mesh.py
+index 782264479..7cb6afbf7 100644
+--- a/source/isaaclab_tasks/test/contrib/test_franka_nonp_cloth_cloth_mesh.py
++++ b/source/isaaclab_tasks/test/contrib/test_franka_nonp_cloth_cloth_mesh.py
+@@ -7,7 +7,7 @@
+ 
+ import torch
+ 
+-from isaaclab_tasks.contrib.franka_nonp_cloth.cloth_mesh import corner_ridge_positions
++from isaaclab_tasks.contrib.franka_nonp_cloth.cloth_mesh import corner_ridge_positions, crease_node_mask
+ 
+ # flat 0.40 m x 0.30 m sheet on a 1 mm grid, centered away from the origin
+ _SIZE = (0.40, 0.30)
+@@ -82,3 +82,22 @@ def test_ridge_peak_height_and_location():
+     t_wrinkled, corner_dist = _diagonal_coordinate(wrinkled, inputs["corner_signs"])
+     peak_t = t_wrinkled.gather(-1, peak.unsqueeze(-1)).squeeze(-1)
+     torch.testing.assert_close(peak_t, corner_dist - inputs["distance"], rtol=0.0, atol=2 * _SPACING)
++
++
++def test_crease_node_mask_selects_ridge_crest():
++    """The crest nodes form a band along the ridge top, centered at the requested distance from the corner."""
++    inputs = _ridge_inputs()
++    crest_band = 0.005
++    flat, _, _ = _flat_sheet(2)
++    wrinkled = corner_ridge_positions(flat, **inputs)
++    crest = crease_node_mask(wrinkled, crest_band)
++
++    t, corner_dist = _diagonal_coordinate(wrinkled, inputs["corner_signs"])
++    ridge_center = (corner_dist - inputs["distance"]).unsqueeze(-1)
++    # the sin^2 bump rises above height - crest_band over this half-width of its footprint
++    half_width = inputs["width"] * torch.asin((crest_band / inputs["height"]).sqrt()) / torch.pi
++    offset = (t - ridge_center).abs()
++    for env in range(2):
++        assert crest[env].sum() > 10
++        assert offset[env][crest[env]].max() <= half_width[env] + _SPACING
++        torch.testing.assert_close(t[env][crest[env]].mean(), ridge_center[env, 0], rtol=0.0, atol=_SPACING)
