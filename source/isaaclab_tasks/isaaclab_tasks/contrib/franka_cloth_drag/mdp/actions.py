@@ -14,6 +14,8 @@ import torch
 import isaaclab.utils.math as math_utils
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
 
+from .frames import top_down_yaw
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
 
@@ -21,18 +23,6 @@ if TYPE_CHECKING:
 
 # (x, y, z, w) half turn about x, which points the Franka hand straight down
 TOP_DOWN_QUAT = (1.0, 0.0, 0.0, 0.0)
-
-
-def _top_down_yaw(quat: torch.Tensor) -> torch.Tensor:
-    """Return the heading of the hand's x-axis about the z-axis [rad], shape [N].
-
-    For an orientation ``Rz(yaw) * TOP_DOWN_QUAT`` this recovers ``yaw``, and it stays defined for a tilted hand.
-
-    Args:
-        quat: Hand orientations (x, y, z, w), shape [N, 4].
-    """
-    x_axis = math_utils.quat_apply(quat, torch.tensor((1.0, 0.0, 0.0), device=quat.device).expand(len(quat), 3))
-    return torch.atan2(x_axis[:, 1], x_axis[:, 0])
 
 
 def _top_down_quat(yaw: torch.Tensor) -> torch.Tensor:
@@ -77,7 +67,7 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
         self._raw_actions[:] = actions
         self._processed_actions[:] = self.raw_actions * self._scale
         ee_pos_curr, ee_quat_curr = self._compute_frame_pose()
-        yaw = (_top_down_yaw(ee_quat_curr) + self._processed_actions[:, 3]).clamp(*self.cfg.yaw_limits)
+        yaw = (top_down_yaw(ee_quat_curr) + self._processed_actions[:, 3]).clamp(*self.cfg.yaw_limits)
         # rotation from the current orientation to pointing straight down at the new yaw
         _, rotation = math_utils.compute_pose_error(
             ee_pos_curr, ee_quat_curr, ee_pos_curr, _top_down_quat(yaw), rot_error_type="axis_angle"
