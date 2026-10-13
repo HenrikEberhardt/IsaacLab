@@ -443,12 +443,16 @@ class ObservationsCfg(PresetCfg):
 class CommandsCfg:
     """Command specifications for the MDP."""
 
-    # Target for the cloth's center of mass on a line in front of the robot, resampled at every reset
+    # Target for the cloth COM on a line between the robot base and the cloth spawn, resampled at every reset.
     cloth_target = mdp.ClothTargetCommandCfg(
         asset_name="robot",
         object_name="deformable",
+        # Spawn line for target selection
         ranges=mdp.ClothTargetCommandCfg.Ranges(pos_x=(0.35, 0.35), pos_y=(-0.2, 0.2), pos_z=(0.002, 0.002)),
-        debug_vis=True,
+        success_radius=0.05,  # Target disc for success
+        max_speed=0.02,  # Max speed inside the target disc for the success timer to start
+        hold_time=0.5,  # Duration of the success timer
+        debug_vis=False, # Show marker at the target location
     )
 
 

@@ -21,13 +21,16 @@ if TYPE_CHECKING:
 
 @configclass
 class ClothTargetCommandCfg(CommandTermCfg):
-    """Configuration for a target position of the cloth's center of mass, see :class:`ClothTargetCommand`."""
+    """Configuration for a target position of the cloth's center of mass, see :class:`ClothTargetCommand`.
+
+    The goal is reached when the cloth's center of mass rests (slower than :attr:`max_speed`) within
+    :attr:`success_radius` of the target in the table plane for :attr:`hold_time` in a row.
+    """
 
     class_type: type[ClothTargetCommand] | str = "{DIR}.commands:ClothTargetCommand"
 
-    resampling_time_range: tuple[float, float] = (1.0e6, 1.0e6)
-    """Time between resamples during an episode [s]. Defaults to far longer than any episode, so the target only
-    changes when the episode resets."""
+    resampling_time_range: tuple[float, float] = (1.0e6, 1.0e6)  # no resampling based on time
+    """Time between resamples during an episode [s]. The target is only resampled when the episode resets."""
 
     asset_name: str = MISSING
     """Name of the robot whose root frame the target is expressed in."""
@@ -51,5 +54,19 @@ class ClothTargetCommandCfg(CommandTermCfg):
     ranges: Ranges = MISSING
     """Ranges from which the target position is sampled."""
 
+    success_radius: float = 0.05
+    """Planar distance of the cloth's center of mass to the target within which the target counts as reached [m]."""
+
+    max_speed: float = 0.02
+    """Speed of the cloth's center of mass below which the cloth counts as at rest [m/s]."""
+
+    hold_time: float = 0.5
+    """Time the cloth must rest at the target in a row to succeed [s]."""
+
+    speed_window: int = 10
+    """Number of last steps over which the speed of the COM is averaged for the ``com_speed_at_target`` metric."""
+
     goal_visualizer_cfg: VisualizationMarkersCfg = SPHERE_MARKER_CFG.replace(prim_path="/Visuals/Command/cloth_target")
     """Configuration of the marker drawn at the target when :attr:`debug_vis` is enabled."""
+
+    goal_visualizer_cfg.markers["sphere"].radius = 0.02
