@@ -98,6 +98,6 @@ benchmark_*.json
 docs/superpowers/
 
 
-# Ignore Papers and Proposal 
+# Ignore Papers and Proposal
 paper/*
 proposal/*

@@ -14,7 +14,7 @@ from . import agents
 
 gym.register(
     id="IsaacContrib-Drag-Cloth-Franka",
-    entry_point="isaaclab.envs:ManagerBasedRLEnv",
+    entry_point="isaaclab_tasks.contrib.franka_cloth_drag.franka_cloth_drag_env:FrankaClothDragEnv",
     disable_env_checker=True,
     kwargs={
         "env_cfg_entry_point": f"{__name__}.franka_cloth_drag_env_cfg:FrankaClothDragEnvCfg",

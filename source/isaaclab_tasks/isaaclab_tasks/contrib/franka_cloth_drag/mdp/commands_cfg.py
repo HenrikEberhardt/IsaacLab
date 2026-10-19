@@ -21,10 +21,23 @@ if TYPE_CHECKING:
 
 @configclass
 class ClothTargetCommandCfg(CommandTermCfg):
-    """Configuration for a target position of the cloth's center of mass, see :class:`ClothTargetCommand`.
+    """Configuration for a target position of the cloth's central node, see :class:`ClothTargetCommand`.
 
-    The goal is reached when the cloth's center of mass rests (slower than :attr:`max_speed`) within
-    :attr:`success_radius` of the target in the table plane for :attr:`hold_time` in a row.
+    The goal is reached when the cloth's central node stays within :attr:`success_radius` of the target in the table
+    plane for :attr:`hold_time` in a row.
+
+    The command also tracks the task stage (:class:`~.stages.ClothDragStage`). Each stage adds one condition to the
+    conditions of the stages before it:
+
+    * GRASP: the EE frame origin is within :attr:`approach_radius` of a cloth node.
+    * DRAG: the gripper holds the cloth by nodes locked to the EE frame, see
+      :class:`~.actions.ClothGraspAction`. The nodes lock once the closing fingers have come to rest with at least
+      :attr:`grasp_min_nodes` nodes between the pads. A gripper that does not lock nodes (``attach`` False) never
+      reaches DRAG.
+    * GOAL: the cloth's central node is within :attr:`success_radius` + :attr:`goal_zone_margin` of the target.
+
+    The locked nodes cannot slip, so the gripper only lets go of the cloth when it is commanded open. Releasing the
+    cloth in DRAG or GOAL drops the stage back to APPROACH for one update.
     """
 
     class_type: type[ClothTargetCommand] | str = "{DIR}.commands:ClothTargetCommand"
@@ -36,7 +49,7 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Name of the robot whose root frame the target is expressed in."""
 
     object_name: str = MISSING
-    """Name of the cloth whose center of mass is tracked."""
+    """Name of the cloth whose central node is tracked."""
 
     @configclass
     class Ranges:
@@ -55,16 +68,52 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Ranges from which the target position is sampled."""
 
     success_radius: float = 0.05
-    """Planar distance of the cloth's center of mass to the target within which the target counts as reached [m]."""
-
-    max_speed: float = 0.02
-    """Speed of the cloth's center of mass below which the cloth counts as at rest [m/s]."""
+    """Planar distance of the cloth's central node to the target within which the target counts as reached [m]."""
 
     hold_time: float = 0.5
-    """Time the cloth must rest at the target in a row to succeed [s]."""
+    """Time the cloth's central node must stay within :attr:`success_radius` in a row to succeed [s]."""
 
     speed_window: int = 10
-    """Number of last steps over which the speed of the COM is averaged for the ``com_speed_at_target`` metric."""
+    """Number of last steps over which the speed of the central node is averaged for the ``center_speed_at_target``
+    metric. The metric is logged only; the success does not depend on the speed."""
+
+    ee_frame_name: str = "ee_frame"
+    """Name of the frame transformer whose first target is the EE frame, centered between the finger pads."""
+
+    gripper_action_name: str = "gripper_action"
+    """Name of the :class:`~.actions.ClothGraspAction` term; a negative action closes the gripper."""
+
+    finger_joint_name: str = "panda_finger_joint1"
+    """Name of the actuated finger joint, whose position is the half gap between the finger pads."""
+
+    approach_radius: float = 0.05
+    """Distance of the EE frame origin to the nearest cloth node below which APPROACH turns into GRASP [m]."""
+
+    grasp_min_nodes: int = 1
+    """Number of cloth nodes the gripper must lock to hold the cloth.
+
+    A grasp with fewer nodes in the pad box locks nothing, so the stage stays in GRASP.
+    """
+
+    finger_pad_half_width: float = 0.0125
+    """Half width of the finger pads along the hand's x-axis [m].
+
+    Wider than the physical pad (about 8.5 mm), so at least one node of the coarse cloth mesh (25 mm node spacing) can
+    fall between the pads.
+    """
+
+    finger_pad_half_length: float = 0.0085
+    """Half length of the finger pads along the hand's z-axis, centered on the EE frame origin [m].
+
+    The menagerie Panda pads span about ±8.5 mm around the fingertip point, so cloth lying under the closed fingertips
+    (at least a particle radius below the pad) stays outside.
+    """
+
+    finger_gap_margin: float = 0.003
+    """Tolerance added to the gap between the finger pads [m]."""
+
+    goal_zone_margin: float = 0.05
+    """Margin added to :attr:`success_radius` for the planar distance below which DRAG turns into GOAL [m]."""
 
     goal_visualizer_cfg: VisualizationMarkersCfg = SPHERE_MARKER_CFG.replace(prim_path="/Visuals/Command/cloth_target")
     """Configuration of the marker drawn at the target when :attr:`debug_vis` is enabled."""

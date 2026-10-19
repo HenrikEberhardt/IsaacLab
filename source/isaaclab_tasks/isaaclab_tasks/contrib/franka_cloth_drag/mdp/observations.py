@@ -5,34 +5,131 @@
 
 """Observation terms for the Franka cloth dragging task.
 
-Positions are expressed in the robot's root frame (suffix ``_b``) or in the cloth COM frame (suffix ``_com``), whose
-origin is the cloth's center of mass and whose axes are those of the robot's root frame.
+Quantities are expressed in one of two frames: the robot's root frame (suffix ``_b``) or the end-effector (EE) frame,
+the first target of the ``ee_frame`` frame transformer, centered between the finger pads. The EE frame turns with the
+hand, like a wrist camera. The cloth's reference point is its central node, see :func:`~.frames.cloth_landmark_ids`.
+
+Every term replaces NaN and infinite values with zeros: a diverged cloth simulation must never reach the policy or the
+observation history, and rsl_rl aborts training on NaN.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
+from isaaclab.utils.math import quat_apply_inverse
 
 from .frames import (
-    cloth_com_pos_b,
+    cloth_center_pos_b,
+    cloth_landmark_ids,
+    cloth_node_areas,
     ee_pose_in_base,
     ee_twist_in_base,
     points_to_base,
-    points_to_com,
     top_down_yaw,
     vectors_to_base,
 )
-from .stages import ClothDragStage, cloth_drag_stage_index
+from .stages import ClothDragStage
 
 if TYPE_CHECKING:
-    from isaaclab.assets import DeformableObject
+    from isaaclab.assets import Articulation, DeformableObject
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.managers import ObservationTermCfg
+    from isaaclab.sensors import FrameTransformer
+
+    from .actions import ClothGraspAction, LimitedRelativeJointPositionAction, TopDownDeltaEEAction
+
+
+def joint_pos_ratio(env: ManagerBasedRLEnv, action_name: str, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Joint positions as a ratio of the range the arm action keeps them in, shape [num_envs, num_joints].
+
+    Minus one and one are the lower and upper limits of the action's ``joint_pos_limits``, where the controller stops
+    the joint.
+
+    Args:
+        env: The environment.
+        action_name: Name of the arm action term, which provides ``joint_pos_limits``.
+        asset_cfg: The robot, with ``joint_names`` selecting the joints of the action in the same order.
+    """
+    action: LimitedRelativeJointPositionAction | TopDownDeltaEEAction = env.action_manager.get_term(action_name)
+    lower, upper = action.joint_pos_limits
+    robot = _robot_with_action_joints(env, asset_cfg, action_name, lower.shape[1])
+    ratio = 2.0 * (robot.data.joint_pos.torch[:, asset_cfg.joint_ids] - lower) / (upper - lower) - 1.0
+    return torch.nan_to_num(ratio, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def joint_vel_ratio(env: ManagerBasedRLEnv, action_name: str, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Joint velocities as a ratio of the largest speeds the arm action commands, shape [num_envs, num_joints].
+
+    The ratio is not clipped; in normal operation the measured speeds stay below the commanded ones.
+
+    Args:
+        env: The environment.
+        action_name: Name of the arm action term, which provides ``joint_vel_limits``.
+        asset_cfg: The robot, with ``joint_names`` selecting the joints of the action in the same order.
+    """
+    action: LimitedRelativeJointPositionAction | TopDownDeltaEEAction = env.action_manager.get_term(action_name)
+    vel_limits = action.joint_vel_limits
+    robot = _robot_with_action_joints(env, asset_cfg, action_name, vel_limits.shape[1])
+    ratio = robot.data.joint_vel.torch[:, asset_cfg.joint_ids] / vel_limits
+    return torch.nan_to_num(ratio, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _robot_with_action_joints(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, action_name: str, num_action_joints: int
+) -> Articulation:
+    """Return the robot after checking that ``asset_cfg`` selects as many joints as the action ``action_name``."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    num_joints = robot.data.joint_pos.torch[:, asset_cfg.joint_ids].shape[1]
+    if num_joints != num_action_joints:
+        raise ValueError(
+            f"The observation selects {num_joints} joints, but action '{action_name}' limits {num_action_joints}."
+        )
+    return robot
+
+
+def gripper_width(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
+    """Distance between the finger pads, the sum of the finger joint positions [m], shape [num_envs, 1].
+
+    This is the gripper width the real Franka Hand reports.
+
+    Args:
+        env: The environment.
+        asset_cfg: The robot, with ``joint_names`` selecting both finger joints.
+    """
+    asset: Articulation = env.scene[asset_cfg.name]
+    width = asset.data.joint_pos.torch[:, asset_cfg.joint_ids].sum(dim=1, keepdim=True)
+    return torch.nan_to_num(width, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def cloth_grasped(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
+    """One while the gripper holds cloth nodes locked to the hand, else zero, shape [num_envs, 1].
+
+    This is the ``is_grasped`` flag the real Franka Hand reports. See :class:`~.actions.ClothGraspAction`.
+
+    Args:
+        env: The environment.
+        action_name: Name of the cloth grasp action term.
+    """
+    action: ClothGraspAction = env.action_manager.get_term(action_name)
+    return action.is_grasping.float().unsqueeze(1)
+
+
+def grasped_node_ratio(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
+    """Share of the cloth nodes locked to the hand, shape [num_envs, 1]. See :class:`~.actions.ClothGraspAction`.
+
+    Args:
+        env: The environment.
+        action_name: Name of the cloth grasp action term.
+    """
+    action: ClothGraspAction = env.action_manager.get_term(action_name)
+    num_nodes = action.constraint.grasped.shape[1] if action.constraint is not None else 1
+    return (action.num_grasped.float() / num_nodes).unsqueeze(1)
 
 
 def ee_pose_b(
@@ -40,16 +137,22 @@ def ee_pose_b(
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Fingertip position [m] and yaw [rad] of the end effector in the robot's root frame, shape [num_envs, 4]."""
+    """End-effector position [m] and jaw yaw [rad] in the robot's root frame, shape [num_envs, 4].
+
+    The yaw is the rotation of the gripper jaws about the root frame's z-axis: the heading of the EE x-axis in the root
+    frame's xy-plane. With the hand pointing down, the EE y-axis is the closing direction of the fingers, so a yaw of
+    zero closes the jaws along the root frame's y-axis. The yaw describes the orientation of the hand as a whole, which
+    all arm joints change, not the angle of the last arm joint.
+    """
     pos_b, quat_b = ee_pose_in_base(env, ee_frame_cfg, robot_cfg)
-    return torch.cat([pos_b, top_down_yaw(quat_b).unsqueeze(-1)], dim=-1)
+    pose = torch.cat([pos_b, top_down_yaw(quat_b).unsqueeze(-1)], dim=-1)
+    return torch.nan_to_num(pose, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def ee_velocity_b(
     env: ManagerBasedRLEnv, hand_cfg: SceneEntityCfg, ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")
 ) -> torch.Tensor:
-    """Fingertip linear velocity [m/s] and yaw rate [rad/s] of the end effector in the robot's root frame, shape
-    [num_envs, 4].
+    """End-effector linear velocity [m/s] and yaw rate [rad/s] in the robot's root frame, shape [num_envs, 4].
 
     The yaw rate is the hand's angular velocity about the root frame z-axis, the rate of the yaw in :func:`ee_pose_b`
     while the hand points down.
@@ -57,91 +160,174 @@ def ee_velocity_b(
     Args:
         env: The environment.
         hand_cfg: The robot, with ``body_names`` selecting the hand body that carries the end-effector frame.
-        ee_frame_cfg: The frame transformer whose first target is the fingertip point.
+        ee_frame_cfg: The frame transformer whose first target is the end effector.
     """
     lin_vel_b, ang_vel_b = ee_twist_in_base(env, hand_cfg, ee_frame_cfg)
-    return torch.cat([lin_vel_b, ang_vel_b[:, 2:3]], dim=-1)
+    velocity = torch.cat([lin_vel_b, ang_vel_b[:, 2:3]], dim=-1)
+    return torch.nan_to_num(velocity, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-class ClothSampledPointsInComFrame(ManagerTermBase):
-    """Randomly sampled cloth nodes in the cloth COM frame [m], shape [num_envs, num_points * 3].
+class ClothPointsInEEFrame(ManagerTermBase):
+    """Cloth nodes relative to the end effector, in the EE frame [m], shape [num_envs, num_points * 3].
 
-    The term observes a fixed number of distinct nodes, so the observation size does not depend on the mesh resolution.
-    The node ids are sorted ascending, so each slot follows the mesh layout instead of a random order. Each environment
-    observes the same nodes for a whole episode and samples new ones when it resets. The sampling generator is seeded
-    with the environment seed (the training seed), so two terms, for example in the actor and critic groups, observe
-    the same nodes.
+    The EE frame turns with the hand, like a wrist camera. The term observes ``round(ratio * num_nodes)`` distinct
+    nodes, so the observation size scales with the mesh, in three blocks:
+
+    * the 9 landmarks of :func:`~.frames.cloth_landmark_ids` (corners, edge midpoints, central node), fixed;
+    * random nodes, drawn without replacement and with a probability proportional to their cloth area when an
+      environment resets, kept for the whole episode and sorted by id;
+    * the highest remaining nodes at every step, sorted from the highest down: the crests of the wrinkles.
+
+    ``height_share`` is the share of the non-landmark nodes chosen by height. The random draw uses its own generator,
+    seeded with the environment seed. With ``fixed_random_nodes``, the random nodes are drawn once when the term is
+    created, the same for every environment, and kept for the whole run instead of being drawn again at every reset.
     """
 
     def __init__(self, cfg: ObservationTermCfg, env: ManagerBasedRLEnv):
         super().__init__(cfg, env)
-        asset: DeformableObject = env.scene[cfg.params.get("asset_cfg", SceneEntityCfg("deformable")).name]
-        self.num_nodes: int = asset.data.nodal_pos_w.shape[1]
-        self.num_points: int = cfg.params.get("num_points", 20)
-        if not 1 <= self.num_points <= self.num_nodes:
-            raise ValueError(f"Number of observed cloth nodes must be in [1, {self.num_nodes}], got {self.num_points}.")
-        self.node_ids = torch.empty(env.num_envs, self.num_points, dtype=torch.long, device=env.device)
+        asset_cfg: SceneEntityCfg = cfg.params.get("asset_cfg", SceneEntityCfg("deformable"))
+        asset: DeformableObject = env.scene[asset_cfg.name]
+        num_nodes = asset.data.nodal_pos_w.torch.shape[1]
+        self._landmark_ids = cloth_landmark_ids(env, asset_cfg)
+        num_landmarks = len(self._landmark_ids)
+        num_points = round(cfg.params["ratio"] * num_nodes)
+        if not num_landmarks < num_points <= num_nodes:
+            raise ValueError(
+                f"The ratio {cfg.params['ratio']} selects {num_points} cloth nodes, but must select more than the"
+                f" {num_landmarks} landmarks and at most the {num_nodes} nodes."
+            )
+        height_share = cfg.params.get("height_share", 0.5)
+        if not 0.0 <= height_share <= 1.0:
+            raise ValueError(f"The height share must be in [0, 1], got {height_share}.")
+        self._num_highest = round(height_share * (num_points - num_landmarks))
+        self._num_random = num_points - num_landmarks - self._num_highest
+        # the landmarks are always observed, so the random draw skips them
+        self._draw_weights = cloth_node_areas(env, asset_cfg).clone()
+        self._draw_weights[self._landmark_ids] = 0.0
+        self._random_ids = torch.empty(env.num_envs, self._num_random, dtype=torch.long, device=env.device)
         self._generator = torch.Generator(device=env.device)
         self._generator.manual_seed(env.cfg.seed if env.cfg.seed is not None else torch.initial_seed())
-        self.reset()
+        self._fixed_random_nodes = cfg.params.get("fixed_random_nodes", False)
+        if self._fixed_random_nodes and self._num_random > 0:
+            ids = torch.multinomial(
+                self._draw_weights.unsqueeze(0), self._num_random, replacement=False, generator=self._generator
+            )
+            self._random_ids[:] = ids.sort(dim=1).values
+        else:
+            self.reset()
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        """Resample the observed cloth nodes for the selected environments."""
+        """Draw new random nodes for the selected environments, unless they are fixed for the run."""
+        if self._fixed_random_nodes:
+            return
         if env_ids is None:
             env_ids = slice(None)
             num_envs = self.num_envs
         else:
             num_envs = len(env_ids)
-        scores = torch.rand((num_envs, self.num_nodes), generator=self._generator, device=self.device)
-        # sorted ids keep the slot order tied to the mesh layout
-        self.node_ids[env_ids] = scores.topk(self.num_points, dim=1).indices.sort(dim=1).values
+        if self._num_random == 0 or num_envs == 0:
+            return
+        weights = self._draw_weights.expand(num_envs, -1)
+        ids = torch.multinomial(weights, self._num_random, replacement=False, generator=self._generator)
+        self._random_ids[env_ids] = ids.sort(dim=1).values
 
     def __call__(
         self,
         env: ManagerBasedRLEnv,
-        num_points: int = 20,
+        ratio: float,
+        height_share: float = 0.5,
+        fixed_random_nodes: bool = False,
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+        ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+    ) -> torch.Tensor:
+        """Return the landmarks, random and highest nodes in the EE frame; ``ratio``, ``height_share`` and
+        ``fixed_random_nodes`` are read once in the constructor."""
+        asset: DeformableObject = env.scene[asset_cfg.name]
+        ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+        nodal_pos_w = asset.data.nodal_pos_w.torch
+        # the highest nodes among those that are neither landmarks nor random nodes
+        height = nodal_pos_w[..., 2].clone()
+        height[:, self._landmark_ids] = -math.inf
+        height.scatter_(1, self._random_ids, -math.inf)
+        highest_ids = height.topk(self._num_highest, dim=1).indices
+        ids = torch.cat([self._landmark_ids.expand(env.num_envs, -1), self._random_ids, highest_ids], dim=1)
+        points_w = nodal_pos_w.gather(1, ids.unsqueeze(-1).expand(-1, -1, 3))
+        ee_pos_w = ee_frame.data.target_pos_w.torch[:, 0].unsqueeze(1)
+        ee_quat_w = ee_frame.data.target_quat_w.torch[:, 0].unsqueeze(1).expand(-1, ids.shape[1], -1)
+        points_e = quat_apply_inverse(ee_quat_w, points_w - ee_pos_w).reshape(env.num_envs, -1)
+        return torch.nan_to_num(points_e, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+class ClothPointsInBaseFrame(ManagerTermBase):
+    """Observe nine fixed landmarks and episode-sampled material nodes in the robot base frame.
+
+    Positions [m], shape [num_envs, (9 + num_random_nodes) * 3]. Additional node IDs are sampled without
+    replacement, weighted by cloth area, at episode start. Landmarks are excluded from that draw. IDs are sorted
+    and retained until the next episode, so every observation slot tracks the same material point through history.
+    No cloth velocities are exposed.
+    """
+
+    def __init__(self, cfg: ObservationTermCfg, env: ManagerBasedRLEnv):
+        """Initialize the permanent landmarks and episode sampling buffers."""
+        super().__init__(cfg, env)
+        asset_cfg = cfg.params.get("asset_cfg", SceneEntityCfg("deformable"))
+        self._landmark_ids = cloth_landmark_ids(env, asset_cfg)
+        self._num_random = cfg.params.get("num_random_nodes", 11)
+        self._draw_weights = cloth_node_areas(env, asset_cfg).clone()
+        self._draw_weights[self._landmark_ids] = 0.0
+        if not 0 <= self._num_random <= int((self._draw_weights > 0).sum()):
+            raise ValueError("num_random_nodes must fit the positive-area non-landmark nodes.")
+        self._random_ids = torch.empty(env.num_envs, self._num_random, dtype=torch.long, device=env.device)
+        self._generator = torch.Generator(device=env.device)
+        self._generator.manual_seed(env.cfg.seed if env.cfg.seed is not None else torch.initial_seed())
+        self.reset()
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Sample material node IDs for the selected episodes, preserving all other environments."""
+        count = self.num_envs if env_ids is None else len(env_ids)
+        if count == 0 or self._num_random == 0:
+            return
+        ids = torch.multinomial(
+            self._draw_weights.expand(count, -1), self._num_random, replacement=False, generator=self._generator
+        )
+        self._random_ids[slice(None) if env_ids is None else env_ids] = ids.sort(dim=1).values
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        num_random_nodes: int = 11,
         asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
         robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     ) -> torch.Tensor:
-        """Return the sampled nodes in the cloth COM frame; ``num_points`` is read once in the constructor."""
+        """Return current node positions [m]; ``num_random_nodes`` is read once during initialization."""
         asset: DeformableObject = env.scene[asset_cfg.name]
-        points_w = asset.data.nodal_pos_w.torch.gather(1, self.node_ids.unsqueeze(-1).expand(-1, -1, 3))
-        points_b = points_to_base(env, points_w, robot_cfg)
-        return points_to_com(points_b, cloth_com_pos_b(env, asset_cfg, robot_cfg)).reshape(env.num_envs, -1)
+        ids = torch.cat([self._landmark_ids.expand(env.num_envs, -1), self._random_ids], dim=1)
+        points_w = asset.data.nodal_pos_w.torch.gather(1, ids.unsqueeze(-1).expand(-1, -1, 3))
+        points_b = points_to_base(env, points_w, robot_cfg).reshape(env.num_envs, -1)
+        return torch.nan_to_num(points_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def ee_pos_com(
-    env: ManagerBasedRLEnv,
-    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
-) -> torch.Tensor:
-    """Fingertip position of the end effector in the cloth COM frame [m], shape [num_envs, 3]."""
-    pos_b, _ = ee_pose_in_base(env, ee_frame_cfg, robot_cfg)
-    return points_to_com(pos_b, cloth_com_pos_b(env, asset_cfg, robot_cfg))
+def cloth_target_displacement_b(env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:
+    """Planar central-node-to-target displacement in the robot base frame [m], shape [num_envs, 2]."""
+    command = env.command_manager.get_term(command_name)
+    center_b = cloth_center_pos_b(env, SceneEntityCfg(command.cfg.object_name), SceneEntityCfg(command.cfg.asset_name))
+    return torch.nan_to_num(command.command[:, :2] - center_b[:, :2], nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def target_pos_com(
+def target_pos_ee(
     env: ManagerBasedRLEnv,
     command_name: str,
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
 ) -> torch.Tensor:
-    """Commanded target in the cloth COM frame [m], the displacement the cloth still has to make, shape
-    [num_envs, 3]."""
+    """Commanded target relative to the end effector, along the robot's root frame axes [m], shape [num_envs, 3].
+
+    The displacement the hand still has to make. Its axes do not turn with the hand's yaw, like the deltas of the EE
+    action.
+    """
     target_pos_b = env.command_manager.get_command(command_name)[:, :3]
-    return points_to_com(target_pos_b, cloth_com_pos_b(env, asset_cfg, robot_cfg))
-
-
-def cloth_com_vel_b(
-    env: ManagerBasedRLEnv,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-) -> torch.Tensor:
-    """Velocity of the cloth's center of mass (mean nodal velocity) in the robot's root frame [m/s], shape
-    [num_envs, 3]."""
-    asset: DeformableObject = env.scene[asset_cfg.name]
-    return vectors_to_base(env, asset.data.root_vel_w.torch, robot_cfg)
+    pos_b, _ = ee_pose_in_base(env, ee_frame_cfg, robot_cfg)
+    return torch.nan_to_num(target_pos_b - pos_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def cloth_nodal_pos_b(
@@ -152,7 +338,8 @@ def cloth_nodal_pos_b(
     """Positions of all cloth nodes, in a fixed order, in the robot's root frame [m], shape
     [num_envs, num_nodes * 3]."""
     asset: DeformableObject = env.scene[asset_cfg.name]
-    return points_to_base(env, asset.data.nodal_pos_w.torch, robot_cfg).reshape(env.num_envs, -1)
+    pos_b = points_to_base(env, asset.data.nodal_pos_w.torch, robot_cfg).reshape(env.num_envs, -1)
+    return torch.nan_to_num(pos_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def cloth_nodal_vel_b(
@@ -163,35 +350,16 @@ def cloth_nodal_vel_b(
     """Velocities of all cloth nodes, in a fixed order, in the robot's root frame [m/s], shape
     [num_envs, num_nodes * 3]."""
     asset: DeformableObject = env.scene[asset_cfg.name]
-    return vectors_to_base(env, asset.data.nodal_vel_w.torch, robot_cfg).reshape(env.num_envs, -1)
+    vel_b = vectors_to_base(env, asset.data.nodal_vel_w.torch, robot_cfg).reshape(env.num_envs, -1)
+    return torch.nan_to_num(vel_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def cloth_drag_stage(
-    env: ManagerBasedRLEnv,
-    command_name: str,
-    near_radius: float = 0.03,
-    touch_distance: float = 0.008,
-    goal_radius: float = 0.05,
-    action_name: str = "gripper_action",
-    finger_joint_name: str = "panda_finger_joint1",
-    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
-    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
-) -> torch.Tensor:
-    """Current :class:`ClothDragStage` as a one-hot vector, see :func:`cloth_drag_stage_index`.
+def cloth_drag_stage(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """Current :class:`ClothDragStage` of the command ``command_name`` as a one-hot vector, see
+    :class:`~.commands.ClothTargetCommand`.
 
     Shape is (num_envs, 4).
     """
-    stage = cloth_drag_stage_index(
-        env,
-        command_name,
-        near_radius,
-        touch_distance,
-        goal_radius,
-        action_name,
-        finger_joint_name,
-        robot_cfg,
-        asset_cfg,
-        ee_frame_cfg,
-    )
-    return torch.nn.functional.one_hot(stage, num_classes=len(ClothDragStage)).float()
+    stage = env.command_manager.get_term(command_name).stage
+    one_hot = torch.nn.functional.one_hot(stage, num_classes=len(ClothDragStage)).float()
+    return torch.nan_to_num(one_hot, nan=0.0, posinf=0.0, neginf=0.0)

@@ -3,20 +3,49 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
+"""RSL-RL PPO configuration for Franka cloth dragging."""
+
 from isaaclab.utils import configclass
 
-from isaaclab_tasks.core.lift.config.franka_soft.agents.rsl_rl_ppo_cfg import FrankaClothPPORunnerCfg
+from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
 
 
 @configclass
-class FrankaClothDragPPORunnerCfg(FrankaClothPPORunnerCfg):
-    experiment_name = "franka_cloth_drag"
+class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
+    """Cloth-drag policy with five-frame actor inputs and a privileged critic."""
 
-    # the observation preset (env.observations=joint_symm|joint_asymm|ee_symm|ee_asymm) decides what the critic group
-    # contains
+    seed = 42
+    experiment_name = "cloth_drag_task"
+    num_steps_per_env = 24
+    max_iterations = 2000
+    save_interval = 50
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
+    clip_actions = 1.0
 
-    # For a recurrent policy instead of the 5-step observation history, set history_length = 0 in the observation
-    # groups and use isaaclab_rl.rsl_rl.RslRlRNNModelCfg for the actor and critic, for example
-    # RslRlRNNModelCfg(rnn_type="lstm", rnn_hidden_dim=256, rnn_num_layers=1, hidden_dims=[256, 128, 64],
-    # activation="elu", obs_normalization=True) with rnn_type="lstm" or "gru".
+    actor = RslRlMLPModelCfg(
+        hidden_dims=[256, 128, 64],
+        activation="elu",
+        obs_normalization=True,
+        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.5, std_type="scalar"),
+    )
+
+    critic = RslRlMLPModelCfg(
+        hidden_dims=[256, 128, 64],
+        activation="elu",
+        obs_normalization=True,
+    )
+
+    algorithm = RslRlPpoAlgorithmCfg(
+        value_loss_coef=1.0,
+        use_clipped_value_loss=True,
+        clip_param=0.2,
+        entropy_coef=0.006,
+        num_learning_epochs=5,
+        num_mini_batches=4,
+        learning_rate=1.0e-3,
+        schedule="adaptive",
+        gamma=0.995,
+        lam=0.95,
+        desired_kl=0.01,
+        max_grad_norm=1.0,
+    )

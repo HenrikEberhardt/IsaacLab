@@ -3,14 +3,18 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Frame helpers of the Franka cloth dragging task.
+"""Frame and cloth geometry helpers of the Franka cloth dragging task.
 
-Task quantities are expressed in the robot's root frame (suffix ``_b``) or in the cloth COM frame (suffix ``_com``),
-whose origin is the cloth's center of mass and whose axes are those of the robot's root frame.
+Task quantities are expressed in one of two frames: the robot's root frame (suffix ``_b``) or the end-effector (EE)
+frame, the first target of the ``ee_frame`` frame transformer, centered between the finger pads.
+
+The cloth's reference point is its central node: the landmark at the center of the rest mesh, see
+:func:`cloth_landmark_ids`. A material point stays well defined when the cloth crumples, unlike a center of mass.
 """
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING
 
 import torch
@@ -80,30 +84,117 @@ def vectors_to_base(
     return quat_apply_inverse(root_quat_w, vectors).view(vectors_w.shape)
 
 
-def points_to_com(points_b: torch.Tensor, com_pos_b: torch.Tensor) -> torch.Tensor:
-    """Express positions in the robot's root frame in the cloth COM frame.
+CLOTH_CENTER_LANDMARK = 4
+"""Index of the central node among the landmarks of :func:`cloth_landmark_ids`."""
 
-    Args:
-        points_b: Positions in the robot's root frame [m], shape [num_envs, ..., 3].
-        com_pos_b: Cloth center of mass in the robot's root frame [m], shape [num_envs, 3].
 
-    Returns:
-        Positions relative to the cloth's center of mass along the root frame axes [m], same shape as ``points_b``.
+@functools.cache
+def _landmark_ids(asset: DeformableObject) -> torch.Tensor:
+    """Nodes nearest to a 3 x 3 grid over the xy bounding box of the rest mesh, shape [9]."""
+    rest_xy = asset.data.default_nodal_state_w.torch[0, :, :2]
+    lower, upper = rest_xy.amin(dim=0), rest_xy.amax(dim=0)
+    fractions = rest_xy.new_tensor((0.0, 0.5, 1.0))
+    targets = lower + torch.cartesian_prod(fractions, fractions) * (upper - lower)
+    return torch.cdist(targets, rest_xy).argmin(dim=1)
+
+
+@functools.cache
+def _rest_triangles(asset: DeformableObject) -> torch.Tensor:
+    """Node ids of the cloth's triangles, read from its USD file, shape [num_triangles, 3]."""
+    # imported here: pxr must not load before the simulation app starts, and this module is imported with the env cfg
+    from pxr import Usd, UsdGeom
+
+    usd_path = getattr(asset.cfg.spawn, "usd_path", None)
+    if usd_path is None:
+        raise ValueError("The cloth triangles need a cloth spawned from a USD file (spawn.usd_path).")
+    stage = Usd.Stage.Open(usd_path)
+    mesh = next((UsdGeom.Mesh(prim) for prim in stage.Traverse() if prim.IsA(UsdGeom.Mesh)), None)
+    if mesh is None:
+        raise ValueError(f"No mesh found in '{usd_path}'.")
+    if any(count != 3 for count in mesh.GetFaceVertexCountsAttr().Get()):
+        raise ValueError(f"The cloth mesh in '{usd_path}' must consist of triangles only.")
+    rest_pos = asset.data.default_nodal_state_w.torch[0, :, :3]
+    if len(mesh.GetPointsAttr().Get()) != len(rest_pos):
+        raise ValueError(f"The cloth mesh in '{usd_path}' does not match the {len(rest_pos)} simulated nodes.")
+    return torch.tensor(list(mesh.GetFaceVertexIndicesAttr().Get()), device=rest_pos.device).view(-1, 3)
+
+
+@functools.cache
+def _rest_edges(asset: DeformableObject) -> torch.Tensor:
+    """Node ids of the cloth's unique edges, lower id first, shape [num_edges, 2]."""
+    faces = _rest_triangles(asset)
+    edges = torch.cat([faces[:, [0, 1]], faces[:, [1, 2]], faces[:, [2, 0]]])
+    return torch.unique(edges.sort(dim=1).values, dim=0)
+
+
+@functools.cache
+def _rest_node_areas(asset: DeformableObject) -> torch.Tensor:
+    """Cloth area around each node of the rest mesh [m^2], a third of each adjacent triangle, shape [num_nodes]."""
+    rest_pos = asset.data.default_nodal_state_w.torch[0, :, :3]
+    faces = _rest_triangles(asset)
+    corners = rest_pos[faces]
+    triangle_areas = 0.5 * torch.linalg.norm(
+        torch.cross(corners[:, 1] - corners[:, 0], corners[:, 2] - corners[:, 0], dim=-1), dim=-1
+    )
+    return torch.zeros(len(rest_pos), device=rest_pos.device).index_add_(
+        0, faces.flatten(), (triangle_areas / 3.0).repeat_interleave(3)
+    )
+
+
+def cloth_landmark_ids(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable")) -> torch.Tensor:
+    """Ids of the 9 landmark nodes of the cloth, shape [9].
+
+    The landmarks are the nodes nearest to a 3 x 3 grid over the xy bounding box of the rest mesh: the corners, the
+    edge midpoints and the center, ordered by the grid fractions (0, 0.5, 1) along x first. Index
+    :data:`CLOTH_CENTER_LANDMARK` is the central node. The ids are the same for every environment and episode.
     """
-    return points_b - com_pos_b.view(len(com_pos_b), *([1] * (points_b.dim() - 2)), 3)
+    return _landmark_ids(env.scene[asset_cfg.name])
 
 
-def cloth_com_pos_b(
+def cloth_node_areas(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable")) -> torch.Tensor:
+    """Cloth area around each node of the rest mesh [m^2], shape [num_nodes].
+
+    Each node gets a third of the area of every adjacent triangle, the way Newton distributes the cloth mass. The
+    triangles are read from the cloth's USD file.
+    """
+    return _rest_node_areas(env.scene[asset_cfg.name])
+
+
+def cloth_triangles(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable")) -> torch.Tensor:
+    """Node ids of the cloth's triangles, read from its USD file, shape [num_triangles, 3]."""
+    return _rest_triangles(env.scene[asset_cfg.name])
+
+
+def cloth_edges(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable")) -> torch.Tensor:
+    """Node ids of the cloth's unique edges, lower id first, shape [num_edges, 2]."""
+    return _rest_edges(env.scene[asset_cfg.name])
+
+
+def cloth_center_pos_b(
     env: ManagerBasedEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Cloth center of mass in the robot's root frame [m], shape [num_envs, 3].
+    """Position of the cloth's central node in the robot's root frame [m], shape [num_envs, 3].
 
-    The center of mass is the mean of the cloth nodes. Every term of the task that needs it uses this function.
+    Every term of the task that needs the cloth's position uses this function.
     """
     asset: DeformableObject = env.scene[asset_cfg.name]
-    return points_to_base(env, asset.data.root_pos_w.torch, robot_cfg)
+    center_id = _landmark_ids(asset)[CLOTH_CENTER_LANDMARK]
+    pos_b = points_to_base(env, asset.data.nodal_pos_w.torch[:, center_id], robot_cfg)
+    return torch.nan_to_num(pos_b, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def cloth_center_vel_b(
+    env: ManagerBasedEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Velocity of the cloth's central node in the robot's root frame [m/s], shape [num_envs, 3]."""
+    asset: DeformableObject = env.scene[asset_cfg.name]
+    center_id = _landmark_ids(asset)[CLOTH_CENTER_LANDMARK]
+    vel_b = vectors_to_base(env, asset.data.nodal_vel_w.torch[:, center_id], robot_cfg)
+    return torch.nan_to_num(vel_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def ee_pose_in_base(
@@ -111,7 +202,9 @@ def ee_pose_in_base(
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """End-effector pose (first target of the frame transformer, the fingertip point) in the robot's root frame.
+    """End-effector pose in the robot's root frame.
+
+    The end effector (EE) is the first target of the frame transformer, the point centered between the finger pads.
 
     Returns:
         Position [m], shape [num_envs, 3], and orientation (x, y, z, w), shape [num_envs, 4].
@@ -129,15 +222,15 @@ def ee_pose_in_base(
 def ee_twist_in_base(
     env: ManagerBasedEnv, hand_cfg: SceneEntityCfg, ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame")
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Linear velocity of the fingertip point and angular velocity of the hand in the robot's root frame.
+    """Linear velocity of the end effector and angular velocity of the hand in the robot's root frame.
 
-    The frame transformer has no velocities, so the fingertip velocity is the hand body velocity moved along the lever
-    arm from the hand body to the fingertip point.
+    The frame transformer has no velocities, so the end-effector velocity is the hand body velocity moved along the
+    lever arm from the hand body to the end effector.
 
     Args:
         env: The environment.
         hand_cfg: The robot, with ``body_names`` selecting the hand body that carries the end-effector frame.
-        ee_frame_cfg: The frame transformer whose first target is the fingertip point.
+        ee_frame_cfg: The frame transformer whose first target is the end effector.
 
     Returns:
         Linear velocity [m/s], shape [num_envs, 3], and angular velocity [rad/s], shape [num_envs, 3].

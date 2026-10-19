@@ -10,35 +10,121 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
+from isaaclab.envs.mdp.actions.actions_cfg import (
+    BinaryJointPositionActionCfg,
+    DifferentialInverseKinematicsActionCfg,
+    RelativeJointPositionActionCfg,
+)
 from isaaclab.utils import configclass
 
 if TYPE_CHECKING:
-    from .actions import TopDownDeltaEEAction
+    from .actions import (
+        ClothGraspAction,
+        LimitedRelativeJointPositionAction,
+        RateLimitedBinaryJointPositionAction,
+        TopDownDeltaEEAction,
+    )
+
+
+@configclass
+class LimitedRelativeJointPositionActionCfg(RelativeJointPositionActionCfg):
+    """Configuration for relative joint position targets with range and PD position-error bounds."""
+
+    class_type: type[LimitedRelativeJointPositionAction] | str = "{DIR}.actions:LimitedRelativeJointPositionAction"
+
+    joint_range_margin: float | None = None
+    """Distance kept from each hard joint limit [rad]. Defaults to None (no range bound)."""
+
+    joint_vel_factor: float | None = None
+    """Velocity-limit fraction used to cap PD position error. Defaults to None (no cap)."""
 
 
 @configclass
 class TopDownDeltaEEActionCfg(DifferentialInverseKinematicsActionCfg):
-    """Configuration for a 4-DOF delta end-effector action.
-
-    The action is limited to ``(dx, dy, dz, dyaw)`` in the robot base frame.
-    
-    The IK controller must take relative poses (``command_type="pose"`` and ``use_relative_mode=True``).
-    """
+    """Configuration for a 4-DOF delta end-effector action ``(dx, dy, dz, dyaw)`` in the robot base frame."""
 
     class_type: type[TopDownDeltaEEAction] | str = "{DIR}.actions:TopDownDeltaEEAction"
 
-    scale_trans: float = 0.01
-    """
-    Scale of the ``(dx, dy, dz)`` actions per policy step [m].
-    """
+    body_name: str = ""
+    """Body resolved from ``ee_frame_name`` when the action is initialized."""
+
+    ee_frame_name: str = "ee_frame"
+    """Scene frame transformer that defines the end-effector frame."""
+
+    scale_trans: float = 0.02
+    """Scale of the ``(dx, dy, dz)`` actions per policy step [m]."""
 
     scale_rot: float = 0.05
-    """
-    Scale of the ``dyaw`` action per policy step [rad].
+    """Scale of the ``dyaw`` action per policy step [rad]."""
+
+    wrist_joint_limits: tuple[float, float] = (-0.5 * math.pi, 0.5 * math.pi)
+    """Range of the last arm joint, which turns the hand, that ``dyaw`` may command [rad]. Half a turn covers every
+    orientation of the symmetric gripper."""
+
+    limit_operation_space: bool = False
+    """Whether to clamp commanded EE positions to the workspace planes below."""
+
+    x_min: float = 0.05
+    """Plane towards the robot base: smallest end-effector x-value [m]."""
+
+    y_limits: tuple[float, float] = (-0.65, 0.65)
+    """Planes at the table sides: end-effector y-range [m]."""
+
+    z_min: float = 0.0085
+    """Floor: lowest end-effector height. The fingertips are 8.65 mm below the
+    end-effector frame."""
+
+    joint_vel_factor: float | None = None
+    """Velocity-limit fraction used to cap PD position error by uniformly scaling the IK step."""
+
+    joint_range_margin: float | None = None
+    """Margin inside hard joint limits [rad]. The IK step scales uniformly to keep targets inside this range."""
+
+
+@configclass
+class RateLimitedBinaryJointPositionActionCfg(BinaryJointPositionActionCfg):
+    """Configuration for a binary joint position action with a speed-limited target."""
+
+    class_type: type[RateLimitedBinaryJointPositionAction] | str = "{DIR}.actions:RateLimitedBinaryJointPositionAction"
+
+    joint_vel_factor: float | None = None
+    """Fraction of the hardware joint velocity limit the target moves at."""
+
+
+@configclass
+class ClothGraspActionCfg(RateLimitedBinaryJointPositionActionCfg):
+    """Configuration for the constraint-based cloth gripper."""
+
+    class_type: type[ClothGraspAction] | str = "{DIR}.actions:ClothGraspAction"
+
+    attach: bool = True
+    """Whether to attach grasped cloth nodes. False uses friction alone."""
+
+    command_name: str = "cloth_target"
+    """Name of the :class:`~.commands.ClothTargetCommand` term whose pad geometry and ``grasp_min_nodes`` the grasp
+    uses."""
+
+    latch_threshold: float | None = None
+    """Action threshold: close below its negative, open above it, otherwise retain the command.
     """
 
-    yaw_limits: tuple[float, float] = (-0.5 * math.pi, 0.5 * math.pi)
+    settle_speed: float = 0.005
+    """Maximum finger speed [m/s] counted as settled when attempting a grasp."""
+
+    release_travel: float = 0.002
+    """Opening distance [m] that the gripper has to make after a failed grip before rearming the grasp."""
+
+    layer_half_thickness: float | None = None
+    """Half thickness of one cloth layer [m]. Defaults to None, in which case the cloth's particle radius is used.
     """
-    Limit yaw range to [-pi/2, pi/2] to avoid wrist joint limits. Symmetry of gripper allows to limit to +- quarter rotation.
-    """
+
+    squeeze_lift: float = 0.0
+    """Distance by which the grasped nodes are lifted along the EE frame's -z axis while squeezed, epsilon of Nayak et
+    al. [m]."""
+
+    squeeze_steps: int = 5
+    """Number of environment steps over which the press of the fold and the fingers ramp in after the grasp, and back
+    out before the release when the gripper is commanded open."""
+
+    contact_clearance: float = 0.01
+    """Cloth-node clearance [m] required to restore gripper contacts after release."""

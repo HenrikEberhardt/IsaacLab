@@ -16,7 +16,8 @@ from isaaclab.managers import CommandTerm, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import combine_frame_transforms
 
-from .frames import cloth_com_pos_b
+from .frames import cloth_center_vel_b
+from .stages import ClothDragStage, cloth_goal_xy_distance, ee_cloth_distance, gripper_holds_cloth
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, DeformableObject
@@ -26,19 +27,29 @@ if TYPE_CHECKING:
 
 
 class ClothTargetCommand(CommandTerm):
-    """Target position of the cloth's center of mass in the robot's root frame.
+    """Target position of the cloth's central node in the robot's root frame, and the task stage.
 
     The target is sampled uniformly from :attr:`ClothTargetCommandCfg.ranges` whenever the command is resampled, by
-    default only when the episode resets. The goal is reached when the cloth's center of mass rests at the target, see
+    default only when the episode resets. The goal is reached when the cloth's central node stays at the target, see
     :class:`ClothTargetCommandCfg`.
+
+    The term also tracks the :class:`~.stages.ClothDragStage` of every environment, see :class:`ClothTargetCommandCfg`
+    for the transitions. The stage is updated once per environment step, after the rewards and before the
+    observations, so the stage the policy observes is the stage that gates the reward of its next action.
 
     Metrics, logged at reset:
 
-    * ``position_error_xy``: planar distance of the cloth's center of mass to the target [m].
+    * ``position_error_xy``: planar distance of the cloth's central node to the target [m].
     * ``success``: one if the goal was reached during the episode, so its mean is the episode success rate.
-    * ``com_speed_at_target``: speed of the cloth's center of mass [m/s], averaged over the steps of the last
+    * ``center_speed_at_target``: planar speed of the cloth's central node [m/s], averaged over the steps of the last
       :attr:`ClothTargetCommandCfg.speed_window` steps in which it was inside the success radius. Environments whose
       cloth was not inside in that window are left out; the metric is omitted when none was inside.
+    * ``max_stage``: highest stage index reached during the episode.
+    * ``reached_grasp``, ``reached_drag``, ``reached_goal``: one if the stage was reached during the episode.
+    * ``time_in_approach``, ``time_in_grasp``, ``time_in_drag``, ``time_in_goal``: time spent in the stage [s].
+    * ``drops``: number of times the gripper released the cloth in DRAG or GOAL.
+    * ``time_to_grasp``, ``time_to_drag``, ``time_to_goal``: episode time at which the stage was first reached [s],
+      averaged over the environments that reached it; omitted when none did.
     """
 
     cfg: ClothTargetCommandCfg
@@ -54,13 +65,27 @@ class ClothTargetCommand(CommandTerm):
         # target position in the robot's root frame [m]
         self.target_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
 
-        # consecutive steps the cloth has rested at the target
+        # consecutive steps the cloth's central node has stayed at the target
         self._hold_steps = round(cfg.hold_time / env.step_dt)
         self._steps_held = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._last_hold_step = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
+
+        # stage machine
+        self._stage = torch.full((self.num_envs,), int(ClothDragStage.APPROACH), dtype=torch.long, device=self.device)
+        self._time_in_stage = torch.zeros(self.num_envs, device=self.device)
+        self._dropped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # episode time at which each stage was first reached [s]; negative while not reached
+        self._time_to_stage = torch.full((self.num_envs, len(ClothDragStage)), -1.0, device=self.device)
 
         # Attributes for logging metrics at reset
         self.metrics["position_error_xy"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["success"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["max_stage"] = torch.zeros(self.num_envs, device=self.device)
+        for stage in list(ClothDragStage)[1:]:
+            self.metrics[f"reached_{stage.name.lower()}"] = torch.zeros(self.num_envs, device=self.device)
+        for stage in ClothDragStage:
+            self.metrics[f"time_in_{stage.name.lower()}"] = torch.zeros(self.num_envs, device=self.device)
+        self.metrics["drops"] = torch.zeros(self.num_envs, device=self.device)
 
         # ring buffers of the last speeds and whether the cloth was inside the success radius; all envs step together,
         # so one write index serves every env
@@ -74,12 +99,49 @@ class ClothTargetCommand(CommandTerm):
 
     @property
     def command(self) -> torch.Tensor:
-        """Target position of the cloth's center of mass in the robot's root frame [m]. Shape is (num_envs, 3)."""
+        """Target position of the cloth's central node in the robot's root frame [m]. Shape is (num_envs, 3)."""
         return self.target_pos_b
+
+    @property
+    def stage(self) -> torch.Tensor:
+        """Current :class:`~.stages.ClothDragStage` index. Shape is (num_envs,)."""
+        return self._stage
+
+    @property
+    def time_in_stage(self) -> torch.Tensor:
+        """Time since the current stage was entered [s]. Shape is (num_envs,)."""
+        return self._time_in_stage
+
+    @property
+    def dropped(self) -> torch.Tensor:
+        """Whether the gripper released the cloth in DRAG or GOAL at the last update. Shape is (num_envs,)."""
+        return self._dropped
+
+    @property
+    def holding(self) -> torch.Tensor:
+        """Whether the cloth's central node has stayed within :attr:`ClothTargetCommandCfg.success_radius` of the
+        target for :attr:`ClothTargetCommandCfg.hold_time` in a row. Shape is (num_envs,)."""
+        return self._steps_held >= self._hold_steps
 
     """
     Operations.
     """
+
+    def update_goal_status(self) -> None:
+        """Update current center error and consecutive hold steps once per episode step.
+
+        Success termination runs before command computation. Both call this method so termination, reward and
+        logged success agree on the current physical state without counting the same control step twice.
+        Episode step zero is excluded because frame sensors may still contain pre-reset poses.
+        """
+        distance = cloth_goal_xy_distance(self._env, self.target_pos_b, self.cfg)
+        step = self._env.episode_length_buf
+        fresh = (step > 0) & (step != self._last_hold_step)
+        held = torch.where(distance < self.cfg.success_radius, self._steps_held + 1, 0)
+        self._steps_held = torch.where(fresh, held, self._steps_held)
+        self._last_hold_step.copy_(step)
+        self.metrics["position_error_xy"] = distance
+        self.metrics["success"] = torch.maximum(self.metrics["success"], self.holding.float())
 
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         if env_ids is None:
@@ -88,12 +150,22 @@ class ClothTargetCommand(CommandTerm):
         at_target = self._at_target_hist[env_ids]
         num_at_target = at_target.sum(dim=1)
         speed_sum = (self._speed_hist[env_ids] * at_target).sum(dim=1)
+        time_to_stage = self._time_to_stage[env_ids]
 
         extras = super().reset(env_ids)
         # a NaN or placeholder would distort the mean over all resets in the logger, so leave the key out instead
         entered = num_at_target > 0
         if entered.any():
-            extras["com_speed_at_target"] = (speed_sum[entered] / num_at_target[entered]).mean().item()
+            extras["center_speed_at_target"] = (speed_sum[entered] / num_at_target[entered]).mean().item()
+        for stage in list(ClothDragStage)[1:]:
+            reached = time_to_stage[:, int(stage)] >= 0.0
+            if reached.any():
+                extras[f"time_to_{stage.name.lower()}"] = time_to_stage[reached, int(stage)].mean().item()
+
+        self._stage[env_ids] = int(ClothDragStage.APPROACH)
+        self._time_in_stage[env_ids] = 0.0
+        self._dropped[env_ids] = False
+        self._time_to_stage[env_ids] = -1.0
         return extras
 
     """
@@ -101,25 +173,19 @@ class ClothTargetCommand(CommandTerm):
     """
 
     def _update_metrics(self):
-        com_pos_b = cloth_com_pos_b(self._env, self._cloth_cfg, self._robot_cfg)
-        position_error = torch.linalg.norm(self.target_pos_b[:, :2] - com_pos_b[:, :2], dim=-1)
-        speed = torch.linalg.norm(self.cloth.data.root_vel_w.torch, dim=-1)
-        in_radius = position_error < self.cfg.success_radius
-        # count consecutive steps at rest at the target, restarting whenever the cloth leaves or moves too fast
-        at_rest = in_radius & (speed < self.cfg.max_speed)
-        self._steps_held = torch.where(at_rest, self._steps_held + 1, 0)
+        self.update_goal_status()
+        in_radius = self.metrics["position_error_xy"] < self.cfg.success_radius
+        # planar speed, for the metric only: the pinched fold bobbing up and down moves the cloth without it sliding
+        speed = torch.linalg.norm(cloth_center_vel_b(self._env, self._cloth_cfg, self._robot_cfg)[:, :2], dim=-1)
 
         self._speed_hist[:, self._hist_idx] = speed
         self._at_target_hist[:, self._hist_idx] = in_radius
         self._hist_idx = (self._hist_idx + 1) % self.cfg.speed_window
 
-        self.metrics["position_error_xy"] = position_error
-        # sticky until the reset, so the logged mean is the episode success rate
-        self.metrics["success"] = torch.maximum(self.metrics["success"], (self._steps_held >= self._hold_steps).float())
-
     def _resample_command(self, env_ids: Sequence[int]):
         # a new target restarts the hold and the speed window
         self._steps_held[env_ids] = 0
+        self._last_hold_step[env_ids] = -1
         self._at_target_hist[env_ids] = False
         r = torch.empty(len(env_ids), device=self.device)
         self.target_pos_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.pos_x)
@@ -127,7 +193,37 @@ class ClothTargetCommand(CommandTerm):
         self.target_pos_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.pos_z)
 
     def _update_command(self):
-        pass
+        """Advance the stage machine on the current state."""
+        cfg = self.cfg
+        dt = self._env.step_dt
+        # each stage needs the conditions of all stages before it
+        near = ee_cloth_distance(self._env, cfg) < cfg.approach_radius
+        # locked nodes cannot slip: the grasp holds until the policy opens the gripper, so no hysteresis is needed
+        pinched = near & gripper_holds_cloth(self._env, cfg)
+        goal_radius = cfg.success_radius + cfg.goal_zone_margin
+        in_goal_zone = pinched & (cloth_goal_xy_distance(self._env, self.target_pos_b, cfg) < goal_radius)
+        stage = near.long() + pinched.long() + in_goal_zone.long()
+        # releasing the cloth while dragging falls back to APPROACH; the next update re-applies the conditions
+        self._dropped = (self._stage >= int(ClothDragStage.DRAG)) & ~pinched
+        stage[self._dropped] = int(ClothDragStage.APPROACH)
+        # in the step of a reset the poses are still the pre-reset ones until the next physics step, so a hand that
+        # ended the last episode at the cloth would count as near; a fresh episode always starts in APPROACH
+        stage[self._env.episode_length_buf == 0] = int(ClothDragStage.APPROACH)
+
+        self._time_in_stage = torch.where(stage == self._stage, self._time_in_stage + dt, 0.0)
+        self._stage = stage
+
+        # episode bookkeeping
+        episode_time = self._env.episode_length_buf.float() * dt
+        for s in ClothDragStage:
+            first = (stage >= s) & (self._time_to_stage[:, int(s)] < 0.0)
+            self._time_to_stage[:, int(s)] = torch.where(first, episode_time, self._time_to_stage[:, int(s)])
+            self.metrics[f"time_in_{s.name.lower()}"] += (stage == s).float() * dt
+            if s > ClothDragStage.APPROACH:
+                reached = self.metrics[f"reached_{s.name.lower()}"]
+                self.metrics[f"reached_{s.name.lower()}"] = torch.maximum(reached, (stage >= s).float())
+        self.metrics["max_stage"] = torch.maximum(self.metrics["max_stage"], stage.float())
+        self.metrics["drops"] += self._dropped.float()
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Create the target marker on first use and show or hide it when :attr:`debug_vis` is toggled."""

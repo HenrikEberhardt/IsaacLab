@@ -8,7 +8,7 @@
 from __future__ import annotations
 
 import math
-from dataclasses import MISSING
+import os
 
 from isaaclab_newton.physics import (
     MJWarpSolverCfg,
@@ -17,8 +17,9 @@ from isaaclab_newton.physics import (
     NewtonSoftContactCfg,
     VBDSolverCfg,
 )
-from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg, NewtonDeformableBodyPropertiesCfg
+from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg, NewtonArticulationCfg, NewtonDeformableBodyPropertiesCfg
 from isaaclab_newton.sim.spawners.materials import NewtonSurfaceDeformableBodyMaterialCfg
+from isaaclab_visualizers.kit import KitVisualizerCfg
 from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 from isaaclab_visualizers.viser import ViserVisualizerCfg
 
@@ -39,14 +40,13 @@ from isaaclab.sensors import FrameTransformerCfg
 from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 from isaaclab.utils import configclass
-from isaaclab.utils.assets import ISAAC_NUCLEUS_DIR
 
-from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyCfg, CouplerProxyMappingCfg
+from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyMappingCfg
 
-from isaaclab_tasks.core.lift.config.franka_soft.franka_soft_env_cfg import TABLE_SPAWN_CFG
 from isaaclab_tasks.utils import PresetCfg
 
 from ... import mdp
+from ...coupler_cfg import ClothGraspCouplerProxyCfg
 
 ##
 #################### Pre-defined configs ####################
@@ -54,41 +54,41 @@ from ... import mdp
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_MENAGERIE_CFG  # isort:skip
 
-# Robot Home Position with head pointing down and gripper open
-HOME_JOINT_POS = {
-    "panda_joint1": 0.0,
-    "panda_joint2": -0.569,
-    "panda_joint3": 0.0,
-    "panda_joint4": -2.810,
-    "panda_joint5": 0.0,
-    "panda_joint6": 2.241,
-    "panda_joint7": math.pi / 4,
-    "panda_finger_joint.*": 0.04,
-}
+# Blender cloth meshes
+CLOTH_MESH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "cloth20")
 
 ##
 #################### Physics ####################
 ##
 
-# Newton physics: MJWarp simulates the robot, VBD the cloth, coupled through proxy bodies for the hand and fingers.
-PHYSICS_CFG = NewtonCfg(
-    solver_cfg=CouplerProxyCfg(
+
+@configclass
+class PhysicsCfg(NewtonCfg):
+    """MJWarp robot and VBD cloth with the constraint-grasp proxy coupler."""
+
+    solver_cfg = ClothGraspCouplerProxyCfg(
         entries=[
             CouplerEntryCfg(
                 # MJWarp solver for rigid robot
                 name="rigid",
                 solver_cfg=MJWarpSolverCfg(
+                    solver="newton",
+                    integrator="implicitfast",
+                    use_mujoco_contacts=True,
                     cone="elliptic",  # shape of the friction cone
+                    iterations=100,
                     ls_iterations=30,  # line search iterations of MuJoCo constraint solver
-                    integrator="implicitfast",  # solver type
                 ),
                 bodies=[r"/World/envs/env_[^/]+/Robot"],
             ),
             CouplerEntryCfg(
                 # VBD solver for soft cloth
                 name="soft",
-                # per rigid body how many cloth contact nodes can be stored
-                solver_cfg=VBDSolverCfg(iterations=10, rigid_body_particle_contact_buffer_size=1024),
+                solver_cfg=VBDSolverCfg(
+                    iterations=10,
+                    particle_enable_self_contact=False,
+                    rigid_body_particle_contact_buffer_size=1024,
+                ),
                 all_particles=True,
                 include_static_shapes=True,  # VBD owns static shapes (e.g. table)
             ),
@@ -97,7 +97,8 @@ PHYSICS_CFG = NewtonCfg(
             CouplerProxyMappingCfg(
                 source="rigid",
                 destination="soft",
-                # Collision of cloth only with head and fingers of robot arm
+                mode="lagged",
+                # Collision of cloth only with hand and fingers of robot arm
                 bodies=[
                     r"/World/envs/env_[^/]+/Robot/Geometry/.*panda_hand",
                     r"/World/envs/env_[^/]+/Robot/Geometry/.*panda_(left|right)finger",
@@ -106,18 +107,23 @@ PHYSICS_CFG = NewtonCfg(
                 collision_pipeline=NewtonCollisionPipelineCfg(
                     enable_rigid_soft_full_surface_contact=True,
                 ),
+                mass_scale=5.0,  # heavier proxy fingers in VBD # default 1.0
             )
         ],
-        iterations=1,  # Solve coupling once per step, more iterations are more accurate but slower
-    ),
-    soft_contact_cfg=NewtonSoftContactCfg(
+        iterations=1,  # Solve coupling once per step
+        rest_angle_scale=0.5,  # keep half of the mesh's wrinkles as rest shape (default 0.0)
+    )
+    soft_contact_cfg = NewtonSoftContactCfg(
         soft_contact_ke=8.0e3,  # stiffness, higher less penetration but more unstable
-        soft_contact_kd=1.0e-2,  # contact damping, higher more stable but slower response
-        soft_contact_mu=100.0,  # Increase friction to prevent cloth slipping out of the gripper
-    ),
-    num_substeps=2,  # Solver substeps per physics step
-)
+        soft_contact_kd=1.0,  # contact damping, higher more stable but slower response
+        soft_contact_mu=1.3,  # realistic cloth-cloth mu
+    )
+    num_substeps = 2
 
+    solver_cfg.proxies[0].proxy_relaxation = 0.5
+
+
+PHYSICS_CFG = PhysicsCfg()
 
 ##
 #################### Scene definition ####################
@@ -126,18 +132,36 @@ PHYSICS_CFG = NewtonCfg(
 
 @configclass
 class FrankaClothDragSceneCfg(InteractiveSceneCfg):
-    """Scene for the Franka cloth dragging environment."""
+    """Scene for the Franka Cloth Dragging environment."""
 
-    # Franka Panda robot
+    # Franka Panda Robot Arm
     robot: ArticulationCfg = FRANKA_PANDA_MENAGERIE_CFG.replace(
-        prim_path="{ENV_REGEX_NS}/Robot", init_state=ArticulationCfg.InitialStateCfg(joint_pos=HOME_JOINT_POS)
+        prim_path="{ENV_REGEX_NS}/Robot",
+        init_state=ArticulationCfg.InitialStateCfg(
+            pos=(0.0, 0.0, 0.0),
+            rot=(0.0, 0.0, 0.0, 1.0),
+            joint_pos={  # Head down home position
+                "panda_joint1": 0.0,
+                "panda_joint2": -0.110,
+                "panda_joint3": 0.0,
+                "panda_joint4": -2.272,
+                "panda_joint5": 0.0,
+                "panda_joint6": 2.162,
+                "panda_joint7": math.pi / 4,
+                "panda_finger_joint.*": 0.03,  # half the opening
+            },
+        ),
+        spawn=FRANKA_PANDA_MENAGERIE_CFG.spawn.replace(
+            # Physics Engine Setup
+            variants={"Physics": "mujoco", "Colliders": "gripper_only"},
+            articulation_props=NewtonArticulationCfg(self_collision_enabled=False),
+            rigid_props=[MujocoRigidBodyCfg(gravcomp=1.0)],
+        ),
     )
-    robot.spawn.variants = {"Physics": "mujoco"}
 
-    # end-effector frame
+    # End-effector frame
     ee_frame: FrameTransformerCfg = FrameTransformerCfg(
         prim_path="{ENV_REGEX_NS}/Robot/Geometry/panda_link0",
-        debug_vis=False,
         target_frames=[
             FrameTransformerCfg.FrameCfg(
                 prim_path=(
@@ -145,64 +169,76 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                     "panda_link4/panda_link5/panda_link6/panda_link7/panda_hand"
                 ),
                 name="end_effector",
-                offset=OffsetCfg(pos=[0.0, 0.0, 0.1034]),
+                offset=OffsetCfg(pos=(0.0, 0.0, 0.10365)),  # centered between finger pads
+                # 0.11185m to the end of the collision box, 0.1123m to the end of finger mesh
             ),
         ],
     )
 
-    # Cloth simulated by the Newton VBD solver
+    # Cloth imported from assets
     deformable: DeformableObjectCfg = DeformableObjectCfg(
         prim_path="{ENV_REGEX_NS}/Deformable",
         init_state=DeformableObjectCfg.InitialStateCfg(
-            pos=(0.8, 0.0, 0.005), rot=(0.0, 0.0, 0.0, 1.0)
-        ),  # Flat at slightly above table height
-        spawn=sim_utils.MeshRectangleCfg(
-            size=(0.2, 0.2),
-            edge_refinement=8,
+            pos=(0.62, 0.0, 0.005),  # slightly above the table to avoid penetration at init
+            rot=(0.0, 0.0, 0.0, 1.0),
+        ),
+        spawn=sim_utils.UsdFileCfg(
+            usd_path=os.path.join(CLOTH_MESH_DIR, "cloth20_lod0_wrinkled.usd"),
             deformable_props=NewtonDeformableBodyPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.95, 0.85, 0.1)),
             physics_material=NewtonSurfaceDeformableBodyMaterialCfg(
-                density=1.0,
+                density=0.2,  # areal density [kg/m^2], real cotton 0.12-0.3
                 particle_radius=0.002,
                 tri_ke=5e2,
                 tri_ka=5e2,
                 tri_kd=1e-3,
-                edge_ke=0.5,
+                edge_ke=1.0,
                 edge_kd=1e-3,
             ),
         ),
     )
 
-    # Static table collider with its top surface at z = 0
+    # Table
     table: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.525]),
-        spawn=TABLE_SPAWN_CFG,
-    )
-
-    # ground plane
-    ground: AssetBaseCfg = AssetBaseCfg(
-        prim_path="/World/GroundPlane",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.0, -1.05]),
-        spawn=GroundPlaneCfg(),
-    )
-
-    # lights
-    sky_light = AssetBaseCfg(
-        prim_path="/World/skyLight",
-        spawn=sim_utils.DomeLightCfg(
-            intensity=750.0,
-            texture_file=f"{ISAAC_NUCLEUS_DIR}/Materials/Textures/Skies/PolyHaven/kloofendal_43d_clear_puresky_4k.hdr",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.5]),
+        spawn=sim_utils.CuboidCfg(
+            size=(1.5, 1.0, 1.0),
+            collision_props=sim_utils.CollisionPropertiesCfg(),
+            physics_material=sim_utils.RigidBodyMaterialCfg(
+                static_friction=0.12,
+                dynamic_friction=0.12,
+            ),
+            # cloth-table friction: sqrt(soft_contact_mu * table mu) = sqrt(1.3 * 0.12) = 0.39 (cotton on wood 0.3-0.5)
         ),
     )
 
+    # Ground plane
+    ground: AssetBaseCfg = AssetBaseCfg(
+        prim_path="/World/GroundPlane",
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.0, -1.0]),
+        spawn=GroundPlaneCfg(),
+    )
+
+    # Lights
+    sky_light = AssetBaseCfg(
+        prim_path="/World/skyLight",
+        spawn=sim_utils.DomeLightCfg(intensity=750.0),
+    )
+
     def __post_init__(self) -> None:
-        # Franka actuators, inspired by libfranka's joint_impedance_control.cpp
+        # Real controller actuator settings (joint_impedance_control.cpp)
         self.robot.actuators = {
             "panda_arm": ImplicitActuatorCfg(
                 joint_names_expr=["panda_joint[1-7]"],
-                joint_effort_limit={"panda_joint[1-4]": 87.0, "panda_joint[5-7]": 12.0},
-                joint_velocity_limit={"panda_joint[1-4]": 2.175, "panda_joint[5-7]": 2.61},
+                joint_effort_limit={  # max torque of the joints [Nm]
+                    "panda_joint[1-4]": 87.0,
+                    "panda_joint[5-7]": 12.0,
+                },
+                joint_velocity_limit={  # max speed of the joints [rad/s]
+                    "panda_joint[1-4]": 2.175,
+                    "panda_joint[5-7]": 2.61,
+                },
                 stiffness={
                     "panda_joint[1-4]": 600.0,
                     "panda_joint5": 250.0,
@@ -215,35 +251,31 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                     "panda_joint6": 25.0,
                     "panda_joint7": 15.0,
                 },
-                armature={
+                armature={  # inertias of the joints
                     "panda_joint[1-2]": 0.6057,
                     "panda_joint[3-4]": 0.4625,
                     "panda_joint[5-7]": 0.2055,
                 },
             ),
+            # Real gripper: closes with grasp(width=0, speed=0.1, force=70) and opens with move(width=0.08, speed=0.1)
             "panda_hand": ImplicitActuatorCfg(
                 joint_names_expr=["panda_finger_joint1"],
-                joint_effort_limit=500.0,
-                actuator_velocity_limit=0.2,
-                joint_velocity_limit=2.0,
-                stiffness=2000.0,
-                damping=100.0,
+                joint_effort_limit=70.0,  # grasp force limit [N]
+                joint_velocity_limit=0.05,
+                stiffness=7.5e3,  # Tune to achieve stable simulation
+                damping=100.0,  # Tune to achieve stable simulation
                 armature=0.1,
             ),
-            # Mimics the first finger actions
+            # Finger 2 mimics finger 1
             "panda_finger2_passive": ImplicitActuatorCfg(
                 joint_names_expr=["panda_finger_joint2"],
-                joint_effort_limit=1.0,
-                actuator_velocity_limit=0.2,
-                joint_velocity_limit=2.0,
-                stiffness=0.0,
+                joint_effort_limit=70.0,
+                joint_velocity_limit=0.05,
+                stiffness=0.0,  # zero stiffness and damping => accept mimic constraint
                 damping=0.0,
                 armature=0.1,
             ),
         }
-
-        # Use MJWarp solver gravity compensation for the robot
-        self.robot.spawn.rigid_props = [MujocoRigidBodyCfg(gravcomp=1.0)]
 
 
 ##
@@ -251,13 +283,18 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
 ##
 
 # ------------------- Action Terms -------------------
-GRIPPER_ACTION_CFG = mdp.BinaryJointPositionActionCfg(
-    # Only finger 1 is actuated, binary action <0 => closes and >=0 => opens
+GRIPPER_ACTION_CFG = mdp.ClothGraspActionCfg(
+    # Binary gripper action: open <0 or close >0
     asset_name="robot",
     joint_names=["panda_finger_joint1"],
-    # Fully opened and closed position of gripper finger
-    open_command_expr={"panda_finger_joint1": 0.04},
-    close_command_expr={"panda_finger_joint1": 0.0},
+    # Ensure controller respects joint range and velocity limits
+    open_command_expr={"panda_finger_joint1": 0.03},
+    close_command_expr={"panda_finger_joint1": 0.005},  # gap keeps the pads
+    joint_vel_factor=0.75,  # closing speed as fraction of hardware max speed
+    # Grasping parameters
+    release_travel=0.002,  # reopen after failed grasp to retry
+    squeeze_steps=5,  # Squeezing Model
+    latch_threshold=0.5,  # action threshold to change from open to close
 )
 
 
@@ -265,10 +302,13 @@ GRIPPER_ACTION_CFG = mdp.BinaryJointPositionActionCfg(
 class JointDeltaActionsCfg:
     """7-DoF delta joint position + 1-DoF binary gripper."""
 
-    arm_action = mdp.RelativeJointPositionActionCfg(
+    arm_action = mdp.LimitedRelativeJointPositionActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
-        scale=0.03,  # How many rad/step can be max commanded for each joint
+        # Ensure controller respects joint range and velocity limits
+        scale=0.03,  # action scale
+        joint_range_margin=0.05,  # reduce range by [rad] on both sides
+        joint_vel_factor=0.90,  # limit commanded veloctiy by [factor] of hardware max
     )
 
     gripper_action = GRIPPER_ACTION_CFG
@@ -281,17 +321,18 @@ class EEDeltaActionsCfg:
     arm_action = mdp.TopDownDeltaEEActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
-        scale_trans=0.01,  # How many m/step can be max commanded for dx, dy, dz
-        scale_rot=0.05,  # How many rad/step can be max commanded for dyaw
-        # Panda hand frame is commanded with offset of 0.1034m to match EE frame of robot
-        body_name="panda_hand",
         controller=DifferentialIKControllerCfg(
             command_type="pose",
-            use_relative_mode=True,  # Commands are relative pose
-            ik_method="dls",  # Damped Least Squares to stay stable near singularities
-            ik_params={"lambda_val": 0.3},  # damping, larger lambda_val => more stable but slower response
+            use_relative_mode=True,
+            ik_method="dls",  # "Damped Least Squares" => stable near singularities
+            ik_params={"lambda_val": 0.1},  # Damping factor
         ),
-        body_offset=mdp.TopDownDeltaEEActionCfg.OffsetCfg(pos=[0.0, 0.0, 0.1034]),
+        # Ensure controller respects joint range and velocity limits
+        scale_trans=0.03,  # action scale
+        scale_rot=0.2,
+        limit_operation_space=True,  # limit end-effector to reasonable task space
+        joint_vel_factor=0.9,  # limit commanded veloctiy by [factor] of hardware max
+        joint_range_margin=0.05,  # stop the whole arm 0.05 rad before one joint reaches limit
     )
 
     gripper_action = GRIPPER_ACTION_CFG
@@ -301,10 +342,10 @@ class EEDeltaActionsCfg:
 class ActionsCfg(PresetCfg):
     """Action-space presets: delta joint space or delta EE task space."""
 
-    # Use "env.actions=joint_delta" Flag
+    # "env.actions=joint_delta" Flag to use joint actions
     joint_delta: JointDeltaActionsCfg = JointDeltaActionsCfg()
 
-    # Use "env.actions=ee_delta" Flag
+    # "env.actions=ee_delta" Flag to use end-effector actions
     ee_delta: EEDeltaActionsCfg = EEDeltaActionsCfg()
 
     default = ee_delta
@@ -313,89 +354,97 @@ class ActionsCfg(PresetCfg):
 # ------------------- Observation Terms -------------------
 @configclass
 class ActorObsCfg(ObsGroup):
-    """Actor observations shared by both action spaces.
+    """Position-only cloth observations with five-frame history and robot proprioception."""
 
-    The actor observes the task partially (POMDP), so every term carries a history of the last 5 steps.
-    """
+    # ---------- Proprioception ----------
 
-    # End-effector fingertip position and yaw expressed in base frame
-    ee_pose = ObsTerm(func=mdp.ee_pose_b)
-
-    # End-effector fingertip position in the cloth COM frame: p_EE - p_COM, along the base frame axes
-    ee_pos_com = ObsTerm(func=mdp.ee_pos_com)
-
-    # Target relative to the cloth's COM: the displacement the cloth still has to make
-    target_pos_com = ObsTerm(func=mdp.target_pos_com, params={"command_name": "cloth_target"})
-
-    # Measured finger opening distance in [m]
-    gripper_opening = ObsTerm(
-        func=mdp.joint_pos, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint1"])}
-    )
-
-    # Last action; with the group history the actor sees the last 5 actions
-    actions = ObsTerm(func=mdp.last_action)
-
-    # Current stage of the task: approach, grasping, dragging, near goal
-    # privileged: computed from all cloth nodes and the true COM; revisit for deployment
-    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
-
-    # 20 random cloth nodes (sorted ids, fixed per episode) in the cloth COM frame
-    cloth_points = ObsTerm(func=mdp.ClothSampledPointsInComFrame, params={"num_points": 20})
-
-    def __post_init__(self) -> None:
-        self.enable_corruption = False  # no observation noise
-        self.concatenate_terms = True  # join all terms into one flat tensor for the MLP
-        self.history_length = 5  # stack the last 5 steps of every term, including terms added in subclasses
-        self.flatten_history_dim = True  # (num_envs, 5, dim) -> (num_envs, 5 * dim)
-
-
-@configclass
-class JointActorObsCfg(ActorObsCfg):
-    """Actor observations for delta joint-space actions: adds the arm joint state."""
-
-    # Add robot joint positions and velocities
+    # Arm revolute joint positions and velocities as ratios of robot limits
     joint_pos = ObsTerm(
-        func=mdp.joint_pos_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
+        func=mdp.joint_pos_ratio,
+        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
     )
     joint_vel = ObsTerm(
-        func=mdp.joint_vel_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
+        func=mdp.joint_vel_ratio,
+        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
     )
 
-
-@configclass
-class EEActorObsCfg(ActorObsCfg):
-    """Actor observations for delta end-effector actions: adds the end-effector velocity and yaw rate."""
-
-    # Add end-effector linear velocity and angular velocity in base frame
+    # EE position and veloctiy for all 4 DoFs (x, y, z, yaw) in base frame
+    ee_pose = ObsTerm(func=mdp.ee_pose_b)
     ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="panda_hand")})
+
+    # Gripper width (distance between the finger pads) in [m]
+    gripper_width = ObsTerm(
+        func=mdp.gripper_width, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])}
+    )
+
+    # Whether the gripper holds the cloth (the real Franka reports is_grasped)
+    cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
+
+    # Last action applied to the robot
+    actions = ObsTerm(func=mdp.last_action)
+
+    # ---------- Exteroception ----------
+
+    # Nine permanent landmarks plus episode-sampled nodes, tracked consistently through position history.
+    cloth_points = ObsTerm(func=mdp.ClothPointsInBaseFrame, params={"num_random_nodes": 11})
+
+    # ---------- Task ----------
+
+    # Explicit planar error in the same base frame as the cloth positions and EE action.
+    cloth_target_displacement = ObsTerm(func=mdp.cloth_target_displacement_b)
+
+    # Current task stage.
+    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
+
+    def __post_init__(self) -> None:
+        self.enable_corruption = False
+        self.concatenate_terms = True
+        self.history_length = 5  # stack the last 5 steps of every term
+        self.flatten_history_dim = True
 
 
 @configclass
 class CriticObsCfg(ObsGroup):
-    """Privileged critic observations shared by both action spaces.
+    """Privileged critic observations with full cloth positions and velocities, without history."""
 
-    The critic observes the complete current state (MDP), so it needs no history.
-    """
+    # ---------- Proprioception ----------
 
-    # Robot state
-    joint_pos = ObsTerm(func=mdp.joint_pos_rel)
-    joint_vel = ObsTerm(func=mdp.joint_vel_rel)
+    joint_pos = ObsTerm(
+        func=mdp.joint_pos_ratio,
+        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    )
+    joint_vel = ObsTerm(
+        func=mdp.joint_vel_ratio,
+        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    )
+
     ee_pose = ObsTerm(func=mdp.ee_pose_b)
+
     ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="panda_hand")})
 
-    # The stage and the rewards depend on the last action, so it is part of the state
-    actions = ObsTerm(func=mdp.last_action)
-    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
+    gripper_width = ObsTerm(
+        func=mdp.gripper_width, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])}
+    )
 
-    # Full cloth state
+    # Whether the gripper holds the cloth and the share of cloth nodes locked to the hand
+    cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
+    grasped_node_ratio = ObsTerm(func=mdp.grasped_node_ratio)
+
+    actions = ObsTerm(func=mdp.last_action)
+
+    # ---------- Exterioceptive ----------
+
+    # Privileged simulation information (position and velocity of all nodes)
     cloth_nodal_pos = ObsTerm(func=mdp.cloth_nodal_pos_b)
     cloth_nodal_vel = ObsTerm(func=mdp.cloth_nodal_vel_b)
-    cloth_com_pos = ObsTerm(func=mdp.cloth_com_pos_b)
-    cloth_com_vel = ObsTerm(func=mdp.cloth_com_vel_b)
 
-    # Target of the cloth's center of mass
+    # ---------- Task ----------
+
+    # Target and central cloth node positions in the base frame
     target_pos = ObsTerm(func=mdp.generated_commands, params={"command_name": "cloth_target"})
-    target_pos_com = ObsTerm(func=mdp.target_pos_com, params={"command_name": "cloth_target"})
+    cloth_center_pos = ObsTerm(func=mdp.cloth_center_pos_b)
+    cloth_target_displacement = ObsTerm(func=mdp.cloth_target_displacement_b)
+    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
 
     def __post_init__(self) -> None:
         self.enable_corruption = False
@@ -403,39 +452,11 @@ class CriticObsCfg(ObsGroup):
 
 
 @configclass
-class JointCriticObsCfg(CriticObsCfg):
-    """Critic observations for delta joint-space actions: the shared state, no extras yet."""
+class ObservationsCfg:
+    """The actor (``policy``) and the privileged critic (``critic``)"""
 
-
-@configclass
-class EECriticObsCfg(CriticObsCfg):
-    """Critic observations for delta end-effector actions: the shared state, no extras yet."""
-
-
-@configclass
-class ActorCriticObsCfg:
-    """Actor (``policy``) and critic observation groups of one preset, kept as a configclass for Hydra overrides."""
-
-    policy: ObsGroup = MISSING
-    critic: ObsGroup = MISSING
-
-
-@configclass
-class ObservationsCfg(PresetCfg):
-    """Observation presets for actor-critic training and both action spaces (joint and end-effector).
-
-    joint_symm: actor and critic see the same joint action observations
-    joint_asymm: actor sees joint observations, critic sees privileged observations
-    ee_symm: actor and critic see the same ee action observations
-    ee_asymm: actor sees ee observations, critic sees privileged observations
-    """
-
-    joint_symm = ActorCriticObsCfg(policy=JointActorObsCfg(), critic=JointActorObsCfg())
-    joint_asymm = ActorCriticObsCfg(policy=JointActorObsCfg(), critic=JointCriticObsCfg())
-    ee_symm = ActorCriticObsCfg(policy=EEActorObsCfg(), critic=EEActorObsCfg())
-    ee_asymm = ActorCriticObsCfg(policy=EEActorObsCfg(), critic=EECriticObsCfg())
-
-    default = ee_asymm
+    policy: ActorObsCfg = ActorObsCfg()
+    critic: CriticObsCfg = CriticObsCfg()
 
 
 # ------------------- Command Terms -------------------
@@ -443,16 +464,26 @@ class ObservationsCfg(PresetCfg):
 class CommandsCfg:
     """Command specifications for the MDP."""
 
-    # Target for the cloth COM on a line between the robot base and the cloth spawn, resampled at every reset.
+    # Specify the task and stage objectives that wants to be achieved by the agent
     cloth_target = mdp.ClothTargetCommandCfg(
         asset_name="robot",
         object_name="deformable",
-        # Spawn line for target selection
-        ranges=mdp.ClothTargetCommandCfg.Ranges(pos_x=(0.35, 0.35), pos_y=(-0.2, 0.2), pos_z=(0.002, 0.002)),
-        success_radius=0.05,  # Target disc for success
-        max_speed=0.02,  # Max speed inside the target disc for the success timer to start
-        hold_time=0.5,  # Duration of the success timer
-        debug_vis=False, # Show marker at the target location
+        # Task goal definition
+        ranges=mdp.ClothTargetCommandCfg.Ranges(
+            # x >= 0.40: a grasp on the robot-facing edge trails the central node by ~10 cm, and the hand reaches
+            # only ~0.28 m towards the base at grasp height # was (0.35, 0.35)
+            pos_x=(0.40, 0.45),
+            pos_y=(-0.2, 0.2),
+            pos_z=(0.002, 0.002),  # Spawn line for target selection
+        ),
+        success_radius=0.05,  # Radius [m] around target for success (target disc)
+        hold_time=0.5,  # Duration [s] the center node must stay inside the target disc to count as success
+        debug_vis=True,  # Show marker at the target location
+        # Stage transitions conditions
+        approach_radius=0.07,  # APPROACH -> GRASP: EE frame origin closer than [m] to any cloth node
+        grasp_min_nodes=3,  # GRASP -> DRAG: constraint locks (fingers stopped closing) with at least this many nodes
+        # was 5. LOD0 mesh: an EE at 13.5 mm selects 5 nodes, at 15 mm mostly 1-3, so 4 forces low grasps
+        goal_zone_margin=0.075,  # DRAG -> GOAL: center node closer than success_radius + this (0.125 m) to the target
     )
 
 
@@ -463,24 +494,28 @@ class CommandsCfg:
 class EventCfg:
     """Configuration for events."""
 
-    # Always reset Robot to HOME_JOINT_POS
+    # Reset robot with variation in ee position (x = 0.19-0.42, y = -0.13-0.13 and z = 0.19-0.42 m)
     reset_robot_joints = EventTerm(
-        func=mdp.reset_joints_by_offset,
+        func=mdp.reset_franka_top_down,
         mode="reset",
         params={
-            "position_range": (0.0, 0.0),
-            "velocity_range": (0.0, 0.0),
+            "joint_offset_ranges": {
+                "panda_joint1": (-0.25, 0.25),
+                "panda_joint2": (-0.15, 0.15),
+                "panda_joint4": (-0.15, 0.15),
+                "panda_joint7": (-0.6, 0.6),
+            },
             "asset_cfg": SceneEntityCfg("robot"),
         },
     )
 
-    # Always reset the cloth to its flat spawn
+    # Reset the cloth with randomization in position and orientation
     reset_deformable = EventTerm(
-        func=mdp.reset_nodal_state_uniform,
+        func=mdp.reset_cloth_planar_pose,
         mode="reset",
         params={
-            "position_range": {"x": (0.0, 0.0), "y": (0.0, 0.0), "z": (0.0, 0.0)},
-            "velocity_range": {},
+            "position_range": {"x": (-0.03, 0.03), "y": (-0.05, 0.05)},
+            "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),
             "asset_cfg": SceneEntityCfg("deformable"),
         },
     )
@@ -488,72 +523,38 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Reward terms for the MDP."""
+    """Progress shaping with a small grasp aid and a discrete task-success bonus."""
 
-    # Bring the fingertips to the cloth
-    reaching_cloth = RewTerm(
-        func=mdp.deformable_ee_distance,
-        params={"std": 0.1, "asset_cfg": SceneEntityCfg("deformable")},
-        weight=5.0,
+    # Integrated progress: 10 cm of approach pays 1; 10 cm of attached transport pays 10.
+    approach_progress = RewTerm(
+        func=mdp.ClothDistanceProgress, params={"objective": "approach", "distance_scale": 0.1}, weight=1.0
     )
-
-    # Close the gripper at the cloth
-    gripper_closed_near_cloth = RewTerm(
-        func=mdp.gripper_closed_near_cloth,
-        params={"grasp_radius": 0.03},
-        weight=2.0,
+    grasp_between_fingers = RewTerm(
+        func=mdp.cloth_between_fingers,
+        params={"num_nodes_full": 3, "stages": ["grasp"], "saturate": False},
+        weight=0.05,
     )
-
-    # Close the gripper on the cloth: the cloth between the fingers keeps them from closing fully
-    cloth_pinched = RewTerm(
-        func=mdp.cloth_pinched,
-        params={"grasp_radius": 0.03, "min_finger_opening": 0.001},
-        weight=5.0,
+    drag_progress = RewTerm(
+        func=mdp.ClothDistanceProgress, params={"objective": "drag", "distance_scale": 0.1}, weight=10.0
     )
+    success = RewTerm(func=mdp.cloth_drag_success_bonus, weight=100.0)
 
-    # Do not close the gripper away from the cloth
-    gripper_closed_away = RewTerm(
-        func=mdp.gripper_closed_away_from_cloth,
-        params={"grasp_radius": 0.03},
-        weight=-0.5,
+    pen_termination = RewTerm(
+        func=mdp.is_terminated_term, params={"term_keys": ["cloth_out_of_bounds", "ee_below_table"]}, weight=-200.0
     )
-
-    # Pull the cloth's center of mass towards the target in the table plane, only while it is grasped
-    cloth_goal_tracking = RewTerm(
-        func=mdp.cloth_goal_distance_xy,
-        params={"std": 0.3, "command_name": "cloth_target", "grasp_radius": 0.03, "min_finger_opening": 0.001},
-        weight=2.0,
+    pen_action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
+    pen_joint_pos_limits = RewTerm(
+        func=mdp.joint_pos_limits,
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+        weight=-1.0,
     )
-
-    # Slow the cloth down inside the target radius so it does not overshoot, only while it is grasped
-    cloth_settled = RewTerm(
-        func=mdp.cloth_settled_at_target,
-        params={
-            "std_speed": 0.05,
-            "success_radius": 0.05,
-            "command_name": "cloth_target",
-            "grasp_radius": 0.03,
-            "min_finger_opening": 0.001,
-        },
-        weight=2.0,
-    )
-
-    # Paid every step once the cloth has been held at the target for hold_time
-    success_bonus = RewTerm(
-        func=mdp.ClothHeldAtTarget,
-        params={"success_radius": 0.05, "max_speed": 0.02, "hold_time": 0.5, "command_name": "cloth_target"},
-        weight=20.0,
-    )
-
-    # The cloth should be dragged over the table, not lifted
-    cloth_lifted = RewTerm(func=mdp.cloth_lifted, params={"max_height": 0.02}, weight=-5.0)
-
-    action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
 
 
 @configclass
 class TerminationsCfg:
     """Termination terms for the MDP."""
+
+    success = DoneTerm(func=mdp.cloth_drag_success)
 
     # Episode timeout
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
@@ -569,16 +570,19 @@ class TerminationsCfg:
         },
     )
 
-    # If robot reaches to far below the table for grabbing the cloth
+    # If robot reaches to far below the table (relevant with joint delta actions)
     ee_below_table = DoneTerm(
         func=mdp.ee_below_minimum,
         params={"minimum_height": -0.1, "ee_frame_cfg": SceneEntityCfg("ee_frame")},
     )
 
-    # Physics blow-up
+    # Physics blow-up that ended in NaN or Inf, which every threshold check above misses
+    nonfinite_state = DoneTerm(func=mdp.nonfinite_state)
+
+    # Termination if joints exceed their limits (gripper is excluded)
     joint_vel_out_of_limit = DoneTerm(
         func=mdp.joint_vel_out_of_sim_limit,
-        params={"asset_cfg": SceneEntityCfg("robot")},
+        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
     )
 
 
@@ -597,47 +601,49 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     """Manager-based RL environment: Franka Panda dragging a cloth across the table."""
 
     # Scene settings
-    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=1024, env_spacing=2.0, replicate_physics=True)
+    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=1024, env_spacing=2.5, replicate_physics=True)
 
-    # Basic settings
+    # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
     actions: ActionsCfg = ActionsCfg()
     commands: CommandsCfg = CommandsCfg()
-
-    # MDP settings
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: EventCfg = EventCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self) -> None:
-        # general settings
+        # General settings
         self.decimation = 4
-        self.episode_length_s = 5.0
+        self.episode_length_s = 10.0
 
         # simulation settings
         self.sim.dt = 1.0 / 120
         self.sim.render_interval = self.decimation
-        self.sim.physics = PHYSICS_CFG
+        self.sim.physics = PhysicsCfg()
 
-        # Default seed; training overwrites it with the agent seed (--seed). The cloth node sampling uses it too.
-        self.seed = 42
-
-        # Setup correct viewpoint for each visualizer. No Kit visualizer here: a Kit entry boots the Kit runtime even
-        # with --viz none, and the workstation has no display. Run without any visualizer with --viz none.
+        # Setup Visulaizer settings
         self.sim.visualizer_cfgs = [
+        
+            KitVisualizerCfg(
+                eye=(0.5 + 3.18, -3.18, 7.59),
+                lookat=(0.5, 0.0, -0.2),
+                headless=True,
+                max_visible_envs=16,
+                randomly_sample_visible_envs=False,  # show environment 0 - 15
+            ),
             NewtonGLVisualizerCfg(
                 eye=(0.5 + 3.18, -3.18, 7.59),
                 lookat=(0.5, 0.0, -0.2),
-                focal_length=23.5,  # 23.5 mm to matche Kit's focal length
-                headless=True,  # no display attached to the workstation
+                focal_length=23.5,  # 23.5 mm matches Kit's focal length
+                headless=True,
                 max_visible_envs=16,
-                randomly_sample_visible_envs=False,  # show environment 0 - 15
+                randomly_sample_visible_envs=False,
             ),
             ViserVisualizerCfg(
                 eye=(0.5 + 3.18, -3.18, 7.59),
                 lookat=(0.5, 0.0, -0.2),
                 focal_length=23.5,
                 port=8750,  # Change default port to avoid clash with other users on Comino
-            ),
+            )
         ]
