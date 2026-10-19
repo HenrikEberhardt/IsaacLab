@@ -24,7 +24,8 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Configuration for a target position of the cloth's central node, see :class:`ClothTargetCommand`.
 
     The goal is reached when the cloth's central node stays within :attr:`success_radius` of the target in the table
-    plane for :attr:`hold_time` in a row.
+    plane for :attr:`hold_time` in a row, with the EE frame origin at most :attr:`max_ee_height` above the table, so a
+    cloth carried over the target does not count.
 
     The command also tracks the task stage (:class:`~.stages.ClothDragStage`). Each stage adds one condition to the
     conditions of the stages before it:
@@ -72,6 +73,13 @@ class ClothTargetCommandCfg(CommandTermCfg):
 
     hold_time: float = 0.5
     """Time the cloth's central node must stay within :attr:`success_radius` in a row to succeed [s]."""
+
+    max_ee_height: float | None = 0.04
+    """Highest the EE frame origin may be above the table top while the target counts as reached [m].
+
+    The held cloth hangs from the EE frame, so this keeps the cloth dragged on the table instead of carried. Defaults
+    to 0.04. None disables the condition.
+    """
 
     speed_window: int = 10
     """Number of last steps over which the speed of the central node is averaged for the ``center_speed_at_target``

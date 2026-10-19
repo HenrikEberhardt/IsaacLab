@@ -478,6 +478,7 @@ class CommandsCfg:
         ),
         success_radius=0.05,  # Radius [m] around target for success (target disc)
         hold_time=0.5,  # Duration [s] the center node must stay inside the target disc to count as success
+        max_ee_height=0.04,  # ... with the EE frame at most this high [m]: a cloth carried over the target does not count
         debug_vis=True,  # Show marker at the target location
         # Stage transitions conditions
         approach_radius=0.07,  # APPROACH -> GRASP: EE frame origin closer than [m] to any cloth node
@@ -539,6 +540,7 @@ class RewardsCfg:
     )
     success = RewTerm(func=mdp.cloth_drag_success_bonus, weight=100.0)
 
+    # Penalties
     pen_termination = RewTerm(
         func=mdp.is_terminated_term, params={"term_keys": ["cloth_out_of_bounds", "ee_below_table"]}, weight=-200.0
     )
@@ -547,6 +549,11 @@ class RewardsCfg:
         func=mdp.joint_pos_limits,
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
         weight=-1.0,
+    )
+    # Drag, don't carry: the held cloth hangs from the EE frame (between the pads), so its height bounds the cloth's.
+    # Free up to 3 cm (EE floor 8.5 mm, crease 13.5 mm, locked nodes at EE +-8.5 mm); carrying at 15 cm costs ~6/s
+    pen_ee_height = RewTerm(
+        func=mdp.ee_height_above, params={"max_height": 0.03, "stages": ["drag", "goal"]}, weight=-50.0
     )
 
 

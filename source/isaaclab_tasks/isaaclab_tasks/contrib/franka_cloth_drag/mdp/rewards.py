@@ -257,6 +257,28 @@ def cloth_node_speed(env: ManagerBasedRLEnv, stages: Sequence[str], command_name
     return _stage_gate(speed, command.stage, stages, saturate=False)
 
 
+def ee_height_above(
+    env: ManagerBasedRLEnv, max_height: float, stages: Sequence[str], command_name: str = "cloth_target"
+) -> torch.Tensor:
+    """Return the height of the EE frame origin above ``max_height`` over the table top [m], zero below it, in the
+    active stages. A penalty: it never saturates.
+
+    The EE frame origin lies between the finger pads. While the gripper holds the cloth, the cloth hangs from it, so
+    no node is more than about 1 cm above it: gated on the holding stages, this bounds how far the cloth is lifted, so
+    the policy drags the cloth instead of carrying it.
+
+    Args:
+        env: The environment.
+        max_height: Height of the EE frame origin above the table top up to which there is no penalty [m].
+        stages: Names of the stages the term is active in.
+        command_name: Name of the cloth target command.
+    """
+    command = _command(env, command_name)
+    ee_frame: FrameTransformer = env.scene[command.cfg.ee_frame_name]
+    ee_height = ee_frame.data.target_pos_w.torch[:, 0, 2] - env.scene.env_origins[:, 2]
+    return _stage_gate((ee_height - max_height).clamp(min=0.0), command.stage, stages, saturate=False)
+
+
 def cloth_goal_proximity(
     env: ManagerBasedRLEnv, std: float, stages: Sequence[str], command_name: str = "cloth_target"
 ) -> torch.Tensor:

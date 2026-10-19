@@ -22,6 +22,7 @@ from .stages import ClothDragStage, cloth_goal_xy_distance, ee_cloth_distance, g
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, DeformableObject
     from isaaclab.envs import ManagerBasedEnv
+    from isaaclab.sensors import FrameTransformer
 
     from .commands_cfg import ClothTargetCommandCfg
 
@@ -120,7 +121,8 @@ class ClothTargetCommand(CommandTerm):
     @property
     def holding(self) -> torch.Tensor:
         """Whether the cloth's central node has stayed within :attr:`ClothTargetCommandCfg.success_radius` of the
-        target for :attr:`ClothTargetCommandCfg.hold_time` in a row. Shape is (num_envs,)."""
+        target for :attr:`ClothTargetCommandCfg.hold_time` in a row, with the EE frame origin at most
+        :attr:`ClothTargetCommandCfg.max_ee_height` above the table. Shape is (num_envs,)."""
         return self._steps_held >= self._hold_steps
 
     """
@@ -137,7 +139,13 @@ class ClothTargetCommand(CommandTerm):
         distance = cloth_goal_xy_distance(self._env, self.target_pos_b, self.cfg)
         step = self._env.episode_length_buf
         fresh = (step > 0) & (step != self._last_hold_step)
-        held = torch.where(distance < self.cfg.success_radius, self._steps_held + 1, 0)
+        at_target = distance < self.cfg.success_radius
+        if self.cfg.max_ee_height is not None:
+            # a cloth carried over the target does not count: the held cloth hangs from the EE frame
+            ee_frame: FrameTransformer = self._env.scene[self.cfg.ee_frame_name]
+            ee_height = ee_frame.data.target_pos_w.torch[:, 0, 2] - self._env.scene.env_origins[:, 2]
+            at_target &= ee_height <= self.cfg.max_ee_height
+        held = torch.where(at_target, self._steps_held + 1, 0)
         self._steps_held = torch.where(fresh, held, self._steps_held)
         self._last_hold_step.copy_(step)
         self.metrics["position_error_xy"] = distance
