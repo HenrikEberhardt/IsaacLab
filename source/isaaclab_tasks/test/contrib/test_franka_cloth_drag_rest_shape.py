@@ -58,4 +58,3 @@ def test_rest_shape_helpers_match_newton_builder():
     poses, areas = _triangle_rest_shapes(pos, torch.tensor(np.array(builder.tri_indices)))
     np.testing.assert_allclose(poses[0].numpy(), np.array(builder.tri_poses), rtol=1e-5, atol=1e-4)
     np.testing.assert_allclose(areas[0].numpy(), np.array(builder.tri_areas), rtol=1e-5)
-

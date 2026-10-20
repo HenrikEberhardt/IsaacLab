@@ -3,8 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Task stages of the Franka cloth dragging task and the state checks that define them.
-"""
+"""Task stages of the Franka cloth dragging task and the state checks that define them."""
 
 from __future__ import annotations
 
@@ -16,7 +15,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse
 
-from .frames import cloth_center_pos_b
+from .frames import cloth_center_pos_b, raised_node_ids
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, DeformableObject
@@ -32,15 +31,15 @@ class ClothDragStage(IntEnum):
     APPROACH = 0
     """The EE frame origin is away from the cloth."""
     GRASP = 1
-    """The EE frame origin is near the cloth."""
+    """The EE frame origin is near a raised cloth node (any cloth node if none is raised)."""
     DRAG = 2
-    """The gripper holds the cloth by nodes locked to the EE frame."""
+    """The gripper holds the cloth by nodes locked to the EE frame, wherever it grasped."""
     GOAL = 3
     """The gripper holds the cloth and its central node is near the target."""
 
 
 def gripper_closing(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
-    """Whether the binary gripper action commands closing. Shape is (num_envs,). """
+    """Whether the binary gripper action commands closing. Shape is (num_envs,)."""
     term = env.action_manager.get_term(cfg.gripper_action_name)
     if hasattr(term, "closed"):
         return term.closed
@@ -61,6 +60,22 @@ def ee_cloth_distance(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg, height_o
     tip_w = ee_frame.data.target_pos_w.torch[:, 0].clone()
     tip_w[:, 2] -= height_offset
     return torch.linalg.norm(cloth.data.nodal_pos_w.torch - tip_w.unsqueeze(1), dim=2).min(dim=1).values
+
+
+def ee_raised_node_distance(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Distance of the EE frame origin to the nearest raised cloth node [m]. Shape is (num_envs,).
+
+    The raised nodes are those of the reset event :attr:`ClothTargetCommandCfg.raised_nodes_event`. Without raised
+    nodes, this is the distance to the nearest cloth node, see :func:`ee_cloth_distance`.
+    """
+    ids = raised_node_ids(env, cfg.raised_nodes_event)
+    if ids is None:
+        return ee_cloth_distance(env, cfg)
+    cloth: DeformableObject = env.scene[cfg.object_name]
+    ee_frame: FrameTransformer = env.scene[cfg.ee_frame_name]
+    raised_w = cloth.data.nodal_pos_w.torch.gather(1, ids.unsqueeze(-1).expand(-1, -1, 3))
+    tip_w = ee_frame.data.target_pos_w.torch[:, 0]
+    return torch.linalg.norm(raised_w - tip_w.unsqueeze(1), dim=2).min(dim=1).values
 
 
 def pad_box_mask(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg, points_w: torch.Tensor) -> torch.Tensor:

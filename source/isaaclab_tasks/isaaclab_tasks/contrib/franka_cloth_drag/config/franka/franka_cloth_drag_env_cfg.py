@@ -29,6 +29,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg
 from isaaclab.assets.deformable_object import DeformableObjectCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -334,6 +335,7 @@ class EEDeltaActionsCfg:
         limit_operation_space=True,  # limit end-effector to reasonable task space
         joint_vel_factor=0.9,  # limit commanded veloctiy by [factor] of hardware max
         joint_range_margin=0.05,  # stop the whole arm 0.05 rad before one joint reaches limit
+        wrist_joint_limits=(-2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0),  # j7 yaw window ±120°: 90° from both sides
     )
 
     gripper_action = GRIPPER_ACTION_CFG
@@ -373,12 +375,11 @@ class ActorObsCfg(ObsGroup):
     ee_pose = ObsTerm(func=mdp.ee_pose_b)
     ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="panda_hand")})
 
-    # Gripper width (distance between the finger pads) in [m]
+    # Gripper information
     gripper_width = ObsTerm(
         func=mdp.gripper_width, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])}
     )
-
-    # Whether the gripper holds the cloth (the real Franka reports is_grasped)
+    # grasped state information (removed with curriculum after success)
     cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
 
     # Last action applied to the robot
@@ -386,16 +387,19 @@ class ActorObsCfg(ObsGroup):
 
     # ---------- Exteroception ----------
 
-    # Nine permanent landmarks plus episode-sampled nodes, tracked consistently through position history.
-    cloth_points = ObsTerm(func=mdp.ClothPointsInBaseFrame, params={"num_random_nodes": 11})
+    # Nine permanent landmarks, the episode's raised nodes and 18 episode-sampled nodes, drawn at each episode beginning
+    # and kept fixed, so every slot tracks the same node through the position history
+    cloth_points = ObsTerm(func=mdp.ClothPointsInBaseFrame, params={"num_random_nodes": 18})
 
     # ---------- Task ----------
 
     # Explicit planar error in the same base frame as the cloth positions and EE action.
     cloth_target_displacement = ObsTerm(func=mdp.cloth_target_displacement_b)
 
-    # Current task stage.
-    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
+    # Current task stage, hidden for whole episodes by the curriculum after success (all zeros)
+    stage = ObsTerm(
+        func=mdp.cloth_drag_stage, params={"command_name": "cloth_target", "hide_curriculum": "stage_hiding"}
+    )
 
     def __post_init__(self) -> None:
         self.enable_corruption = False
@@ -410,6 +414,7 @@ class CriticObsCfg(ObsGroup):
 
     # ---------- Proprioception ----------
 
+    # Joint information
     joint_pos = ObsTerm(
         func=mdp.joint_pos_ratio,
         params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
@@ -419,18 +424,18 @@ class CriticObsCfg(ObsGroup):
         params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
     )
 
+    # EE information
     ee_pose = ObsTerm(func=mdp.ee_pose_b)
-
     ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="panda_hand")})
 
+    # Privileged gripper information
+    cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
+    grasped_node_ratio = ObsTerm(func=mdp.grasped_node_ratio)
     gripper_width = ObsTerm(
         func=mdp.gripper_width, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])}
     )
 
-    # Whether the gripper holds the cloth and the share of cloth nodes locked to the hand
-    cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
-    grasped_node_ratio = ObsTerm(func=mdp.grasped_node_ratio)
-
+    # Last actions
     actions = ObsTerm(func=mdp.last_action)
 
     # ---------- Exterioceptive ----------
@@ -441,9 +446,13 @@ class CriticObsCfg(ObsGroup):
 
     # ---------- Task ----------
 
-    # Target and central cloth node positions in the base frame
+    # Target position in base frame
     target_pos = ObsTerm(func=mdp.generated_commands, params={"command_name": "cloth_target"})
+
+    # Cloth center node position in base frame
     cloth_center_pos = ObsTerm(func=mdp.cloth_center_pos_b)
+
+    # Displacement from center node to target position in base frame
     cloth_target_displacement = ObsTerm(func=mdp.cloth_target_displacement_b)
     stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
 
@@ -463,13 +472,11 @@ class ObservationsCfg:
 # ------------------- Command Terms -------------------
 @configclass
 class CommandsCfg:
-    """Command specifications for the MDP."""
+    """Task specifications for the MDP."""
 
-    # Task Objective
     cloth_target = mdp.ClothTargetCommandCfg(
         asset_name="robot",
         object_name="deformable",
-
         # Task goal definition
         ranges=mdp.ClothTargetCommandCfg.Ranges(
             # Random sampling of target position
@@ -477,16 +484,15 @@ class CommandsCfg:
             pos_y=(-0.2, 0.2),
             pos_z=(0.002, 0.002),  # Spawn line for target selection
         ),
-        success_radius=0.05,  # Radius [m] around the target position for success
+        success_radius=0.04,  # Radius [m] around the target position for success
         hold_time=0.75,  # Time [s] to hold the cloth in the target zone for success
-        max_ee_height=0.05,  # Success only with low EE
+        max_ee_height=0.05,  # success only with low EE (maybe delete this)
+        # Success needs a grasp at some point in the task (cloth pushing can't solve it)
         debug_vis=True,  # Target marker
-
         # Task stage transitions
-        approach_radius=0.07,  # APPROACH -> GRASP: EE frame origin closer than [m] to any cloth node
-        grasp_min_nodes=3,  # GRASP -> DRAG: constraint locks (fingers stopped closing) with at least this many nodes
-        # was 5. LOD0 mesh: an EE at 13.5 mm selects 5 nodes, at 15 mm mostly 1-3, so 4 forces low grasps
-        goal_zone_margin=0.075,  # DRAG -> GOAL: center node closer than success_radius + this (0.125 m) to the target
+        approach_radius=0.05,  # APPROACH -> GRASP: EE frame origin closer than [m] to a raised node (any node if none)
+        grasp_min_nodes=2,  # GRASP -> DRAG: any grasp locking at least this many nodes to the EE frame, raised or not
+        goal_zone_margin=0.06,  # DRAG -> GOAL: center node closer than success_radius + this (0.10 m) to the target
     )
 
 
@@ -502,7 +508,7 @@ class EventCfg:
         func=mdp.reset_franka_top_down,
         mode="reset",
         params={
-            "joint_offset_ranges": { # linear ee pos offset trough joint variation to avoid singularities
+            "joint_offset_ranges": {  # linear ee pos offset through joint variation to avoid singularities
                 "panda_joint1": (-0.25, 0.25),
                 "panda_joint2": (-0.15, 0.15),
                 "panda_joint4": (-0.15, 0.15),
@@ -519,14 +525,12 @@ class EventCfg:
         params={
             # Cloth position and orientation
             "position_range": {"x": (-0.03, 0.03), "y": (-0.05, 0.05)},
-            "yaw_range": (-0.25 * math.pi, 0.25 * math.pi), # symmetrie 
-
-            # Node pertubation
+            "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),  # symmetrie
+            # Node perturbation
             "include_edge_nodes": False,
             "num_raised_nodes": 3,  # redrawn at every reset
-            "node_raise_height": 0.0075,  # height above the table [m]
+            "node_raise_height": 0.0095,  # height above the table [m]
             "min_spacing": 0.05,  # minimum distance between raised nodes [m]
-
             "asset_cfg": SceneEntityCfg("deformable"),
         },
     )
@@ -536,13 +540,15 @@ class EventCfg:
 class RewardsCfg:
     """Progress shaping with a small grasp aid and a discrete task-success bonus."""
 
-    # Integrated progress: 10 cm of approach pays 1; 10 cm of attached transport pays 10.
+    # Integrated progress: 10 cm of approach to the nearest raised node pays 1; 10 cm of attached transport of the
+    # central node pays 10.
     approach_progress = RewTerm(
         func=mdp.ClothDistanceProgress, params={"objective": "approach", "distance_scale": 0.1}, weight=1.0
     )
+    # Linear 0.5 per node between the pads, counted like the lock; full at the lock count (grasp_min_nodes)
     grasp_between_fingers = RewTerm(
         func=mdp.cloth_between_fingers,
-        params={"num_nodes_full": 3, "stages": ["grasp"], "saturate": False},
+        params={"num_nodes_full": 2, "stages": ["grasp"], "saturate": False},
         weight=0.05,
     )
     drag_progress = RewTerm(
@@ -555,12 +561,17 @@ class RewardsCfg:
         func=mdp.is_terminated_term, params={"term_keys": ["cloth_out_of_bounds", "ee_below_table"]}, weight=-200.0
     )
     pen_action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
-    pen_joint_pos_limits = RewTerm(
-        func=mdp.joint_pos_limits,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    # Steep penalty only within 0.1 rad of the action's joint bounds (wrist: the yaw window), zero elsewhere; arm only
+    pen_joint_limit_barrier = RewTerm(
+        func=mdp.joint_limit_barrier,
+        params={
+            "action_name": "arm_action",
+            "margin": 0.1,
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
+        },
         weight=-1.0,
     )
-    # Drag, don't lift: linear penality if the EE is above 3cm
+    # Drag, don't lift: linear penalty if the EE is above 3cm
     pen_ee_height = RewTerm(
         func=mdp.ee_height_above, params={"max_height": 0.03, "stages": ["drag", "goal"]}, weight=-50.0
     )
@@ -606,6 +617,34 @@ class TerminationsCfg:
 class CurriculumCfg:
     """Curriculum terms for the MDP."""
 
+    # After the success average of finished episodes reaches 0.8: over 300 iterations above it (7200 env steps at 24
+    # steps/iteration), ramp pen_action_rate from its weight (-1e-3) to -1e-1, geometrically.
+    action_rate = CurrTerm(
+        func=mdp.ActionRateCurriculum,
+        params={
+            "command_name": "cloth_target",
+            "success_threshold": 0.8,
+            "ramp_steps": 7200,
+            "reward_term": "pen_action_rate",
+            "final_weight": -1e-1,
+            "ema_episodes": 2048,
+            "initial_progress": 0.0,
+        },
+    )
+
+    # After the success average reaches 0.8: over 300 iterations above it, hide the stage from the actor in a growing
+    # share of whole episodes (all zeros). Play with initial_progress 1.0; resume a run with the logged progress.
+    stage_hiding = CurrTerm(
+        func=mdp.StageHidingCurriculum,
+        params={
+            "command_name": "cloth_target",
+            "success_threshold": 0.8,
+            "ramp_steps": 7200,  # 300 iterations at 24 steps/iteration
+            "ema_episodes": 2048,
+            "initial_progress": 0.0,
+        },
+    )
+
 
 ##
 # Environment configuration
@@ -617,7 +656,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     """Manager-based RL environment: Franka Panda dragging a cloth across the table."""
 
     # Scene settings
-    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=1024, env_spacing=2.2, replicate_physics=True)
+    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=2048, env_spacing=2.2, replicate_physics=True)
 
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
@@ -640,7 +679,6 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
 
         # Setup Visulaizer settings
         self.sim.visualizer_cfgs = [
-        
             KitVisualizerCfg(
                 eye=(0.5 + 3.18, -3.18, 7.59),
                 lookat=(0.5, 0.0, -0.2),
@@ -661,5 +699,17 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
                 lookat=(0.5, 0.0, -0.2),
                 focal_length=23.5,
                 port=8750,  # Change default port to avoid clash with other users on Comino
-            )
+            ),
         ]
+
+    def play_mode(self):
+        """Play complete episodes as at the end of the curriculum: the actor never sees the task stage."""
+        super().play_mode()  # base: at most 50 envs, no observation corruption
+        self.scene.num_envs = min(self.scene.num_envs, 16)
+        if self.curriculum is not None:
+            # the curriculum state is not in the checkpoint, so start both blocks at full progress; a checkpoint from
+            # before the ramp finished: env.curriculum.stage_hiding.params.initial_progress=0.0 on the command line
+            if self.curriculum.stage_hiding is not None:
+                self.curriculum.stage_hiding.params["initial_progress"] = 1.0
+            if self.curriculum.action_rate is not None:
+                self.curriculum.action_rate.params["initial_progress"] = 1.0

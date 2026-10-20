@@ -24,18 +24,20 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Configuration for a target position of the cloth's central node, see :class:`ClothTargetCommand`.
 
     The goal is reached when the cloth's central node stays within :attr:`success_radius` of the target in the table
-    plane for :attr:`hold_time` in a row, with the EE frame origin at most :attr:`max_ee_height` above the table, so a
-    cloth carried over the target does not count.
+    plane for :attr:`hold_time` in a row, after the gripper has grasped the cloth at least once in the episode (stage
+    DRAG reached), so a cloth pushed into the target does not count. With :attr:`max_ee_height` set, the EE frame
+    origin must also stay at most that high above the table, so a cloth carried over the target does not count.
 
-    The command also tracks the task stage (:class:`~.stages.ClothDragStage`). Each stage adds one condition to the
-    conditions of the stages before it:
+    The command also tracks the task stage (:class:`~.stages.ClothDragStage`):
 
-    * GRASP: the EE frame origin is within :attr:`approach_radius` of a cloth node.
-    * DRAG: the gripper holds the cloth by nodes locked to the EE frame, see
+    * GRASP: the EE frame origin is within :attr:`approach_radius` of a node raised by the reset event
+      :attr:`raised_nodes_event`, or of any cloth node if no node is raised.
+    * DRAG: the gripper holds the cloth by nodes locked to the EE frame, wherever it grasped, see
       :class:`~.actions.ClothGraspAction`. The nodes lock once the closing fingers have come to rest with at least
-      :attr:`grasp_min_nodes` nodes between the pads. A gripper that does not lock nodes (``attach`` False) never
-      reaches DRAG.
-    * GOAL: the cloth's central node is within :attr:`success_radius` + :attr:`goal_zone_margin` of the target.
+      :attr:`grasp_min_nodes` nodes selected. A gripper that does not lock nodes (``attach`` False) never reaches
+      DRAG.
+    * GOAL: DRAG, and the cloth's central node is within :attr:`success_radius` + :attr:`goal_zone_margin` of the
+      target.
 
     The locked nodes cannot slip, so the gripper only lets go of the cloth when it is commanded open. Releasing the
     cloth in DRAG or GOAL drops the stage back to APPROACH for one update.
@@ -75,7 +77,7 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Time the cloth's central node must stay within :attr:`success_radius` in a row to succeed [s]."""
 
     max_ee_height: float | None = 0.04
-    """Highest the EE frame origin may be above the table top while the target counts as reached [m].
+    """Highest the EE frame origin may be above the table top while the target counts as reached [m]. Optional.
 
     The held cloth hangs from the EE frame, so this keeps the cloth dragged on the table instead of carried. Defaults
     to 0.04. None disables the condition.
@@ -95,12 +97,22 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Name of the actuated finger joint, whose position is the half gap between the finger pads."""
 
     approach_radius: float = 0.05
-    """Distance of the EE frame origin to the nearest cloth node below which APPROACH turns into GRASP [m]."""
+    """Distance of the EE frame origin to the nearest raised cloth node below which APPROACH turns into GRASP [m].
+
+    Without raised nodes, the distance to the nearest cloth node counts.
+    """
+
+    raised_nodes_event: str | None = "reset_deformable"
+    """Name of the reset event term whose ``raised_node_ids`` are the raised nodes, see
+    :class:`~.events.ResetClothWithRaisedNodes`. None, a missing term, or a term without raised nodes => every cloth
+    node counts for :attr:`approach_radius`."""
 
     grasp_min_nodes: int = 1
     """Number of cloth nodes the gripper must lock to hold the cloth.
 
-    A grasp with fewer nodes in the pad box locks nothing, so the stage stays in GRASP.
+    The count is of the selected nodes: those in the pad box plus every node of an edge or triangle whose center lies
+    in it (:meth:`~.cloth_grasp.ClothGraspConstraint.select`). A grasp with fewer selected nodes locks nothing, so the
+    stage stays in GRASP.
     """
 
     finger_pad_half_width: float = 0.0125

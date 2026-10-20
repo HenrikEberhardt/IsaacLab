@@ -17,7 +17,7 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import combine_frame_transforms
 
 from .frames import cloth_center_vel_b
-from .stages import ClothDragStage, cloth_goal_xy_distance, ee_cloth_distance, gripper_holds_cloth
+from .stages import ClothDragStage, cloth_goal_xy_distance, ee_raised_node_distance, gripper_holds_cloth
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, DeformableObject
@@ -31,8 +31,8 @@ class ClothTargetCommand(CommandTerm):
     """Target position of the cloth's central node in the robot's root frame, and the task stage.
 
     The target is sampled uniformly from :attr:`ClothTargetCommandCfg.ranges` whenever the command is resampled, by
-    default only when the episode resets. The goal is reached when the cloth's central node stays at the target, see
-    :class:`ClothTargetCommandCfg`.
+    default only when the episode resets. The goal is reached when the cloth's central node stays at the target after
+    the gripper has grasped the cloth in the episode, see :class:`ClothTargetCommandCfg`.
 
     The term also tracks the :class:`~.stages.ClothDragStage` of every environment, see :class:`ClothTargetCommandCfg`
     for the transitions. The stage is updated once per environment step, after the rewards and before the
@@ -121,8 +121,9 @@ class ClothTargetCommand(CommandTerm):
     @property
     def holding(self) -> torch.Tensor:
         """Whether the cloth's central node has stayed within :attr:`ClothTargetCommandCfg.success_radius` of the
-        target for :attr:`ClothTargetCommandCfg.hold_time` in a row, with the EE frame origin at most
-        :attr:`ClothTargetCommandCfg.max_ee_height` above the table. Shape is (num_envs,)."""
+        target for :attr:`ClothTargetCommandCfg.hold_time` in a row, after the gripper grasped the cloth in this
+        episode, and with the EE frame origin at most :attr:`ClothTargetCommandCfg.max_ee_height` above the table.
+        Shape is (num_envs,)."""
         return self._steps_held >= self._hold_steps
 
     """
@@ -140,6 +141,8 @@ class ClothTargetCommand(CommandTerm):
         step = self._env.episode_length_buf
         fresh = (step > 0) & (step != self._last_hold_step)
         at_target = distance < self.cfg.success_radius
+        # no success without a grasp: a cloth pushed into the target does not count
+        at_target &= self._time_to_stage[:, int(ClothDragStage.DRAG)] >= 0.0
         if self.cfg.max_ee_height is not None:
             # a cloth carried over the target does not count: the held cloth hangs from the EE frame
             ee_frame: FrameTransformer = self._env.scene[self.cfg.ee_frame_name]
@@ -204,13 +207,13 @@ class ClothTargetCommand(CommandTerm):
         """Advance the stage machine on the current state."""
         cfg = self.cfg
         dt = self._env.step_dt
-        # each stage needs the conditions of all stages before it
-        near = ee_cloth_distance(self._env, cfg) < cfg.approach_radius
+        # GRASP: near a raised node; DRAG: any grasp, wherever it locked; GOAL: DRAG and the center near the target
+        near = ee_raised_node_distance(self._env, cfg) < cfg.approach_radius
         # locked nodes cannot slip: the grasp holds until the policy opens the gripper, so no hysteresis is needed
-        pinched = near & gripper_holds_cloth(self._env, cfg)
+        pinched = gripper_holds_cloth(self._env, cfg)
         goal_radius = cfg.success_radius + cfg.goal_zone_margin
         in_goal_zone = pinched & (cloth_goal_xy_distance(self._env, self.target_pos_b, cfg) < goal_radius)
-        stage = near.long() + pinched.long() + in_goal_zone.long()
+        stage = torch.where(pinched, int(ClothDragStage.DRAG) + in_goal_zone.long(), near.long())
         # releasing the cloth while dragging falls back to APPROACH; the next update re-applies the conditions
         self._dropped = (self._stage >= int(ClothDragStage.DRAG)) & ~pinched
         stage[self._dropped] = int(ClothDragStage.APPROACH)

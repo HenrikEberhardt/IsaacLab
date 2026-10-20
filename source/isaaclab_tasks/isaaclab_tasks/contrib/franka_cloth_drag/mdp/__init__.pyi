@@ -13,6 +13,8 @@ __all__ = [
     "ClothGraspActionCfg",
     "ClothPointsInEEFrame",
     "ClothTargetCommandCfg",
+    "ActionRateCurriculum",
+    "StageHidingCurriculum",
     "LimitedRelativeJointPositionActionCfg",
     "RateLimitedBinaryJointPositionActionCfg",
     "TopDownDeltaEEActionCfg",
@@ -50,6 +52,7 @@ __all__ = [
     "gripper_open",
     "grasped_node_ratio",
     "gripper_width",
+    "joint_limit_barrier",
     "joint_pos_ratio",
     "joint_vel_ratio",
     "nonfinite_state",
@@ -67,6 +70,7 @@ from .actions_cfg import (
     TopDownDeltaEEActionCfg,
 )
 from .commands_cfg import ClothTargetCommandCfg
+from .curriculums import ActionRateCurriculum, StageHidingCurriculum
 from .events import (
     edge_included,
     interior_nodes,
@@ -113,6 +117,7 @@ from .rewards import (
     gripper_closed_on_cloth,
     gripper_closed_on_nothing,
     gripper_open,
+    joint_limit_barrier,
 )
 from .stages import ClothDragStage
 from .terminations import cloth_drag_success, nonfinite_state

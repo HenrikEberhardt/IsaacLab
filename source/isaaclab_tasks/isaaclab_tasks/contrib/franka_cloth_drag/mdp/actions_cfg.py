@@ -57,9 +57,10 @@ class TopDownDeltaEEActionCfg(DifferentialInverseKinematicsActionCfg):
     scale_rot: float = 0.05
     """Scale of the ``dyaw`` action per policy step [rad]."""
 
-    wrist_joint_limits: tuple[float, float] = (-0.5 * math.pi, 0.5 * math.pi)
-    """Range of the last arm joint, which turns the hand, that ``dyaw`` may command [rad]. Half a turn covers every
-    orientation of the symmetric gripper."""
+    wrist_joint_limits: tuple[float, float] = (-2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0)
+    """Range of the last arm joint, which turns the hand, that ``dyaw`` may command [rad]. Half a turn would cover every
+    orientation of the symmetric gripper; ±120° adds 60° of overlap, so a jaw orientation near the end of a half turn
+    can be reached from either side instead of only by the long way round. Inside the hardware range (±166°)."""
 
     limit_operation_space: bool = False
     """Whether to clamp commanded EE positions to the workspace planes below."""

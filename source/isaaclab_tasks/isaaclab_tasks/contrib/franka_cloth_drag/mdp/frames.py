@@ -170,6 +170,32 @@ def cloth_edges(env: ManagerBasedEnv, asset_cfg: SceneEntityCfg = SceneEntityCfg
     return _rest_edges(env.scene[asset_cfg.name])
 
 
+def raised_node_ids(env: ManagerBasedEnv, event_name: str | None = "reset_deformable") -> torch.Tensor | None:
+    """Ids of the cloth nodes raised in the current episode, shape [num_envs, K], or None.
+
+    The ids come from the reset event term ``event_name`` (:class:`~.events.ResetClothWithRaisedNodes`), which
+    redraws them, sorted, at every reset. Reset events run before the observation and command resets, so those see
+    the ids of the new episode.
+
+    Args:
+        env: The environment.
+        event_name: Name of the reset event term that raises the nodes. None => no raised nodes.
+
+    Returns:
+        The live tensor of node ids, or None if the term is missing, raises no nodes, or ``event_name`` is None.
+    """
+    if event_name is None:
+        return None
+    try:
+        term = env.event_manager.get_term_cfg(event_name).func
+    except ValueError:
+        return None
+    ids = getattr(term, "raised_node_ids", None)
+    if ids is None or ids.shape[1] == 0:
+        return None
+    return ids
+
+
 def cloth_center_pos_b(
     env: ManagerBasedEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),

@@ -22,10 +22,12 @@ import torch
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
 from .frames import cloth_center_pos_b, cloth_center_vel_b, ee_pose_in_base, ee_twist_in_base
+from .observations import _robot_with_action_joints
 from .stages import (
     ClothDragStage,
     cloth_goal_xy_distance,
     ee_cloth_distance,
+    ee_raised_node_distance,
     gripper_closing,
     gripper_holds_cloth,
     nodes_in_grasp,
@@ -37,6 +39,7 @@ if TYPE_CHECKING:
     from isaaclab.managers import RewardTermCfg
     from isaaclab.sensors import FrameTransformer
 
+    from .actions import LimitedRelativeJointPositionAction, TopDownDeltaEEAction
     from .commands import ClothTargetCommand
 
 
@@ -244,6 +247,33 @@ def gripper_closed_on_nothing(
     return _stage_gate(penalty, command.stage, stages, saturate=False)
 
 
+def joint_limit_barrier(
+    env: ManagerBasedRLEnv, action_name: str, margin: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
+) -> torch.Tensor:
+    """Penalize arm joints within ``margin`` [rad] of the range the arm action keeps them in. A penalty.
+
+    Per joint ``clamp((margin - room) / margin, 0, 1) ** 2``, summed over the joints, where ``room`` is the distance to
+    the nearer bound of the action's ``joint_pos_limits`` (the reduced hardware range, and for the wrist the yaw
+    window). It is exactly zero with at least ``margin`` of room and one per joint at the bound, where the controller
+    stops the joint.
+
+    Args:
+        env: The environment.
+        action_name: Name of the arm action term, which provides ``joint_pos_limits``.
+        margin: Room to a bound below which the penalty starts [rad].
+        asset_cfg: The robot, with ``joint_names`` selecting the joints of the action in the same order.
+    """
+    if margin <= 0.0:
+        raise ValueError("margin must be positive.")
+    action: LimitedRelativeJointPositionAction | TopDownDeltaEEAction = env.action_manager.get_term(action_name)
+    lower, upper = action.joint_pos_limits
+    robot = _robot_with_action_joints(env, asset_cfg, action_name, lower.shape[1])
+    joint_pos = robot.data.joint_pos.torch[:, asset_cfg.joint_ids]
+    room = torch.minimum(joint_pos - lower, upper - joint_pos)
+    penalty = ((margin - room) / margin).clamp(0.0, 1.0).square().sum(dim=1)
+    return torch.nan_to_num(penalty, nan=0.0, posinf=0.0, neginf=0.0)
+
+
 def cloth_node_speed(env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target") -> torch.Tensor:
     """Return the mean planar speed of the cloth nodes [m/s] in the active stages. A penalty: it never saturates.
 
@@ -420,10 +450,12 @@ def cloth_settled_at_target(
 class ClothDistanceProgress(ManagerTermBase):
     """Signed distance improvement for approach or attached cloth transport.
 
-    ``objective="approach"`` tracks nearest fingertip-to-cloth distance before attachment. ``objective="drag"``
-    tracks planar center-to-target distance while attached. The first eligible sample establishes a reference;
-    inactive samples still update the reference. Negative increments are retained. No stage-completion reward
-    is paid. Attachment boundaries intentionally restart progress and do not imply a globally telescoping return.
+    ``objective="approach"`` tracks the distance of the EE frame origin to the nearest raised cloth node before
+    attachment, the distance of the GRASP stage (:func:`~.stages.ee_raised_node_distance`; the nearest cloth node if
+    none is raised). ``objective="drag"`` tracks planar center-to-target distance while attached. The first eligible
+    sample establishes a reference; inactive samples still update the reference. Negative increments are retained. No
+    stage-completion reward is paid. Attachment boundaries intentionally restart progress and do not imply a globally
+    telescoping return.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
@@ -449,7 +481,7 @@ class ClothDistanceProgress(ManagerTermBase):
         command = _command(env, command_name)
         attached = gripper_holds_cloth(env, command.cfg)
         if objective == "approach":
-            distance = ee_cloth_distance(env, command.cfg)
+            distance = ee_raised_node_distance(env, command.cfg)
             eligible = ~attached
         elif objective == "drag":
             distance = cloth_goal_xy_distance(env, command.command, command.cfg)

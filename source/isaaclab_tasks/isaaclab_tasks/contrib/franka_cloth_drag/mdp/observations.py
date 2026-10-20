@@ -31,6 +31,7 @@ from .frames import (
     ee_pose_in_base,
     ee_twist_in_base,
     points_to_base,
+    raised_node_ids,
     top_down_yaw,
     vectors_to_base,
 )
@@ -137,15 +138,17 @@ def ee_pose_b(
     ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """End-effector position [m] and jaw yaw [rad] in the robot's root frame, shape [num_envs, 4].
+    """End-effector position [m] and jaw yaw as (cos, sin) in the robot's root frame, shape [num_envs, 5].
 
     The yaw is the rotation of the gripper jaws about the root frame's z-axis: the heading of the EE x-axis in the root
     frame's xy-plane. With the hand pointing down, the EE y-axis is the closing direction of the fingers, so a yaw of
     zero closes the jaws along the root frame's y-axis. The yaw describes the orientation of the hand as a whole, which
-    all arm joints change, not the angle of the last arm joint.
+    all arm joints change, not the angle of the last arm joint. It is observed as its cosine and sine, which stay
+    continuous where the heading wraps at ±180°: the wrist window lets the hand turn past it.
     """
     pos_b, quat_b = ee_pose_in_base(env, ee_frame_cfg, robot_cfg)
-    pose = torch.cat([pos_b, top_down_yaw(quat_b).unsqueeze(-1)], dim=-1)
+    yaw = top_down_yaw(quat_b).unsqueeze(-1)
+    pose = torch.cat([pos_b, torch.cos(yaw), torch.sin(yaw)], dim=-1)
     return torch.nan_to_num(pose, nan=0.0, posinf=0.0, neginf=0.0)
 
 
@@ -259,12 +262,20 @@ class ClothPointsInEEFrame(ManagerTermBase):
 
 
 class ClothPointsInBaseFrame(ManagerTermBase):
-    """Observe nine fixed landmarks and episode-sampled material nodes in the robot base frame.
+    """Observe nine fixed landmarks, the episode's raised nodes and episode-sampled nodes in the robot base frame.
 
-    Positions [m], shape [num_envs, (9 + num_random_nodes) * 3]. Additional node IDs are sampled without
-    replacement, weighted by cloth area, at episode start. Landmarks are excluded from that draw. IDs are sorted
-    and retained until the next episode, so every observation slot tracks the same material point through history.
-    No cloth velocities are exposed.
+    Positions [m], shape [num_envs, (9 + K + num_random_nodes) * 3], in the slot order landmarks, raised nodes,
+    random nodes:
+
+    * the 9 landmarks of :func:`~.frames.cloth_landmark_ids`, fixed;
+    * the K nodes raised by the reset event ``raised_nodes_event`` (:func:`~.frames.raised_node_ids`), sorted by id.
+      K is that event's ``num_raised_nodes``, read once at initialization; without raised nodes, K is 0;
+    * ``num_random_nodes`` nodes sampled without replacement, weighted by cloth area, excluding the landmarks and the
+      episode's raised nodes, sorted by id.
+
+    All ids are taken at episode start (reset events run before the observation reset) and retained until the next
+    episode, so every observation slot tracks the same material point through history. No cloth velocities are
+    exposed.
     """
 
     def __init__(self, cfg: ObservationTermCfg, env: ManagerBasedRLEnv):
@@ -272,36 +283,46 @@ class ClothPointsInBaseFrame(ManagerTermBase):
         super().__init__(cfg, env)
         asset_cfg = cfg.params.get("asset_cfg", SceneEntityCfg("deformable"))
         self._landmark_ids = cloth_landmark_ids(env, asset_cfg)
+        self._raised_event = cfg.params.get("raised_nodes_event", "reset_deformable")
+        raised = raised_node_ids(env, self._raised_event)
+        num_raised = 0 if raised is None else raised.shape[1]
         self._num_random = cfg.params.get("num_random_nodes", 11)
         self._draw_weights = cloth_node_areas(env, asset_cfg).clone()
         self._draw_weights[self._landmark_ids] = 0.0
-        if not 0 <= self._num_random <= int((self._draw_weights > 0).sum()):
-            raise ValueError("num_random_nodes must fit the positive-area non-landmark nodes.")
+        if not 0 <= self._num_random <= int((self._draw_weights > 0).sum()) - num_raised:
+            raise ValueError("num_random_nodes must fit the positive-area nodes that are no landmark or raised node.")
+        self._raised_ids = torch.zeros(env.num_envs, num_raised, dtype=torch.long, device=env.device)
         self._random_ids = torch.empty(env.num_envs, self._num_random, dtype=torch.long, device=env.device)
         self._generator = torch.Generator(device=env.device)
         self._generator.manual_seed(env.cfg.seed if env.cfg.seed is not None else torch.initial_seed())
         self.reset()
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        """Sample material node IDs for the selected episodes, preserving all other environments."""
-        count = self.num_envs if env_ids is None else len(env_ids)
-        if count == 0 or self._num_random == 0:
+        """Take the raised nodes and sample material node IDs for the selected episodes, preserving all others."""
+        env_ids = slice(None) if env_ids is None else env_ids
+        weights = self._draw_weights.expand(self.num_envs, -1)[env_ids].clone()
+        if weights.shape[0] == 0:
             return
-        ids = torch.multinomial(
-            self._draw_weights.expand(count, -1), self._num_random, replacement=False, generator=self._generator
-        )
-        self._random_ids[slice(None) if env_ids is None else env_ids] = ids.sort(dim=1).values
+        if self._raised_ids.shape[1] > 0:
+            raised = raised_node_ids(self._env, self._raised_event)
+            self._raised_ids[env_ids] = raised[env_ids]
+            weights.scatter_(1, self._raised_ids[env_ids], 0.0)
+        if self._num_random > 0:
+            ids = torch.multinomial(weights, self._num_random, replacement=False, generator=self._generator)
+            self._random_ids[env_ids] = ids.sort(dim=1).values
 
     def __call__(
         self,
         env: ManagerBasedRLEnv,
         num_random_nodes: int = 11,
+        raised_nodes_event: str | None = "reset_deformable",
         asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
         robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
     ) -> torch.Tensor:
-        """Return current node positions [m]; ``num_random_nodes`` is read once during initialization."""
+        """Return current node positions [m]; ``num_random_nodes`` and ``raised_nodes_event`` are read once during
+        initialization."""
         asset: DeformableObject = env.scene[asset_cfg.name]
-        ids = torch.cat([self._landmark_ids.expand(env.num_envs, -1), self._random_ids], dim=1)
+        ids = torch.cat([self._landmark_ids.expand(env.num_envs, -1), self._raised_ids, self._random_ids], dim=1)
         points_w = asset.data.nodal_pos_w.torch.gather(1, ids.unsqueeze(-1).expand(-1, -1, 3))
         points_b = points_to_base(env, points_w, robot_cfg).reshape(env.num_envs, -1)
         return torch.nan_to_num(points_b, nan=0.0, posinf=0.0, neginf=0.0)
@@ -354,12 +375,30 @@ def cloth_nodal_vel_b(
     return torch.nan_to_num(vel_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def cloth_drag_stage(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+def cloth_drag_stage(env: ManagerBasedRLEnv, command_name: str, hide_curriculum: str | None = None) -> torch.Tensor:
     """Current :class:`ClothDragStage` of the command ``command_name`` as a one-hot vector, see
     :class:`~.commands.ClothTargetCommand`.
+
+    With ``hide_curriculum``, the vector is all zeros in the episodes the curriculum term of that name hides the stage
+    in (:attr:`~.curriculums.StageHidingCurriculum.hidden`). All zeros is distinct from every one-hot stage, APPROACH
+    included. Without that term, e.g. with the curriculum disabled, the stage is always visible.
 
     Shape is (num_envs, 4).
     """
     stage = env.command_manager.get_term(command_name).stage
     one_hot = torch.nn.functional.one_hot(stage, num_classes=len(ClothDragStage)).float()
+    if hide_curriculum is not None:
+        hidden = _curriculum_hidden(env, hide_curriculum)
+        if hidden is not None:
+            one_hot = torch.where(hidden.unsqueeze(1), 0.0, one_hot)
     return torch.nan_to_num(one_hot, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def _curriculum_hidden(env: ManagerBasedRLEnv, term_name: str) -> torch.Tensor | None:
+    """Per-episode mask of the curriculum term ``term_name``, or None if there is no such term.
+
+    The observation manager computes every term once at initialization, before the curriculum manager exists.
+    """
+    curriculum_manager = getattr(env, "curriculum_manager", None)
+    term_cfg = getattr(curriculum_manager.cfg, term_name, None) if curriculum_manager is not None else None
+    return getattr(term_cfg.func, "hidden", None) if term_cfg is not None else None

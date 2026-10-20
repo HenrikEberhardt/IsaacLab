@@ -32,8 +32,9 @@ if TYPE_CHECKING:
 class ClothGraspConstraint:
     """Lock grasped cloth nodes to the end-effector (EE) frame with position-level bilateral constraints.
 
-    every node inside the picker box, plus the nodes of every edge whose midpoint and of every triangle whose centroid lies inside it. 
-    
+    A grasp locks every node inside the picker box, plus the nodes of every edge whose midpoint and of every triangle
+    whose centroid lies inside it.
+
     Each grasped node keeps its offset in the EE frame from the moment of the grasp.
 
     Over ``squeeze_steps`` calls of :meth:`advance_squeeze` after the grasp, the two flanks of the pinched fold are
