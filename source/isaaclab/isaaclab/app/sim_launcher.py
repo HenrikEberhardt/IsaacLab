@@ -373,9 +373,19 @@ Launch Decisions (derived purely from a scan).
 
 
 def _has_kit_visualizer(config_scan: Scan, launcher_args: argparse.Namespace | dict | None) -> bool:
-    """Return whether the run requests the Kit visualizer through config or CLI."""
+    """Return whether the run requests the Kit visualizer through config or CLI.
+
+    An explicit CLI selection (``--visualizer viser``, ``--visualizer none``) replaces the visualizers of the config,
+    as in :meth:`~isaaclab.sim.SimulationContext._resolve_visualizer_cfgs`, so a Kit visualizer in the config then
+    needs Kit only if the CLI selects it as well.
+    """
     visualizer_types = _get_visualizer_types(launcher_args)
-    return "kit" in visualizer_types or config_scan.visualizer_intent["has_kit_visualizer"]
+    if "kit" in visualizer_types:
+        return True
+    visualizer_explicit = bool(_get_arg(launcher_args, "visualizer_explicit", False))
+    if visualizer_explicit or _get_arg(launcher_args, "visualizer") is not None:
+        return False
+    return config_scan.visualizer_intent["has_kit_visualizer"]
 
 
 def _get_kit_runtime_sources(config_scan: Scan, launcher_args: argparse.Namespace | dict | None) -> tuple[str, ...]:

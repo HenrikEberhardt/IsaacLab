@@ -156,3 +156,35 @@ def test_require_kit_false_does_not_suppress_a_kit_config(kit_branch_taken):
         pass
 
     assert kit_branch_taken == [True]
+
+
+def _kit_and_viser_visualizer_cfg() -> argparse.Namespace:
+    """Kitless config whose visualizers include Kit, like a task that configures several viewers."""
+    return argparse.Namespace(
+        physics=sim_launcher.NewtonCfg(),
+        visualizer_cfgs=[argparse.Namespace(visualizer_type="kit"), argparse.Namespace(visualizer_type="viser")],
+    )
+
+
+@pytest.mark.parametrize(
+    "launcher_args",
+    [
+        {"visualizer": ["viser"], "visualizer_explicit": True},
+        argparse.Namespace(visualizer=["viser"]),
+        {"visualizer": None, "visualizer_explicit": True},  # '--viz none'
+    ],
+    ids=["viz_viser", "viz_viser_namespace", "viz_none"],
+)
+def test_explicit_visualizer_selection_ignores_config_kit_visualizer(kit_branch_taken, launcher_args):
+    # an explicit '--viz' replaces the config's visualizers, so the config's Kit visualizer must not start Kit
+    with launch_simulation(cfg=_kit_and_viser_visualizer_cfg(), launcher_args=launcher_args):
+        pass
+
+    assert kit_branch_taken == []
+
+
+def test_config_kit_visualizer_launches_kit_without_cli_selection(kit_branch_taken):
+    with launch_simulation(cfg=_kit_and_viser_visualizer_cfg(), launcher_args={}):
+        pass
+
+    assert kit_branch_taken == [True]

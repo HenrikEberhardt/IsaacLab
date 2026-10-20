@@ -13,6 +13,7 @@ from __future__ import annotations
 from collections.abc import Sequence
 
 import numpy as np
+import torch
 import warp as wp
 from isaaclab_newton.physics.newton_manager import NewtonManager
 from newton import Contacts, Control, Model, ParticleFlags, ShapeFlags, State
@@ -45,7 +46,7 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     The class name must start with ``Newton``: Isaac Lab picks the asset backend from the physics manager's name.
 
-    It adds three things to :class:`~isaaclab_contrib.coupling.coupler.NewtonCouplerManager`:
+    It adds four things to :class:`~isaaclab_contrib.coupling.coupler.NewtonCouplerManager`:
 
     * The coupler's solver views keep their own copies of per-particle properties and never refresh them, so a node
       made kinematic at runtime through
@@ -57,6 +58,8 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
     * Before building the solver, it restores :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.rest_angle_scale` of the
       bending rest angles that the model builder computed from the spawned cloth and the Newton deformable asset
       zeroed, so the wrinkles of the spawned cloth stay partly set.
+    * :meth:`set_cloth_rest` changes the cloth rest shape (bending rest angles and lengths, triangle rest shapes and
+      areas) at runtime in the model and the solver views.
     """
 
     _particle_entries: list = []
@@ -135,6 +138,55 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
             else:
                 flags[selected] &= ~collide_particles
             view.shape_flags.assign(flags)
+
+    CLOTH_REST_ARRAYS = ("edge_rest_angle", "edge_rest_length", "tri_poses", "tri_areas")
+    """Cloth rest-shape arrays of the model that :meth:`get_cloth_rest` and :meth:`set_cloth_rest` handle."""
+
+    @classmethod
+    def get_cloth_rest(cls, name: str, ids: torch.Tensor) -> torch.Tensor:
+        """Rest values the cloth solver uses for the given model edges or triangles.
+
+        Args:
+            name: One of :attr:`CLOTH_REST_ARRAYS`.
+            ids: Model edge ids (``edge_*``) or triangle ids (``tri_*``), any shape.
+
+        Returns:
+            A copy of the values, shape ``ids.shape`` plus ``(2, 2)`` for ``tri_poses``.
+        """
+        return wp.to_torch(cls._rest_arrays(name)[-1])[ids].clone()
+
+    @classmethod
+    def set_cloth_rest(cls, name: str, ids: torch.Tensor, values: torch.Tensor) -> None:
+        """Set rest values of the given model edges or triangles at runtime.
+
+        The solver views keep their own copies of model arrays, made when the solver was built, so writing the model
+        alone would not reach the cloth solver. This writes the model and every view that owns particles.
+
+        Args:
+            name: One of :attr:`CLOTH_REST_ARRAYS`: bending rest angles [rad], bending edge rest lengths [m],
+                inverse triangle rest matrices [1/m], or triangle rest areas [m^2].
+            ids: Model edge ids (``edge_*``) or triangle ids (``tri_*``), any shape.
+            values: Rest values, shape ``ids.shape`` plus ``(2, 2)`` for ``tri_poses``.
+        """
+        for array in cls._rest_arrays(name):
+            wp.to_torch(array)[ids] = values
+
+    @classmethod
+    def _rest_arrays(cls, name: str) -> list[wp.array]:
+        """The named array of the model and of the particle-owning solver views, without duplicates.
+
+        The model comes first, so the last array is the one a cloth solver reads.
+        """
+        if name not in cls.CLOTH_REST_ARRAYS:
+            raise ValueError(f"Unknown cloth rest array '{name}', expected one of {cls.CLOTH_REST_ARRAYS}.")
+        model_array = getattr(NewtonManager._model, name)
+        arrays = {model_array.ptr: model_array}
+        for entry in cls._particle_entries:
+            array = getattr(entry.view, name)
+            if array.shape != model_array.shape:
+                raise RuntimeError(f"Solver view '{entry.view.name}' does not hold every model element of '{name}'.")
+            arrays[array.ptr] = array
+        return list(arrays.values())
 
     @classmethod
     def _solver_specific_clear(cls) -> None:

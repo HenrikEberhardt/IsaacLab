@@ -34,6 +34,9 @@ __all__ = [
     "ee_height_above",
     "ee_pose_b",
     "ee_velocity_b",
+    "edge_included",
+    "interior_nodes",
+    "ResetClothWithRaisedNodes",
     "reset_cloth_planar_pose",
     "reset_franka_top_down",
     "fingertip_below_table",
@@ -64,7 +67,13 @@ from .actions_cfg import (
     TopDownDeltaEEActionCfg,
 )
 from .commands_cfg import ClothTargetCommandCfg
-from .events import reset_cloth_planar_pose, reset_franka_top_down
+from .events import (
+    edge_included,
+    interior_nodes,
+    ResetClothWithRaisedNodes,
+    reset_cloth_planar_pose,
+    reset_franka_top_down,
+)
 from .frames import cloth_center_pos_b, cloth_center_vel_b
 from .observations import (
     ClothPointsInBaseFrame,

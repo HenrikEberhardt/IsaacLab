@@ -171,6 +171,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                 name="end_effector",
                 offset=OffsetCfg(pos=(0.0, 0.0, 0.10365)),  # centered between finger pads
                 # 0.11185m to the end of the collision box, 0.1123m to the end of finger mesh
+                # z = 8.5 for ideal cloth interaction
             ),
         ],
     )
@@ -183,7 +184,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             rot=(0.0, 0.0, 0.0, 1.0),
         ),
         spawn=sim_utils.UsdFileCfg(
-            usd_path=os.path.join(CLOTH_MESH_DIR, "cloth20_lod0_wrinkled.usd"),
+            usd_path=os.path.join(CLOTH_MESH_DIR, "120_nodes_optimized_mesh.usd"),
             deformable_props=NewtonDeformableBodyPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.95, 0.85, 0.1)),
             physics_material=NewtonSurfaceDeformableBodyMaterialCfg(
@@ -262,8 +263,8 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                 joint_names_expr=["panda_finger_joint1"],
                 joint_effort_limit=70.0,  # grasp force limit [N]
                 joint_velocity_limit=0.05,
-                stiffness=7.5e3,  # Tune to achieve stable simulation
-                damping=100.0,  # Tune to achieve stable simulation
+                stiffness=7.5e3,  # 3e4
+                damping=100.0,  # 150 for closer sim2real
                 armature=0.1,
             ),
             # Finger 2 mimics finger 1
@@ -464,23 +465,24 @@ class ObservationsCfg:
 class CommandsCfg:
     """Command specifications for the MDP."""
 
-    # Specify the task and stage objectives that wants to be achieved by the agent
+    # Task Objective
     cloth_target = mdp.ClothTargetCommandCfg(
         asset_name="robot",
         object_name="deformable",
+
         # Task goal definition
         ranges=mdp.ClothTargetCommandCfg.Ranges(
-            # x >= 0.40: a grasp on the robot-facing edge trails the central node by ~10 cm, and the hand reaches
-            # only ~0.28 m towards the base at grasp height # was (0.35, 0.35)
+            # Random sampling of target position
             pos_x=(0.40, 0.45),
             pos_y=(-0.2, 0.2),
             pos_z=(0.002, 0.002),  # Spawn line for target selection
         ),
-        success_radius=0.05,  # Radius [m] around target for success (target disc)
-        hold_time=0.5,  # Duration [s] the center node must stay inside the target disc to count as success
-        max_ee_height=0.04,  # ... with the EE frame at most this high [m]: a cloth carried over the target does not count
-        debug_vis=True,  # Show marker at the target location
-        # Stage transitions conditions
+        success_radius=0.05,  # Radius [m] around the target position for success
+        hold_time=0.75,  # Time [s] to hold the cloth in the target zone for success
+        max_ee_height=0.05,  # Success only with low EE
+        debug_vis=True,  # Target marker
+
+        # Task stage transitions
         approach_radius=0.07,  # APPROACH -> GRASP: EE frame origin closer than [m] to any cloth node
         grasp_min_nodes=3,  # GRASP -> DRAG: constraint locks (fingers stopped closing) with at least this many nodes
         # was 5. LOD0 mesh: an EE at 13.5 mm selects 5 nodes, at 15 mm mostly 1-3, so 4 forces low grasps
@@ -495,12 +497,12 @@ class CommandsCfg:
 class EventCfg:
     """Configuration for events."""
 
-    # Reset robot with variation in ee position (x = 0.19-0.42, y = -0.13-0.13 and z = 0.19-0.42 m)
+    # Robot resets
     reset_robot_joints = EventTerm(
         func=mdp.reset_franka_top_down,
         mode="reset",
         params={
-            "joint_offset_ranges": {
+            "joint_offset_ranges": { # linear ee pos offset trough joint variation to avoid singularities
                 "panda_joint1": (-0.25, 0.25),
                 "panda_joint2": (-0.15, 0.15),
                 "panda_joint4": (-0.15, 0.15),
@@ -510,13 +512,21 @@ class EventCfg:
         },
     )
 
-    # Reset the cloth with randomization in position and orientation
+    # Cloth resets
     reset_deformable = EventTerm(
-        func=mdp.reset_cloth_planar_pose,
+        func=mdp.ResetClothWithRaisedNodes,
         mode="reset",
         params={
+            # Cloth position and orientation
             "position_range": {"x": (-0.03, 0.03), "y": (-0.05, 0.05)},
-            "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),
+            "yaw_range": (-0.25 * math.pi, 0.25 * math.pi), # symmetrie 
+
+            # Node pertubation
+            "include_edge_nodes": False,
+            "num_raised_nodes": 3,  # redrawn at every reset
+            "node_raise_height": 0.0075,  # height above the table [m]
+            "min_spacing": 0.05,  # minimum distance between raised nodes [m]
+
             "asset_cfg": SceneEntityCfg("deformable"),
         },
     )
@@ -550,8 +560,7 @@ class RewardsCfg:
         params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
         weight=-1.0,
     )
-    # Drag, don't carry: the held cloth hangs from the EE frame (between the pads), so its height bounds the cloth's.
-    # Free up to 3 cm (EE floor 8.5 mm, crease 13.5 mm, locked nodes at EE +-8.5 mm); carrying at 15 cm costs ~6/s
+    # Drag, don't lift: linear penality if the EE is above 3cm
     pen_ee_height = RewTerm(
         func=mdp.ee_height_above, params={"max_height": 0.03, "stages": ["drag", "goal"]}, weight=-50.0
     )
@@ -608,7 +617,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     """Manager-based RL environment: Franka Panda dragging a cloth across the table."""
 
     # Scene settings
-    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=1024, env_spacing=2.5, replicate_physics=True)
+    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=1024, env_spacing=2.2, replicate_physics=True)
 
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
