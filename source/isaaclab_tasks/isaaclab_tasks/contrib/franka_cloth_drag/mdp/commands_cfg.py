@@ -24,18 +24,19 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Configuration for a target position of the cloth's central node, see :class:`ClothTargetCommand`.
 
     The goal is reached when the cloth's central node stays within :attr:`success_radius` of the target in the table
-    plane for :attr:`hold_time` in a row, after the gripper has grasped the cloth at least once in the episode (stage
-    DRAG reached), so a cloth pushed into the target does not count. With :attr:`max_ee_height` set, the EE frame
+    plane for :attr:`hold_time` in a row while the gripper holds the cloth by a raised node (stage DRAG or GOAL), so a
+    cloth pushed into the target or dragged by its edge does not count. With :attr:`max_ee_height` set, the EE frame
     origin must also stay at most that high above the table, so a cloth carried over the target does not count.
 
     The command also tracks the task stage (:class:`~.stages.ClothDragStage`):
 
     * GRASP: the EE frame origin is within :attr:`approach_radius` of a node raised by the reset event
       :attr:`raised_nodes_event`, or of any cloth node if no node is raised.
-    * DRAG: the gripper holds the cloth by nodes locked to the EE frame, wherever it grasped, see
-      :class:`~.actions.ClothGraspAction`. The nodes lock once the closing fingers have come to rest with at least
-      :attr:`grasp_min_nodes` nodes selected. A gripper that does not lock nodes (``attach`` False) never reaches
-      DRAG.
+    * DRAG: the gripper holds the cloth by nodes locked to the EE frame that include a raised node, see
+      :func:`~.stages.gripper_holds_raised_node` and :class:`~.actions.ClothGraspAction`. The nodes lock once the
+      closing fingers have come to rest with at least :attr:`grasp_min_nodes` nodes selected; a lock without a raised
+      node (e.g. a pinch of the edge) stays in the earlier stage. Without raised nodes any lock counts. A gripper that
+      does not lock nodes (``attach`` False) never reaches DRAG.
     * GOAL: DRAG, and the cloth's central node is within :attr:`success_radius` + :attr:`goal_zone_margin` of the
       target.
 
@@ -105,14 +106,14 @@ class ClothTargetCommandCfg(CommandTermCfg):
     raised_nodes_event: str | None = "reset_deformable"
     """Name of the reset event term whose ``raised_node_ids`` are the raised nodes, see
     :class:`~.events.ResetClothWithRaisedNodes`. None, a missing term, or a term without raised nodes => every cloth
-    node counts for :attr:`approach_radius`."""
+    node counts for :attr:`approach_radius`, and any lock counts as a grasp."""
 
     grasp_min_nodes: int = 1
     """Number of cloth nodes the gripper must lock to hold the cloth.
 
     The count is of the selected nodes: those in the pad box plus every node of an edge or triangle whose center lies
     in it (:meth:`~.cloth_grasp.ClothGraspConstraint.select`). A grasp with fewer selected nodes locks nothing, so the
-    stage stays in GRASP.
+    stage stays in GRASP. A lock counts for DRAG only if a raised node is among the locked nodes.
     """
 
     finger_pad_half_width: float = 0.0125

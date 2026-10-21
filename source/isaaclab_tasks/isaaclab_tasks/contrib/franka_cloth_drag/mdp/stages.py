@@ -33,9 +33,9 @@ class ClothDragStage(IntEnum):
     GRASP = 1
     """The EE frame origin is near a raised cloth node (any cloth node if none is raised)."""
     DRAG = 2
-    """The gripper holds the cloth by nodes locked to the EE frame, wherever it grasped."""
+    """The gripper holds the cloth by locked nodes that include a raised node, see :func:`gripper_holds_raised_node`."""
     GOAL = 3
-    """The gripper holds the cloth and its central node is near the target."""
+    """The gripper holds the cloth by a raised node and its central node is near the target."""
 
 
 def gripper_closing(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
@@ -110,6 +110,21 @@ def nodes_in_grasp(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Te
 def gripper_holds_cloth(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
     """Whether the gripper holds the cloth with constraints or friction."""
     return env.action_manager.get_term(cfg.gripper_action_name).is_grasping
+
+
+def gripper_holds_raised_node(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Whether the gripper holds the cloth with a raised node among the nodes locked to the EE frame.
+
+    A grasp that locks only other nodes, such as a pinch of the cloth's edge, does not count. Without raised nodes
+    (see :attr:`ClothTargetCommandCfg.raised_nodes_event`) or without the lock constraint, this is
+    :func:`gripper_holds_cloth`. Shape is (num_envs,).
+    """
+    term = env.action_manager.get_term(cfg.gripper_action_name)
+    ids = raised_node_ids(env, cfg.raised_nodes_event)
+    constraint = getattr(term, "constraint", None)
+    if ids is None or constraint is None:
+        return term.is_grasping
+    return constraint.active & constraint.grasped.gather(1, ids).any(dim=1)
 
 
 def cloth_goal_xy_distance(

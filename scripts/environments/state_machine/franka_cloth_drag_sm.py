@@ -10,7 +10,8 @@ The state machine grasps the ``IsaacContrib-Drag-Cloth-Franka`` cloth at the rai
 the cloth's central node to the target (without raised nodes, at the node on that segment a few centimeters from the
 central node). It hovers above the node with a fully open gripper, the hand's long side tangent around the cloth
 center so its narrow side faces the center, lowers the open fingers onto the cloth and squeezes, so the cloth creases
-up between the jaws. It then drags the central node to the target, stops, releases the cloth and rises. It is
+up between the jaws. It then drags the central node to the target, stops until the task counts the cloth as held
+there (the success needs the cloth held by a raised node), releases the cloth and rises. It is
 implemented in the kernel function `infer_state_machine`, which uses the `warp` library to run all environments in
 parallel on the GPU.
 
@@ -18,9 +19,10 @@ The state machine commands the task's own action terms, the 4-DoF delta end-effe
 gripper, so the grasp behaves exactly as in training: once the closing fingers rest, the cloth nodes between the pads
 are locked to the end-effector frame (``--grasp_mode attach``). ``--grasp_mode friction`` holds the cloth by friction
 alone. Its transitions follow the task's stages: the hover pose lies within the task's approach radius, and the drag
-starts once the task counts the cloth as grasped. Episodes end and reset as in training (task episode length,
-terminations and reset events), except that success does not end the episode, so the release and the rise play out;
-success is reported per episode from the task's success check. The state machine restarts in every reset environment.
+starts once the task counts the cloth as grasped by a raised node. Episodes end and reset as in training (task
+episode length, terminations and reset events), except that success does not end the episode, so the release and the
+rise play out; success is reported per episode from the task's success check. The state machine restarts in every
+reset environment.
 
 .. code-block:: bash
 
@@ -163,8 +165,9 @@ class DragSmWaitTime:
     GRASP_SQUEEZE = wp.constant(0.3)
     # time after which a grasp that locked nothing is retried (or a friction grasp moves on)
     GRASP_TIMEOUT = wp.constant(2.0)
-    # time the drag stops at the target before the release
-    HOLD_AT_TARGET = wp.constant(0.3)
+    # longest the drag stops at the target waiting for the task's success before the release; the success needs the
+    # cloth held by a raised node for the hold time
+    HOLD_TIMEOUT = wp.constant(2.0)
     RELEASE_CLOTH = wp.constant(0.5)
 
 
@@ -220,6 +223,7 @@ def infer_state_machine(
     target_pos: wp.array(dtype=wp.vec3),
     stage: wp.array(dtype=int),
     is_grasping: wp.array(dtype=int),
+    holding: wp.array(dtype=int),
     drag_stalled: wp.array(dtype=int),
     grasp_pos: wp.array(dtype=wp.vec3),
     hold_pos: wp.array(dtype=wp.vec3),
@@ -337,10 +341,10 @@ def infer_state_machine(
             sm_state[tid] = DragSmState.HOLD_AT_TARGET
             sm_wait_time[tid] = 0.0
     elif state == DragSmState.HOLD_AT_TARGET:
-        # stop at the target
+        # stop at the target until the task counts the cloth as held there (or a timeout)
         des_ee_pos[tid] = hold_pos[tid]
         des_gripper_state[tid] = GripperState.CLOSE
-        if sm_wait_time[tid] >= DragSmWaitTime.HOLD_AT_TARGET:
+        if holding[tid] == 1 or sm_wait_time[tid] >= DragSmWaitTime.HOLD_TIMEOUT:
             # move to next state and reset wait time
             sm_state[tid] = DragSmState.RELEASE_CLOTH
             sm_wait_time[tid] = 0.0
@@ -379,7 +383,7 @@ class DragClothSm:
        retried from the hover pose once, then the robot gives up and rises; a friction grasp moves on after a timeout.
     5. DRAG_CLOTH: The robot drags the cloth until its central node is within the goal tolerance of the target, or
        until the drag stalls at the arm's reach limit. The yaw changes only if the cloth turns too far under the hand.
-    6. HOLD_AT_TARGET: The robot stops for a while.
+    6. HOLD_AT_TARGET: The robot stops until the task counts the cloth as held at the target, or a timeout.
     7. RELEASE_CLOTH: The robot opens the gripper until the gripper action releases the cloth.
     8. RETREAT: The robot rises above the release pose. This is the final state.
     """
@@ -473,6 +477,7 @@ class DragClothSm:
         target_pos: torch.Tensor,
         stage: torch.Tensor,
         is_grasping: torch.Tensor,
+        holding: torch.Tensor,
         drag_stalled: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         """Compute the desired end-effector position [m], the yaw change [rad] and the binary gripper command.
@@ -486,6 +491,7 @@ class DragClothSm:
             target_pos: Targets of the central node in the robot base frame [m], shape [N, 3].
             stage: Task stage index (:class:`ClothDragStage`), shape [N].
             is_grasping: Whether the gripper action holds locked cloth nodes, shape [N].
+            holding: Whether the task counts the cloth as held at the target (its success), shape [N].
             drag_stalled: Whether the end-effector has stopped moving during the drag, shape [N].
 
         Returns:
@@ -509,6 +515,7 @@ class DragClothSm:
                 wp.from_torch(target_pos.contiguous(), wp.vec3),
                 wp.from_torch(stage.int().contiguous(), wp.int32),
                 wp.from_torch(is_grasping.int().contiguous(), wp.int32),
+                wp.from_torch(holding.int().contiguous(), wp.int32),
                 wp.from_torch(drag_stalled.int().contiguous(), wp.int32),
                 self.grasp_pos_wp,
                 self.hold_pos_wp,
@@ -766,6 +773,7 @@ def main():
                 target_pos,
                 command.stage,
                 gripper.is_grasping,
+                command.holding,
                 stall_steps >= stall_limit,
             )
 
