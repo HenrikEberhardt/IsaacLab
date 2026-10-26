@@ -27,6 +27,8 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     num_steps_per_env = 24
     max_iterations = 2000
     save_interval = 50
+    logger = "wandb"
+    wandb_project = "non-prehensile_cloth_task"
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
     clip_actions = 1.0
 
