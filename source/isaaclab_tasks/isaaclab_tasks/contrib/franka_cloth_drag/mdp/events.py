@@ -14,10 +14,12 @@ import torch
 from isaaclab_newton.physics import NewtonManager
 
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
-from isaaclab.utils.math import sample_uniform
+from isaaclab.utils.math import quat_from_euler_xyz, sample_uniform
+
+from .frames import CLOTH_CENTER_LANDMARK, cloth_landmark_ids
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation, DeformableObject
+    from isaaclab.assets import Articulation, DeformableObject, RigidObject
     from isaaclab.envs import ManagerBasedEnv
 
 # Node sets of 120_nodes_optimized_mesh.usd that may be raised
@@ -104,6 +106,51 @@ def reset_cloth_planar_pose(
     cloth: DeformableObject = env.scene[asset_cfg.name]
     nodal_state = _planar_pose_nodal_state(cloth, env_ids, position_range, yaw_range)
     cloth.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids)
+
+
+def reset_object_on_cloth_center(
+    env: ManagerBasedEnv,
+    env_ids: torch.Tensor,
+    position_range: dict[str, tuple[float, float]],
+    yaw_range: tuple[float, float],
+    object_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    cloth_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+) -> None:
+    """Place a rigid object at rest on the cloth around its central node, shifted and turned at random.
+
+    Must run after the cloth reset event, so it reads the cloth's new nodes. The object's bottom center is placed at the
+    central node shifted by an offset drawn uniformly from ``position_range``, with a yaw drawn uniformly from
+    ``yaw_range``, both in the world frame. The ``z`` offset is the gap between the central node and the object's
+    bottom. The object starts with zero velocity.
+
+    Args:
+        env: The environment instance.
+        env_ids: The environment indices to reset.
+        position_range: Offset bounds [m] from the central node to the object's bottom center, keyed by ``x``, ``y``
+            and ``z``. Missing keys => no offset. A ``z`` range of e.g. (0.004, 0.004) is the particle radius plus a
+            drop.
+        yaw_range: Bounds of the rotation about the vertical axis [rad].
+        object_cfg: Scene entity of the rigid object, spawned as a cuboid.
+        cloth_cfg: Scene entity of the cloth.
+    """
+    rigid_object: RigidObject = env.scene[object_cfg.name]
+    cloth: DeformableObject = env.scene[cloth_cfg.name]
+    center_id = cloth_landmark_ids(env, cloth_cfg)[CLOTH_CENTER_LANDMARK]
+    center = cloth.data.nodal_pos_w.torch[env_ids, center_id]
+    device = center.device
+    num = len(env_ids)
+
+    ranges = torch.tensor([position_range.get(key, (0.0, 0.0)) for key in ("x", "y", "z")], device=device)
+    offset = sample_uniform(ranges[:, 0], ranges[:, 1], (num, 3), device=device)
+    yaw = sample_uniform(yaw_range[0], yaw_range[1], (num,), device=device)
+
+    root_pose = torch.zeros(num, 7, device=device)
+    root_pose[:, :3] = center + offset
+    root_pose[:, 2] += 0.5 * rigid_object.cfg.spawn.size[2]
+    zeros = torch.zeros_like(yaw)
+    root_pose[:, 3:] = quat_from_euler_xyz(zeros, zeros, yaw)
+    rigid_object.write_root_pose_to_sim_index(root_pose=root_pose, env_ids=env_ids)
+    rigid_object.write_root_velocity_to_sim_index(root_velocity=torch.zeros(num, 6, device=device), env_ids=env_ids)
 
 
 class ResetClothWithRaisedNodes(ManagerTermBase):

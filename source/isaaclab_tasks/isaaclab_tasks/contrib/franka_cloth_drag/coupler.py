@@ -15,8 +15,9 @@ from collections.abc import Sequence
 import numpy as np
 import torch
 import warp as wp
+from isaaclab_newton.physics import VBDSolverCfg
 from isaaclab_newton.physics.newton_manager import NewtonManager
-from newton import Contacts, Control, Model, ParticleFlags, ShapeFlags, State
+from newton import Contacts, Control, Model, ParticleFlags, ShapeFlags, State, eval_ik
 
 from isaaclab_contrib.coupling.coupler import NewtonCouplerManager
 from isaaclab_contrib.coupling.coupler_cfg import CouplerCfg
@@ -46,8 +47,12 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     The class name must start with ``Newton``: Isaac Lab picks the asset backend from the physics manager's name.
 
-    It adds four things to :class:`~isaaclab_contrib.coupling.coupler.NewtonCouplerManager`:
+    It adds five things to :class:`~isaaclab_contrib.coupling.coupler.NewtonCouplerManager`:
 
+    * VBD integrates rigid bodies, such as the cube on the cloth, in world coordinates and writes only ``body_q`` and
+      ``body_qd``, while Isaac Lab reads a floating body's root pose and velocity from its free joint's ``joint_q`` and
+      ``joint_qd``. After each substep, this manager runs Newton's inverse kinematics on the articulations whose
+      joints a VBD entry owns, so Isaac Lab sees their motion.
     * The coupler's solver views keep their own copies of per-particle properties and never refresh them, so a node
       made kinematic at runtime through
       :meth:`~isaaclab.assets.DeformableObject.write_nodal_kinematic_target_to_sim_index` would stay dynamic in VBD.
@@ -62,6 +67,9 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
       areas) at runtime in the model and the solver views.
     """
 
+    _vbd_articulation_mask: wp.array | None = None
+    """Per-articulation mask of the articulations owned by a VBD entry, or None if there are none."""
+
     _particle_entries: list = []
     """Coupled-solver entries that own particles, whose views get the model's particle activity each substep."""
 
@@ -70,13 +78,28 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _build_solver(cls, model: Model, solver_cfg: CouplerCfg) -> None:
-        """Restore the scaled cloth rest angles, build the coupled solver and record the entries that own particles."""
+        """Restore the scaled cloth rest angles, build the coupled solver, and record the entries that own particles
+        and the articulations that VBD owns."""
         cls._restore_rest_angles(model, getattr(solver_cfg, "rest_angle_scale", 0.0))
         super()._build_solver(model, solver_cfg)
         cls._particle_entries = [
             entry for entry in NewtonManager._solver._entries.values() if entry.particle_indices.shape[0] > 0
         ]
         cls._default_shape_flags = [entry.view.shape_flags.numpy() for entry in cls._particle_entries]
+
+        vbd_joints = [
+            joint
+            for entry_cfg in solver_cfg.entries
+            if isinstance(entry_cfg.solver_cfg, VBDSolverCfg)
+            for joint in cls._resolve_entry(model, entry_cfg).joints
+        ]
+        cls._vbd_articulation_mask = None
+        if vbd_joints and model.articulation_count:
+            articulations = model.joint_articulation.numpy()[vbd_joints]
+            mask = np.zeros(model.articulation_count, dtype=bool)
+            mask[articulations[articulations >= 0]] = True
+            if mask.any():
+                cls._vbd_articulation_mask = wp.array(mask, dtype=wp.bool, device=model.device)
 
     @staticmethod
     def _restore_rest_angles(model: Model, scale: float) -> None:
@@ -95,7 +118,8 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
     def _step_solver(
         cls, state_0: State, state_1: State, control: Control, contacts: Contacts | None, substep_dt: float
     ) -> None:
-        """Sync the particle activity into the solver views, then run one coupled substep."""
+        """Sync the particle activity into the solver views, run one coupled substep, then derive the joint
+        coordinates of the VBD-owned articulations from their body state."""
         model = NewtonManager._model
         for entry in cls._particle_entries:
             wp.launch(
@@ -111,6 +135,8 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
                 device=model.device,
             )
         super()._step_solver(state_0, state_1, control, contacts, substep_dt)
+        if cls._vbd_articulation_mask is not None:
+            eval_ik(model, state_1, state_1.joint_q, state_1.joint_qd, mask=cls._vbd_articulation_mask)
 
     @classmethod
     def set_proxy_particle_contacts(cls, world_ids: Sequence[int], enabled: bool) -> None:
@@ -190,7 +216,8 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _solver_specific_clear(cls) -> None:
-        """Release the particle entries with the rest of the solver state."""
+        """Release the articulation mask and the particle entries with the rest of the solver state."""
         super()._solver_specific_clear()
+        cls._vbd_articulation_mask = None
         cls._particle_entries = []
         cls._default_shape_flags = []

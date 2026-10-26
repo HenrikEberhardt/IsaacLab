@@ -12,7 +12,7 @@ import torch
 
 from isaaclab.managers import CurriculumTermCfg
 
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp.curriculums import ActionRateCurriculum, StageHidingCurriculum
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.curriculums import ActionRateCurriculum, ObservationHidingCurriculum
 
 START_WEIGHT = -1e-3
 FINAL_WEIGHT = -1e-1
@@ -53,7 +53,7 @@ def _params(**overrides):
 
 def _hiding(env, **overrides):
     params = _params(**overrides)
-    return StageHidingCurriculum(CurriculumTermCfg(func=StageHidingCurriculum, params=params), env), params
+    return ObservationHidingCurriculum(CurriculumTermCfg(func=ObservationHidingCurriculum, params=params), env), params
 
 
 def _action_rate(env, **overrides):
@@ -134,3 +134,52 @@ def test_blocks_advance_independently():
         action_rate_state = _call(action_rate, env, action_rate_params, step)
     assert hiding_state["progress"] == pytest.approx(0.51)
     assert action_rate_state["progress"] == 0.0 and action_rate_state["weight"] == pytest.approx(START_WEIGHT)
+
+
+def test_dwell_delays_the_ramp_and_restarts_after_a_drop():
+    """The progress grows only after the average has stayed above the threshold for the dwell; a drop restarts it."""
+    env, success = _env(num_envs=8)
+    term, params = _hiding(env, dwell_steps=50)
+    success[:] = 1.0
+    _call(term, env, params, step=0)
+    assert _call(term, env, params, step=10)["gate_open"] == 0.0  # above the threshold from here on
+    assert _call(term, env, params, step=59)["progress"] == 0.0
+    state = _call(term, env, params, step=60)
+    assert state["gate_open"] == 1.0 and state["progress"] == pytest.approx(0.01)
+    assert _call(term, env, params, step=80)["progress"] == pytest.approx(0.21)
+
+    success[:] = 0.0
+    assert _call(term, env, params, step=90)["progress"] == pytest.approx(0.21)  # held, the wait starts again
+    success[:] = 1.0
+    assert _call(term, env, params, step=100)["progress"] == pytest.approx(0.21)
+    assert _call(term, env, params, step=149)["progress"] == pytest.approx(0.21)
+    assert _call(term, env, params, step=150)["progress"] == pytest.approx(0.22)
+
+
+def test_chained_block_waits_for_its_predecessor():
+    env, success = _env(num_envs=8)
+    first, first_params = _hiding(env, ramp_steps=64)  # 1/64 steps sum to exactly one
+    second, second_params = _action_rate(env, after="stage_hiding")
+    env.curriculum_manager = SimpleNamespace(cfg=SimpleNamespace(stage_hiding=SimpleNamespace(func=first)))
+    success[:] = 1.0
+    for step in range(64):
+        _call(first, env, first_params, step)
+        assert _call(second, env, second_params, step)["progress"] == 0.0
+    for step in range(64, 115):
+        _call(first, env, first_params, step)
+        state = _call(second, env, second_params, step)
+    assert first.progress == 1.0
+    assert state["progress"] == pytest.approx(0.51)  # ready from step 64
+
+
+def test_chain_skips_disabled_blocks_and_rejects_unknown_ones():
+    env, success = _env(num_envs=8)
+    env.curriculum_manager = SimpleNamespace(cfg=SimpleNamespace(stage_hiding=None))
+    term, params = _action_rate(env, after="stage_hiding")
+    success[:] = 1.0
+    _call(term, env, params, step=0)
+    assert _call(term, env, params, step=1)["progress"] == pytest.approx(0.01)
+
+    term, params = _action_rate(env, after="grasp_hiding")
+    with pytest.raises(ValueError, match="no block 'grasp_hiding'"):
+        _call(term, env, params, step=2)

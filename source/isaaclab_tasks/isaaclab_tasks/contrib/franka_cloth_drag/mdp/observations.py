@@ -108,17 +108,30 @@ def gripper_width(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Te
     return torch.nan_to_num(width, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def cloth_grasped(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
-    """One while the gripper holds cloth nodes locked to the hand, else zero, shape [num_envs, 1].
+def cloth_grasped(
+    env: ManagerBasedRLEnv, action_name: str = "gripper_action", hide_curriculum: str | None = None
+) -> torch.Tensor:
+    """One while the gripper holds cloth nodes locked to the hand, else minus one, shape [num_envs, 1].
 
-    This is the ``is_grasped`` flag the real Franka Hand reports. See :class:`~.actions.ClothGraspAction`.
+    Privileged: the real Franka Hand's ``is_grasped`` flag cannot tell thin cloth from an empty close, because
+    ``grasp(width=0)`` also counts the closed fingers as grasped. See :class:`~.actions.ClothGraspAction`.
+
+    With ``hide_curriculum``, the flag is zero in the episodes the curriculum term of that name hides it in
+    (:attr:`~.curriculums.ObservationHidingCurriculum.hidden`), distinct from both grasp states. Without that term,
+    e.g. with the curriculum disabled, the flag is always visible.
 
     Args:
         env: The environment.
         action_name: Name of the cloth grasp action term.
+        hide_curriculum: Name of the curriculum term that hides the flag, or None.
     """
     action: ClothGraspAction = env.action_manager.get_term(action_name)
-    return action.is_grasping.float().unsqueeze(1)
+    flag = action.is_grasping.float().unsqueeze(1) * 2.0 - 1.0
+    if hide_curriculum is not None:
+        hidden = _curriculum_hidden(env, hide_curriculum)
+        if hidden is not None:
+            flag = torch.where(hidden.unsqueeze(1), 0.0, flag)
+    return flag
 
 
 def grasped_node_ratio(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
@@ -380,8 +393,8 @@ def cloth_drag_stage(env: ManagerBasedRLEnv, command_name: str, hide_curriculum:
     :class:`~.commands.ClothTargetCommand`.
 
     With ``hide_curriculum``, the vector is all zeros in the episodes the curriculum term of that name hides the stage
-    in (:attr:`~.curriculums.StageHidingCurriculum.hidden`). All zeros is distinct from every one-hot stage, APPROACH
-    included. Without that term, e.g. with the curriculum disabled, the stage is always visible.
+    in (:attr:`~.curriculums.ObservationHidingCurriculum.hidden`). All zeros is distinct from every one-hot stage,
+    APPROACH included. Without that term, e.g. with the curriculum disabled, the stage is always visible.
 
     Shape is (num_envs, 4).
     """

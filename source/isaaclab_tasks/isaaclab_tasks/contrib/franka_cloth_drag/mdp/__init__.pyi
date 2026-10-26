@@ -14,7 +14,7 @@ __all__ = [
     "ClothPointsInEEFrame",
     "ClothTargetCommandCfg",
     "ActionRateCurriculum",
-    "StageHidingCurriculum",
+    "ObservationHidingCurriculum",
     "LimitedRelativeJointPositionActionCfg",
     "RateLimitedBinaryJointPositionActionCfg",
     "TopDownDeltaEEActionCfg",
@@ -41,6 +41,7 @@ __all__ = [
     "ResetClothWithRaisedNodes",
     "reset_cloth_planar_pose",
     "reset_franka_top_down",
+    "reset_object_on_cloth_center",
     "fingertip_below_table",
     "fingertip_cloth_proximity",
     "fingertip_goal_progress",
@@ -73,13 +74,14 @@ from .actions_cfg import (
     TopDownDeltaEEActionCfg,
 )
 from .commands_cfg import ClothTargetCommandCfg
-from .curriculums import ActionRateCurriculum, StageHidingCurriculum
+from .curriculums import ActionRateCurriculum, ObservationHidingCurriculum
 from .events import (
     edge_included,
     interior_nodes,
     ResetClothWithRaisedNodes,
     reset_cloth_planar_pose,
     reset_franka_top_down,
+    reset_object_on_cloth_center,
 )
 from .frames import cloth_center_pos_b, cloth_center_vel_b
 from .observations import (
