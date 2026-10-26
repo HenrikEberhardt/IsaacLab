@@ -61,6 +61,14 @@ __all__ = [
     "joint_vel_ratio",
     "nonfinite_state",
     "target_pos_ee",
+    "ee_object_distance",
+    "object_center_offset_b",
+    "object_pose_b",
+    "object_slip_speed",
+    "object_velocity_b",
+    "physics_contact",
+    "target_object_displacement_b",
+    "termination_flag",
 ]
 
 # Forward the generic and the lift-task MDP terms lazily; task-specific terms are added below.
@@ -92,13 +100,19 @@ from .observations import (
     cloth_grasped,
     cloth_nodal_pos_b,
     cloth_nodal_vel_b,
+    ee_object_distance,
     ee_pose_b,
     ee_velocity_b,
     grasped_node_ratio,
     gripper_width,
     joint_pos_ratio,
     joint_vel_ratio,
+    object_center_offset_b,
+    object_pose_b,
+    object_velocity_b,
+    target_object_displacement_b,
     target_pos_ee,
+    termination_flag,
 )
 from .rewards import (
     ClothDistanceProgress,
@@ -126,6 +140,7 @@ from .rewards import (
     gripper_closed_without_raised_node,
     gripper_open,
     joint_limit_barrier,
+    object_slip_speed,
 )
 from .stages import ClothDragStage
-from .terminations import cloth_drag_success, nonfinite_state
+from .terminations import cloth_drag_success, nonfinite_state, physics_contact

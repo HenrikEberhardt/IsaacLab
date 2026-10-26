@@ -12,7 +12,11 @@ import torch
 from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import RewardsCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.cloth_grasp import ClothGraspConstraint
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import gripper_closed, gripper_closed_on_raised_node
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import gripper_holds_raised_node, pad_box_mask
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import (
+    cloth_goal_xy_distance,
+    gripper_holds_raised_node,
+    pad_box_mask,
+)
 
 NUM_NODES = 6
 CFG = SimpleNamespace(gripper_action_name="gripper_action", raised_nodes_event="reset_deformable")
@@ -180,3 +184,78 @@ def test_configured_closing_rewards_prefer_capture_over_waiting_open():
     command.stage[:] = 1
     env.scene["deformable"].data.nodal_pos_w.torch += 0.1
     assert closing_reward() == 0.0
+
+
+class _Cloth:
+    """Fake cloth asset; hashable like a real asset, since its landmark ids are cached per asset."""
+
+    def __init__(self, nodes: torch.Tensor, shift: list[float]):
+        self.data = SimpleNamespace(
+            nodal_pos_w=SimpleNamespace(torch=nodes + torch.tensor(shift)),
+            default_nodal_state_w=SimpleNamespace(torch=torch.cat((nodes, torch.zeros_like(nodes)), dim=-1)),
+        )
+
+
+def _goal_env(cloth_shift, cube_pos):
+    """A fake environment with a 3 x 3 node cloth shifted in the plane, a cube, and a robot at the origin."""
+    grid = torch.cartesian_prod(torch.tensor([-0.1, 0.0, 0.1]), torch.tensor([-0.1, 0.0, 0.1]))
+    nodes = torch.cat((grid, torch.zeros(9, 1)), dim=1).unsqueeze(0)
+    cloth = _Cloth(nodes, cloth_shift)
+    robot = SimpleNamespace(
+        data=SimpleNamespace(
+            root_pos_w=SimpleNamespace(torch=torch.zeros(1, 3)),
+            root_quat_w=SimpleNamespace(torch=torch.tensor([[0.0, 0.0, 0.0, 1.0]])),
+        )
+    )
+    cube = SimpleNamespace(data=SimpleNamespace(root_pos_w=SimpleNamespace(torch=torch.tensor([cube_pos]))))
+    return SimpleNamespace(scene={"deformable": cloth, "robot": robot, "cube": cube})
+
+
+def test_goal_distance_measures_the_goal_object_if_set():
+    # the cube has slid 2 cm along x and 1 cm along y off the central node
+    env = _goal_env(cloth_shift=[0.6, 0.0, 0.0], cube_pos=[0.62, 0.01, 0.022])
+    target = torch.tensor([[0.4, 0.0, 0.0]])
+    cfg = SimpleNamespace(asset_name="robot", object_name="deformable", goal_object_name=None)
+    assert torch.allclose(cloth_goal_xy_distance(env, target, cfg), torch.tensor([0.2]))
+    cfg.goal_object_name = "cube"
+    expected = torch.tensor([0.22, 0.01]).norm().unsqueeze(0)
+    assert torch.allclose(cloth_goal_xy_distance(env, target, cfg), expected)
+
+
+def test_contact_latch_marks_only_touching_monitored_pairs():
+    import warp as wp
+
+    from isaaclab_tasks.contrib.franka_cloth_drag.coupler import _latch_touching_pairs
+
+    # shapes: world 0 gripper 0, cube 1, table 2 (static); world 1 gripper 3, cube 4; bodies 0, 1, -, 2, 3
+    shape_body = [0, 1, -1, 2, 3]
+    shape_world = [0, 0, 0, 1, 1]
+    shape_groups = [0b01, 0b10, 0, 0b01, 0b10]  # pair 0: gripper side (bit 0), cube side (bit 1)
+    body_pos = [[0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.0], [0.0, 0.0, 0.004]]
+    # touching in world 0 (0.5 mm gap), 4 mm apart in world 1 (body offset), cube on the unmonitored table
+    contacts = [(0, 1, [0.0, 0.0, 0.0005]), (3, 4, [0.0, 0.0, 0.0]), (1, 2, [0.0, 0.0, 0.0])]
+    device = "cpu"
+    latch = wp.zeros((2, 1), dtype=wp.int32, device=device)
+    wp.launch(
+        _latch_touching_pairs,
+        dim=len(contacts) + 1,  # one spare slot past the contact count
+        inputs=[
+            wp.array([len(contacts)], dtype=wp.int32, device=device),
+            wp.array([c[0] for c in contacts] + [-1], dtype=wp.int32, device=device),
+            wp.array([c[1] for c in contacts] + [-1], dtype=wp.int32, device=device),
+            wp.zeros(len(contacts) + 1, dtype=wp.vec3, device=device),
+            wp.array([c[2] for c in contacts] + [[0.0, 0.0, 0.0]], dtype=wp.vec3, device=device),
+            wp.array([[0.0, 0.0, 1.0]] * (len(contacts) + 1), dtype=wp.vec3, device=device),
+            wp.zeros(len(contacts) + 1, dtype=wp.float32, device=device),
+            wp.zeros(len(contacts) + 1, dtype=wp.float32, device=device),
+            wp.array(shape_body, dtype=wp.int32, device=device),
+            wp.array(shape_world, dtype=wp.int32, device=device),
+            wp.array(shape_groups, dtype=wp.int32, device=device),
+            wp.array([wp.transform(p, wp.quat_identity()) for p in body_pos], dtype=wp.transform, device=device),
+            1.0e-3,
+            1,
+        ],
+        outputs=[latch],
+        device=device,
+    )
+    assert latch.numpy()[:, 0].tolist() == [1, 0]

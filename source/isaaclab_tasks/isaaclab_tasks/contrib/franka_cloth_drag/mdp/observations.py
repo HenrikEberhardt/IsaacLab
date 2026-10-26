@@ -22,7 +22,7 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
-from isaaclab.utils.math import quat_apply_inverse
+from isaaclab.utils.math import quat_apply_inverse, quat_inv, quat_mul, quat_unique
 
 from .frames import (
     cloth_center_pos_b,
@@ -38,7 +38,7 @@ from .frames import (
 from .stages import ClothDragStage
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation, DeformableObject
+    from isaaclab.assets import Articulation, DeformableObject, RigidObject
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.managers import ObservationTermCfg
     from isaaclab.sensors import FrameTransformer
@@ -362,6 +362,94 @@ def target_pos_ee(
     target_pos_b = env.command_manager.get_command(command_name)[:, :3]
     pos_b, _ = ee_pose_in_base(env, ee_frame_cfg, robot_cfg)
     return torch.nan_to_num(target_pos_b - pos_b, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def object_pose_b(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Root position [m] and orientation (x, y, z, w) of a rigid object in the robot's root frame, shape
+    [num_envs, 7].
+
+    The quaternion is standardized to a non-negative real part, so ``q`` and ``-q`` do not alternate.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    robot: Articulation = env.scene[robot_cfg.name]
+    pos_b = points_to_base(env, asset.data.root_pos_w.torch, robot_cfg)
+    quat_b = quat_unique(quat_mul(quat_inv(robot.data.root_quat_w.torch), asset.data.root_quat_w.torch))
+    return torch.nan_to_num(torch.cat((pos_b, quat_b), dim=-1), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def object_velocity_b(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Root linear [m/s] and angular [rad/s] velocity of a rigid object along the robot's root frame axes, shape
+    [num_envs, 6]."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    lin_b = vectors_to_base(env, asset.data.root_lin_vel_w.torch, robot_cfg)
+    ang_b = vectors_to_base(env, asset.data.root_ang_vel_w.torch, robot_cfg)
+    return torch.nan_to_num(torch.cat((lin_b, ang_b), dim=-1), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def object_center_offset_b(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    cloth_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Rigid object's root relative to the cloth's central node, along the robot's root frame axes [m], shape
+    [num_envs, 3]. Shows how far the object has slid on the cloth."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    pos_b = points_to_base(env, asset.data.root_pos_w.torch, robot_cfg)
+    return torch.nan_to_num(pos_b - cloth_center_pos_b(env, cloth_cfg, robot_cfg), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def target_object_displacement_b(
+    env: ManagerBasedRLEnv,
+    command_name: str = "cloth_target",
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Commanded target relative to a rigid object's root, along the robot's root frame axes [m], shape
+    [num_envs, 3]."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    pos_b = points_to_base(env, asset.data.root_pos_w.torch, robot_cfg)
+    target_pos_b = env.command_manager.get_command(command_name)[:, :3]
+    return torch.nan_to_num(target_pos_b - pos_b, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def ee_object_distance(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    ee_frame_cfg: SceneEntityCfg = SceneEntityCfg("ee_frame"),
+) -> torch.Tensor:
+    """Distance of the EE frame origin to the surface of a cuboid rigid object [m], zero inside, shape
+    [num_envs, 1].
+
+    The object must be spawned as a cuboid (``spawn.size``). The fingers reach a few centimeters beyond the EE frame
+    origin, so this is a coarse proximity measure; touching is detected by the solver contacts.
+    """
+    asset: RigidObject = env.scene[asset_cfg.name]
+    ee_frame: FrameTransformer = env.scene[ee_frame_cfg.name]
+    half_size = 0.5 * torch.tensor(asset.cfg.spawn.size, device=env.device)
+    pose_w = asset.data.root_pose_w.torch
+    rel = quat_apply_inverse(pose_w[:, 3:7], ee_frame.data.target_pos_w.torch[:, 0] - pose_w[:, :3])
+    outside = rel - rel.clamp(-half_size, half_size)
+    return torch.nan_to_num(torch.linalg.norm(outside, dim=-1, keepdim=True), nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def termination_flag(env: ManagerBasedRLEnv, term_name: str) -> torch.Tensor:
+    """Whether the termination term ``term_name`` fired at the current step, as 1 or 0, shape [num_envs, 1].
+
+    Zeros before the termination manager exists (the observation manager computes every term once at initialization).
+    """
+    termination_manager = getattr(env, "termination_manager", None)
+    if termination_manager is None:
+        return torch.zeros(env.num_envs, 1, device=env.device)
+    return termination_manager.get_term(term_name).float().unsqueeze(1)
 
 
 def cloth_nodal_pos_b(

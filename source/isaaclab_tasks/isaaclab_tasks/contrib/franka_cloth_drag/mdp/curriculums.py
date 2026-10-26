@@ -8,8 +8,9 @@
 Each term is a block with its own success gate: it tracks the success rate of the finished episodes as an exponential
 moving average and, once the average has stayed at least ``success_threshold`` for ``dwell_steps``, grows its progress
 linearly with the environment steps from ``initial_progress`` to one over ``ramp_steps``. Below the threshold the
-progress holds; it never goes back. With ``after``, a block waits until the named block is complete, so the blocks run
-one after another.
+progress holds; it never goes back. After such a pause, the average must stay above the threshold for
+``resume_dwell_steps`` (by default ``dwell_steps``) before the progress grows again. With ``after``, a block waits
+until the named block is complete, so the blocks run one after another.
 
 The curriculum manager calls the terms at the start of every reset, with the environments being reset. The state is
 not stored in policy checkpoints: a resumed run starts again from ``initial_progress``.
@@ -46,6 +47,8 @@ class _SuccessGatedRamp(ManagerTermBase):
         self._last_step = env.common_step_counter
         # step from which the block is ready and the average has stayed above the threshold, None while it is not
         self._above_since: int | None = None
+        # whether the gate has opened before, so a reopening after a pause uses the resume wait
+        self._has_opened = False
 
     def _update(
         self,
@@ -57,6 +60,7 @@ class _SuccessGatedRamp(ManagerTermBase):
         ema_episodes: int,
         dwell_steps: int,
         after: str | None,
+        resume_dwell_steps: int | None = None,
     ) -> None:
         """Fold the finished episodes into the success average and advance the progress.
 
@@ -70,9 +74,11 @@ class _SuccessGatedRamp(ManagerTermBase):
                 progress. With 24 steps per iteration, 7200 steps are 300 iterations.
             ema_episodes: Number of finished episodes the success average effectively spans.
             dwell_steps: Environment steps the block must be ready with the average above the threshold before the
-                progress grows. Every drop below the threshold starts the wait again.
+                progress grows for the first time. Every drop below the threshold starts the wait again.
             after: Name of the curriculum block that must be at full progress before this one is ready. A disabled
                 block (``None`` in the curriculum cfg) counts as complete.
+            resume_dwell_steps: Environment steps the average must stay above the threshold before the progress grows
+                again after a pause, once the gate has opened before. None => ``dwell_steps``.
         """
         if ramp_steps <= 0:
             raise ValueError("ramp_steps must be positive.")
@@ -88,7 +94,9 @@ class _SuccessGatedRamp(ManagerTermBase):
                 self._above_since = step
         else:
             self._above_since = None
-        self.gate_open = self._above_since is not None and step - self._above_since >= dwell_steps
+        wait = dwell_steps if not self._has_opened or resume_dwell_steps is None else resume_dwell_steps
+        self.gate_open = self._above_since is not None and step - self._above_since >= wait
+        self._has_opened |= self.gate_open
         if self.gate_open:
             self.progress = min(1.0, self.progress + (step - self._last_step) / ramp_steps)
         self._last_step = step
@@ -136,6 +144,7 @@ class ActionRateCurriculum(_SuccessGatedRamp):
         dwell_steps: int = 0,
         after: str | None = None,
         initial_progress: float = 0.0,
+        resume_dwell_steps: int | None = None,
     ) -> dict[str, float]:
         """Advance the progress and set the reward weight.
 
@@ -151,11 +160,22 @@ class ActionRateCurriculum(_SuccessGatedRamp):
             dwell_steps: See :meth:`_SuccessGatedRamp._update`.
             after: See :meth:`_SuccessGatedRamp._update`.
             initial_progress: Progress at the start of training, read once at initialization.
+            resume_dwell_steps: See :meth:`_SuccessGatedRamp._update`.
 
         Returns:
             The state to log: success average, gate, progress and weight.
         """
-        self._update(env, env_ids, command_name, success_threshold, ramp_steps, ema_episodes, dwell_steps, after)
+        self._update(
+            env,
+            env_ids,
+            command_name,
+            success_threshold,
+            ramp_steps,
+            ema_episodes,
+            dwell_steps,
+            after,
+            resume_dwell_steps,
+        )
         weight = self._start_weight * (final_weight / self._start_weight) ** self.progress
         self._reward_cfg.weight = weight
         env.reward_manager.set_term_cfg(reward_term, self._reward_cfg)
@@ -199,6 +219,7 @@ class ObservationHidingCurriculum(_SuccessGatedRamp):
         dwell_steps: int = 0,
         after: str | None = None,
         initial_progress: float = 0.0,
+        resume_dwell_steps: int | None = None,
     ) -> dict[str, float]:
         """Advance the progress and draw the mask of the episodes that start now.
 
@@ -212,11 +233,22 @@ class ObservationHidingCurriculum(_SuccessGatedRamp):
             dwell_steps: See :meth:`_SuccessGatedRamp._update`.
             after: See :meth:`_SuccessGatedRamp._update`.
             initial_progress: Progress at the start of training, read once at initialization.
+            resume_dwell_steps: See :meth:`_SuccessGatedRamp._update`.
 
         Returns:
             The state to log: success average, gate, progress and share of hidden episodes.
         """
-        self._update(env, env_ids, command_name, success_threshold, ramp_steps, ema_episodes, dwell_steps, after)
+        self._update(
+            env,
+            env_ids,
+            command_name,
+            success_threshold,
+            ramp_steps,
+            ema_episodes,
+            dwell_steps,
+            after,
+            resume_dwell_steps,
+        )
         num_reset = self.hidden[env_ids].shape[0]
         draw = torch.rand(num_reset, generator=self._generator, device=self.hidden.device)
         self.hidden[env_ids] = draw < self.progress

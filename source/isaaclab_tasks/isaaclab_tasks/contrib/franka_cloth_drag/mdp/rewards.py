@@ -21,7 +21,14 @@ import torch
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
-from .frames import cloth_center_pos_b, cloth_center_vel_b, ee_pose_in_base, ee_twist_in_base, raised_node_ids
+from .frames import (
+    cloth_center_pos_b,
+    cloth_center_vel_b,
+    ee_pose_in_base,
+    ee_twist_in_base,
+    raised_node_ids,
+    vectors_to_base,
+)
 from .observations import _robot_with_action_joints
 from .stages import (
     ClothDragStage,
@@ -36,7 +43,7 @@ from .stages import (
 )
 
 if TYPE_CHECKING:
-    from isaaclab.assets import DeformableObject
+    from isaaclab.assets import DeformableObject, RigidObject
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.managers import RewardTermCfg
     from isaaclab.sensors import FrameTransformer
@@ -377,6 +384,37 @@ def ee_height_above(
     return _stage_gate((ee_height - max_height).clamp(min=0.0), command.stage, stages, saturate=False)
 
 
+def object_slip_speed(
+    env: ManagerBasedRLEnv,
+    threshold: float,
+    stages: Sequence[str],
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    command_name: str = "cloth_target",
+) -> torch.Tensor:
+    """Return the planar speed of a rigid object relative to the cloth's central node above ``threshold`` [m/s],
+    zero below it, in the active stages. A penalty: it never saturates.
+
+    The object slides on the cloth when the drag is too jerky. VBD smooths friction below a slip speed
+    (``friction_epsilon``), so a resting object creeps slowly even without sliding; the threshold lies above that
+    creep, so only real sliding is paid for.
+
+    Args:
+        env: The environment.
+        threshold: Relative planar speed up to which there is no penalty [m/s].
+        stages: Names of the stages the term is active in.
+        asset_cfg: Scene entity of the rigid object on the cloth.
+        command_name: Name of the cloth target command.
+    """
+    command = _command(env, command_name)
+    asset: RigidObject = env.scene[asset_cfg.name]
+    robot_cfg = SceneEntityCfg(command.cfg.asset_name)
+    object_vel = vectors_to_base(env, asset.data.root_lin_vel_w.torch, robot_cfg)
+    center_vel = cloth_center_vel_b(env, SceneEntityCfg(command.cfg.object_name), robot_cfg)
+    slip = torch.linalg.norm(object_vel[:, :2] - center_vel[:, :2], dim=-1)
+    slip = torch.nan_to_num(slip, nan=0.0, posinf=0.0, neginf=0.0)
+    return _stage_gate((slip - threshold).clamp(min=0.0), command.stage, stages, saturate=False)
+
+
 def cloth_goal_proximity(
     env: ManagerBasedRLEnv, std: float, stages: Sequence[str], command_name: str = "cloth_target"
 ) -> torch.Tensor:
@@ -520,11 +558,12 @@ class ClothDistanceProgress(ManagerTermBase):
 
     ``objective="approach"`` tracks the distance of the EE frame origin to the nearest raised cloth node before
     attachment, the distance of the GRASP stage (:func:`~.stages.ee_raised_node_distance`; the nearest cloth node if
-    none is raised). ``objective="drag"`` tracks planar center-to-target distance while the gripper holds the cloth
-    by a raised node (:func:`~.stages.gripper_holds_raised_node`); a grasp of other nodes pays neither. The first
-    eligible sample establishes a reference; inactive samples still update the reference. Negative increments are
-    retained. No stage-completion reward is paid. Attachment boundaries intentionally restart progress and do not imply
-    a globally telescoping return.
+    none is raised). ``objective="drag"`` tracks the planar distance of the goal point to the target
+    (:func:`~.stages.cloth_goal_xy_distance`: the cloth's central node, or the object on the cloth that must reach the
+    target) while the gripper holds the cloth by a raised node (:func:`~.stages.gripper_holds_raised_node`); a grasp
+    of other nodes pays neither. The first eligible sample establishes a reference; inactive samples still update the
+    reference. Negative increments are retained. No stage-completion reward is paid. Attachment boundaries
+    intentionally restart progress and do not imply a globally telescoping return.
     """
 
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):

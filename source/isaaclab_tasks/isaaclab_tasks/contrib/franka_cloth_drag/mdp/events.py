@@ -24,10 +24,11 @@ if TYPE_CHECKING:
 
 # Node sets of 120_nodes_optimized_mesh.usd that may be raised
 # (plot: implementation_log/test_scripts/plot_raised_nodes.py)
-# The interior of the refined U along the mesh's -x edge, without the border and the area around the central node 87
+# The interior of the refined U along the mesh's -x edge, without the border and at least 8 cm from the central node 87,
+# so the gripper can grasp a raised node without touching the cube on the center
 interior_nodes = [
-    16, 17, 18, 19, 21, 22, 23, 24, 26, 27, 28, 29, 30, 31, 32, 33, 35, 36, 37, 38, 39, 40, 41, 43,
-    44, 45, 46, 47, 49, 50, 52, 53, 54, 55, 56, 57, 58, 59, 61, 62, 64, 65, 68, 69, 72, 74, 76, 80,
+    16, 17, 18, 19, 21, 22, 23, 24, 26, 27, 28, 29, 30, 31, 32, 33, 36, 37, 40, 41, 43, 44, 45, 46,
+    49, 53, 54, 57, 58, 61, 64, 68, 76, 80,
 ]  # fmt: skip
 # The interior of the U plus its border: the -x edge and the two side edges up to x = 0
 edge_included = sorted(interior_nodes + [

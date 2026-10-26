@@ -35,7 +35,21 @@ def nonfinite_state(
 
 
 def cloth_drag_success(env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:
-    """Terminate after the central cloth node satisfies the command's target radius and consecutive hold time."""
+    """Terminate after the goal point (central cloth node or object on the cloth) satisfies the command's target radius
+    and consecutive hold time."""
     command = env.command_manager.get_term(command_name)
     command.update_goal_status()
     return command.holding
+
+
+def physics_contact(env: ManagerBasedRLEnv, contact_name: str) -> torch.Tensor:
+    """Terminate when the monitored contact pair ``contact_name`` touched during the last step.
+
+    The physics manager latches the pair after every physics substep (see
+    :meth:`~..coupler.NewtonClothGraspCouplerManager.contact_latch`), so a touch within a step is not missed. This term
+    reads the latch and clears it, so it must be the only reader of that pair.
+    """
+    physics = env.sim.physics_manager
+    touched = physics.contact_latch(contact_name).clone()
+    physics.clear_contact_latch(contact_name)
+    return touched

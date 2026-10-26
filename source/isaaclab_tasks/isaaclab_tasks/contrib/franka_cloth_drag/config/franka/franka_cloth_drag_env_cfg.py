@@ -117,6 +117,16 @@ class PhysicsCfg(NewtonCfg):
             )
         ],
         iterations=1,  # Solve coupling once per step
+        # No cube-table collision: a cube that leaves the cloth falls through the table (cube_fell termination)
+        collision_filter_pairs=[(r"/World/envs/env_[^/]+/Cube", r"/World/envs/env_[^/]+/Table(/.*)?")],
+        # Gripper touching the cube, latched after every substep (gripper_cube_contact termination)
+        monitored_contacts={
+            "gripper_cube": (
+                r"/World/envs/env_[^/]+/Robot/Geometry/.*panda_(hand|leftfinger|rightfinger)",
+                r"/World/envs/env_[^/]+/Cube",
+            ),
+        },
+        contact_touch_tolerance=1.0e-3,  # largest surface gap [m] that counts as touching
     )
     soft_contact_cfg = NewtonSoftContactCfg(
         soft_contact_ke=8.0e3,  # stiffness, higher less penetration but more unstable
@@ -419,6 +429,9 @@ class ActorObsCfg(ObsGroup):
     # and kept fixed, so every slot tracks the same node through the position history
     cloth_points = ObsTerm(func=mdp.ClothPointsInBaseFrame, params={"num_random_nodes": 18})
 
+    # Cube position and orientation (quaternion, w >= 0) in base frame
+    cube_pose = ObsTerm(func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")})
+
     # ---------- Task ----------
 
     # Target relative to the EE along the base axes (forward kinematics and command, known on the real robot)
@@ -472,6 +485,14 @@ class CriticObsCfg(ObsGroup):
     cloth_nodal_pos = ObsTerm(func=mdp.cloth_nodal_pos_b)
     cloth_nodal_vel = ObsTerm(func=mdp.cloth_nodal_vel_b)
 
+    # Cube pose, velocity, offset from the cloth's central node (sliding) and distance to the EE frame origin
+    cube_pose = ObsTerm(func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")})
+    cube_velocity = ObsTerm(func=mdp.object_velocity_b, params={"asset_cfg": SceneEntityCfg("cube")})
+    cube_center_offset = ObsTerm(func=mdp.object_center_offset_b, params={"asset_cfg": SceneEntityCfg("cube")})
+    ee_cube_distance = ObsTerm(func=mdp.ee_object_distance, params={"asset_cfg": SceneEntityCfg("cube")})
+    # Gripper touched the cube in the last step (solver contacts)
+    gripper_cube_contact = ObsTerm(func=mdp.termination_flag, params={"term_name": "gripper_cube_contact"})
+
     # ---------- Task ----------
 
     # Target position in base frame
@@ -482,6 +503,12 @@ class CriticObsCfg(ObsGroup):
 
     # Displacement from center node to target position in base frame
     cloth_target_displacement = ObsTerm(func=mdp.cloth_target_displacement_b)
+
+    # Displacement from cube to target position in base frame
+    cube_target_displacement = ObsTerm(
+        func=mdp.target_object_displacement_b,
+        params={"command_name": "cloth_target", "asset_cfg": SceneEntityCfg("cube")},
+    )
 
     # Current task stage
     stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
@@ -507,6 +534,7 @@ class CommandsCfg:
     cloth_target = mdp.ClothTargetCommandCfg(
         asset_name="robot",
         object_name="deformable",
+        goal_object_name="cube",  # the cube must reach the target (success, GOAL stage, drag progress)
         # Task goal definition
         ranges=mdp.ClothTargetCommandCfg.Ranges(  # Target sampled on line
             pos_x=(0.40, 0.45),
@@ -514,9 +542,9 @@ class CommandsCfg:
             pos_z=(0.002, 0.002),
         ),
         success_radius=0.04,  # Radius [m] around the target position for success
-        hold_time=0.75,  # Time [s] to hold the cloth in the target zone for success
+        hold_time=0.75,  # Time [s] to hold the cube in the target zone for success
         max_ee_height=0.05,  # success only with low EE (maybe delete this)
-        # Success needs a raised node locked during the whole hold (pushing or dragging by the edge can't solve it)
+        # Success needs a raised node locked during the whole hold (pushing or dragging with different nodes is not enough)
         debug_vis=True,  # Target marker
         
         # Task stage transitions
@@ -600,8 +628,11 @@ class RewardsCfg:
 
     # Penalties
     pen_termination = RewTerm(
-        func=mdp.is_terminated_term, params={"term_keys": ["cloth_out_of_bounds", "ee_below_table"]}, weight=-200.0
+        func=mdp.is_terminated_term,
+        params={"term_keys": ["cloth_out_of_bounds", "ee_below_table", "cube_fell", "gripper_cube_contact"]},
+        weight=-200.0,
     )
+    
     pen_action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
     # Steep penalty only within 0.1 rad of the action's joint bounds (wrist: the yaw window), zero elsewhere; arm only
     pen_joint_limit_barrier = RewTerm(
@@ -620,6 +651,15 @@ class RewardsCfg:
     pen_ee_height = RewTerm(
         func=mdp.ee_height_above, params={"max_height": 0.03, "stages": ["drag", "goal"]}, weight=-50.0
     )
+
+    # Cube sliding on the cloth: planar cube speed relative to the central node above the friction creep
+    # (prepared, off until a run shows sliding; creep analysis in implementation_log/rewards.md section 20)
+    # Threshold 0.01 m/s = VBD friction_epsilon: smoothed-friction creep stays below it, faster is real sliding
+    # pen_cube_slip = RewTerm(
+    #     func=mdp.object_slip_speed,
+    #     params={"threshold": 0.01, "stages": ["drag", "goal"], "asset_cfg": SceneEntityCfg("cube")},
+    #     weight=-10.0,
+    # )
 
 
 @configclass
@@ -649,6 +689,14 @@ class TerminationsCfg:
         params={"minimum_height": -0.1, "ee_frame_cfg": SceneEntityCfg("ee_frame")},
     )
 
+    # Cube left the cloth: it does not collide with the table, so it falls through (-10 cm below the table top)
+    cube_fell = DoneTerm(
+        func=mdp.root_height_below_minimum, params={"minimum_height": -0.1, "asset_cfg": SceneEntityCfg("cube")}
+    )
+
+    # Gripper (hand or fingers) touched the cube, from the solver contacts after every physics substep
+    gripper_cube_contact = DoneTerm(func=mdp.physics_contact, params={"contact_name": "gripper_cube"})
+
     # Physics blow-up that ended in NaN or Inf, which every threshold check above misses
     nonfinite_state = DoneTerm(func=mdp.nonfinite_state)
 
@@ -668,11 +716,12 @@ class CurriculumCfg:
         func=mdp.ObservationHidingCurriculum,
         params={
             "command_name": "cloth_target",
-            "success_threshold": 0.85,  # success ratio
+            "success_threshold": 0.80,  # success ratio; the cube task levels off at about 0.87-0.89
             "dwell_steps": 2400,  # 100 iterations above the threshold before the ramp starts
+            "resume_dwell_steps": 240,  # 10 iterations back above the threshold before a paused ramp continues
             "ramp_steps": 4800,  # 200 iterations at 24 steps/iteration
             "ema_episodes": 2048,
-            "initial_progress": 0.0,
+            "initial_progress": 0.1,  # stage hidden in 10 % of episodes from the start, never relied on
         },
     )
 
@@ -681,9 +730,10 @@ class CurriculumCfg:
         func=mdp.ObservationHidingCurriculum,
         params={
             "command_name": "cloth_target",
-            "success_threshold": 0.85,
-            "dwell_steps": 2400,  # 100 iterations
-            "ramp_steps": 9600,  # 400 iterations
+            "success_threshold": 0.80,
+            "dwell_steps": 600,  # 25 iterations
+            "resume_dwell_steps": 240,  # 10 iterations
+            "ramp_steps": 6000,  # 250 iterations
             "ema_episodes": 2048,
             "after": "stage_hiding",
             "initial_progress": 0.0,
@@ -695,8 +745,9 @@ class CurriculumCfg:
         func=mdp.ActionRateCurriculum,
         params={
             "command_name": "cloth_target",
-            "success_threshold": 0.85,
-            "dwell_steps": 2400,  # 100 iterations
+            "success_threshold": 0.80,
+            "dwell_steps": 600,  # 25 iterations
+            "resume_dwell_steps": 240,  # 10 iterations
             "ramp_steps": 7200,  # 300 iterations
             "reward_term": "pen_action_rate",
             "final_weight": -1.0,  # ~5-10 % of the positive return, as in the lift tasks
@@ -737,7 +788,6 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 1.0 / 120
         self.sim.render_interval = self.decimation
         self.sim.physics = PhysicsCfg()
-
         
         # Setup Visulaizer settings
         self.sim.visualizer_cfgs = [

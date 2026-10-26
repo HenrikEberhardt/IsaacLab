@@ -11,6 +11,14 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 
 
 @configclass
+class BoundedGaussianDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
+    """Gaussian action distribution whose standard deviation is clamped to a range."""
+
+    std_range: tuple[float, float] = (1.0e-6, 1.0e6)
+    """Range (min, max) the standard deviation is clamped to, passed to rsl_rl's ``GaussianDistribution``."""
+
+
+@configclass
 class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Cloth-drag policy with five-frame actor inputs and a privileged critic."""
 
@@ -26,7 +34,9 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         hidden_dims=[256, 128, 64],
         activation="elu",
         obs_normalization=True,
-        distribution_cfg=RslRlMLPModelCfg.GaussianDistributionCfg(init_std=0.5, std_type="scalar"),
+        # Std floor keeps exploring (0.001 entropy let it collapse to 0.15), ceiling at the action clip avoids
+        # bang-bang training (0.006 entropy grew it to 3-6 past the clip)
+        distribution_cfg=BoundedGaussianDistributionCfg(init_std=0.5, std_type="scalar", std_range=(0.2, 1.0)),
     )
 
     critic = RslRlMLPModelCfg(
@@ -39,7 +49,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.001,  # 0.006 grew the std past the action clip (bang-bang actions)
+        entropy_coef=0.005,  # exploration as in the lift tasks; the std range bounds its growth
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,

@@ -15,10 +15,10 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse
 
-from .frames import cloth_center_pos_b, raised_node_ids
+from .frames import cloth_center_pos_b, cloth_center_vel_b, points_to_base, raised_node_ids, vectors_to_base
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation, DeformableObject
+    from isaaclab.assets import Articulation, DeformableObject, RigidObject
     from isaaclab.envs import ManagerBasedEnv
     from isaaclab.sensors import FrameTransformer
 
@@ -127,9 +127,28 @@ def gripper_holds_raised_node(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) 
     return constraint.active & constraint.grasped.gather(1, ids).any(dim=1)
 
 
+def goal_point_pos_b(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Position of the point that must reach the target in the robot's root frame [m], shape [num_envs, 3].
+
+    The root of :attr:`ClothTargetCommandCfg.goal_object_name` if set, else the cloth's central node.
+    """
+    if cfg.goal_object_name is None:
+        return cloth_center_pos_b(env, SceneEntityCfg(cfg.object_name), SceneEntityCfg(cfg.asset_name))
+    goal_object: RigidObject = env.scene[cfg.goal_object_name]
+    return points_to_base(env, goal_object.data.root_pos_w.torch, SceneEntityCfg(cfg.asset_name))
+
+
+def goal_point_vel_b(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Velocity of the point of :func:`goal_point_pos_b` in the robot's root frame [m/s], shape [num_envs, 3]."""
+    if cfg.goal_object_name is None:
+        return cloth_center_vel_b(env, SceneEntityCfg(cfg.object_name), SceneEntityCfg(cfg.asset_name))
+    goal_object: RigidObject = env.scene[cfg.goal_object_name]
+    return vectors_to_base(env, goal_object.data.root_lin_vel_w.torch, SceneEntityCfg(cfg.asset_name))
+
+
 def cloth_goal_xy_distance(
     env: ManagerBasedEnv, target_pos_b: torch.Tensor, cfg: ClothTargetCommandCfg
 ) -> torch.Tensor:
-    """Planar distance between the cloth's central node and the target [m]."""
-    center_pos_b = cloth_center_pos_b(env, SceneEntityCfg(cfg.object_name), SceneEntityCfg(cfg.asset_name))
-    return torch.linalg.norm(target_pos_b[:, :2] - center_pos_b[:, :2], dim=1)
+    """Planar distance between the goal point (:func:`goal_point_pos_b`) and the target [m]."""
+    goal_pos_b = goal_point_pos_b(env, cfg)
+    return torch.linalg.norm(target_pos_b[:, :2] - goal_pos_b[:, :2], dim=1)

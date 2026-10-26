@@ -23,6 +23,9 @@ if TYPE_CHECKING:
 class ClothTargetCommandCfg(CommandTermCfg):
     """Configuration for a target position of the cloth's central node, see :class:`ClothTargetCommand`.
 
+    The goal point is the cloth's central node, or the root of the rigid object :attr:`goal_object_name` (e.g. a cube
+    standing on the cloth) if set; "central node" below means that goal point.
+
     The goal is reached when the cloth's central node stays within :attr:`success_radius` of the target in the table
     plane for :attr:`hold_time` in a row while the gripper holds the cloth by a raised node (stage DRAG or GOAL), so a
     cloth pushed into the target or dragged by its edge does not count. With :attr:`max_ee_height` set, the EE frame
@@ -54,6 +57,13 @@ class ClothTargetCommandCfg(CommandTermCfg):
 
     object_name: str = MISSING
     """Name of the cloth whose central node is tracked."""
+
+    goal_object_name: str | None = None
+    """Name of a rigid object on the cloth that must reach the target instead of the cloth's central node. Optional.
+
+    With it set, the goal point of the target distance (GOAL stage, success, drag progress) is the object's root
+    position. Defaults to None, the cloth's central node.
+    """
 
     @configclass
     class Ranges:

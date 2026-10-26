@@ -10,6 +10,7 @@ Adapted from ``NewtonClothCubeCouplerManager`` on the ``non-prehensile-cloth`` b
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 
 import numpy as np
@@ -17,7 +18,9 @@ import torch
 import warp as wp
 from isaaclab_newton.physics import VBDSolverCfg
 from isaaclab_newton.physics.newton_manager import NewtonManager
-from newton import Contacts, Control, Model, ParticleFlags, ShapeFlags, State, eval_ik
+from newton import Contacts, Control, Model, ModelBuilder, ParticleFlags, ShapeFlags, State, eval_ik
+
+from isaaclab.physics import PhysicsManager
 
 from isaaclab_contrib.coupling.coupler import NewtonCouplerManager
 from isaaclab_contrib.coupling.coupler_cfg import CouplerCfg
@@ -40,6 +43,76 @@ def _sync_particle_activity(
     local = particle_global_to_local[particle]
     view_flags[local] = (view_flags[local] & ~_PARTICLE_ACTIVE) | (model_flags[particle] & _PARTICLE_ACTIVE)
     view_inv_mass[local] = model_inv_mass[particle]
+
+
+@wp.kernel
+def _latch_touching_pairs(
+    contact_count: wp.array(dtype=wp.int32),
+    contact_shape0: wp.array(dtype=wp.int32),
+    contact_shape1: wp.array(dtype=wp.int32),
+    contact_point0: wp.array(dtype=wp.vec3),
+    contact_point1: wp.array(dtype=wp.vec3),
+    contact_normal: wp.array(dtype=wp.vec3),
+    contact_margin0: wp.array(dtype=wp.float32),
+    contact_margin1: wp.array(dtype=wp.float32),
+    shape_body: wp.array(dtype=wp.int32),
+    shape_world: wp.array(dtype=wp.int32),
+    shape_groups: wp.array(dtype=wp.int32),
+    body_q: wp.array(dtype=wp.transform),
+    tolerance: float,
+    num_pairs: int,
+    latch: wp.array2d(dtype=wp.int32),
+):
+    """Latch every monitored shape pair whose contact is touching in the given body poses.
+
+    Bit ``2 i`` of a shape's group mask marks the first side of monitored pair ``i``, bit ``2 i + 1`` the second.
+    """
+    tid = wp.tid()
+    if tid >= contact_count[0]:
+        return
+    shape_a = contact_shape0[tid]
+    shape_b = contact_shape1[tid]
+    if shape_a < 0 or shape_b < 0:
+        return
+    groups_a = shape_groups[shape_a]
+    groups_b = shape_groups[shape_b]
+    if groups_a == 0 or groups_b == 0:
+        return
+    # contact points are in the body frames, static shapes in the world frame
+    point_a = contact_point0[tid]
+    if shape_body[shape_a] >= 0:
+        point_a = wp.transform_point(body_q[shape_body[shape_a]], point_a)
+    point_b = contact_point1[tid]
+    if shape_body[shape_b] >= 0:
+        point_b = wp.transform_point(body_q[shape_body[shape_b]], point_b)
+    gap = wp.dot(contact_normal[tid], point_b - point_a) - contact_margin0[tid] - contact_margin1[tid]
+    if gap > tolerance:
+        return
+    world = shape_world[shape_a]
+    if world < 0:
+        world = shape_world[shape_b]
+    if world < 0:
+        return
+    for i in range(num_pairs):
+        first = 1 << (2 * i)
+        second = 1 << (2 * i + 1)
+        if ((groups_a & first) != 0 and (groups_b & second) != 0) or (
+            (groups_a & second) != 0 and (groups_b & first) != 0
+        ):
+            latch[world, i] = 1
+
+
+def _shapes_matching(pattern: str, shape_labels, shape_body, body_labels) -> np.ndarray:
+    """Ids of the shapes whose label, or whose body's label, matches the regex ``pattern`` in full."""
+    regex = re.compile(pattern)
+    return np.array(
+        [
+            shape
+            for shape, label in enumerate(shape_labels)
+            if regex.fullmatch(label) or (shape_body[shape] >= 0 and regex.fullmatch(body_labels[shape_body[shape]]))
+        ],
+        dtype=np.int64,
+    )
 
 
 class NewtonClothGraspCouplerManager(NewtonCouplerManager):
@@ -65,6 +138,11 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
       zeroed, so the wrinkles of the spawned cloth stay partly set.
     * :meth:`set_cloth_rest` changes the cloth rest shape (bending rest angles and lengths, triangle rest shapes and
       areas) at runtime in the model and the solver views.
+    * Before the model is finalized, it excludes the shape pairs of
+      :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.collision_filter_pairs` from collision in every world.
+    * After each substep, it latches per world whether the shape pairs of
+      :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.monitored_contacts` touch, from the contacts the proxy pipelines
+      detected and the body poses at the end of the substep, see :meth:`contact_latch`.
     """
 
     _vbd_articulation_mask: wp.array | None = None
@@ -75,6 +153,37 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     _default_shape_flags: list = []
     """Shape flags of each particle entry's view when the solver was built, to restore proxy contacts."""
+
+    _contact_names: list[str] = []
+    """Names of the monitored contact pairs, in latch column order."""
+
+    _contact_shape_groups: wp.array | None = None
+    """Per-shape bit mask of the monitored pair sides the shape belongs to, or None without monitored pairs."""
+
+    _contact_latch: wp.array | None = None
+    """Per-world, per-pair touch flags since the last :meth:`clear_contact_latch`, shape [num_worlds, num_pairs]."""
+
+    _contact_buffers: list | None = None
+    """Contacts of the proxy pipelines, looked up at the first substep; None until then."""
+
+    @classmethod
+    def _prepare_builder_for_finalize(cls, builder: ModelBuilder) -> None:
+        """Exclude the configured shape pairs from collision in every world before the model is finalized."""
+        super()._prepare_builder_for_finalize(builder)
+        pairs = getattr(PhysicsManager._cfg.solver_cfg, "collision_filter_pairs", [])
+        if not pairs:
+            return
+        shape_world = np.asarray(builder.shape_world)
+        for pattern_a, pattern_b in pairs:
+            shapes_a, shapes_b = (
+                _shapes_matching(pattern, builder.shape_label, builder.shape_body, builder.body_label)
+                for pattern in (pattern_a, pattern_b)
+            )
+            if len(shapes_a) == 0 or len(shapes_b) == 0:
+                raise ValueError(f"Collision filter pair ({pattern_a!r}, {pattern_b!r}) matches no shape.")
+            for shape_a in shapes_a:
+                for shape_b in shapes_b[shape_world[shapes_b] == shape_world[shape_a]]:
+                    builder.add_shape_collision_filter_pair(int(shape_a), int(shape_b))
 
     @classmethod
     def _build_solver(cls, model: Model, solver_cfg: CouplerCfg) -> None:
@@ -100,6 +209,29 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
             mask[articulations[articulations >= 0]] = True
             if mask.any():
                 cls._vbd_articulation_mask = wp.array(mask, dtype=wp.bool, device=model.device)
+        cls._build_contact_monitor(model, solver_cfg)
+
+    @classmethod
+    def _build_contact_monitor(cls, model: Model, solver_cfg: CouplerCfg) -> None:
+        """Mark the shapes of the monitored pairs and allocate the per-world latch, before any graph capture."""
+        monitored = getattr(solver_cfg, "monitored_contacts", {})
+        cls._contact_names = list(monitored)
+        cls._contact_buffers = None
+        if not monitored:
+            cls._contact_shape_groups = cls._contact_latch = None
+            return
+        if len(monitored) > 15:
+            raise ValueError("At most 15 contact pairs can be monitored.")
+        shape_body = model.shape_body.numpy()
+        groups = np.zeros(model.shape_count, dtype=np.int32)
+        for i, (name, patterns) in enumerate(monitored.items()):
+            for side, pattern in enumerate(patterns):
+                shapes = _shapes_matching(pattern, model.shape_label, shape_body, model.body_label)
+                if len(shapes) == 0:
+                    raise ValueError(f"Monitored contact '{name}': pattern {pattern!r} matches no shape.")
+                groups[shapes] |= 1 << (2 * i + side)
+        cls._contact_shape_groups = wp.array(groups, dtype=wp.int32, device=model.device)
+        cls._contact_latch = wp.zeros((model.world_count, len(monitored)), dtype=wp.int32, device=model.device)
 
     @staticmethod
     def _restore_rest_angles(model: Model, scale: float) -> None:
@@ -137,6 +269,70 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
         super()._step_solver(state_0, state_1, control, contacts, substep_dt)
         if cls._vbd_articulation_mask is not None:
             eval_ik(model, state_1, state_1.joint_q, state_1.joint_qd, mask=cls._vbd_articulation_mask)
+        if cls._contact_latch is not None:
+            cls._latch_contacts(model, state_1)
+
+    @classmethod
+    def _latch_contacts(cls, model: Model, state: State) -> None:
+        """Latch the monitored pairs that touch at the end of the substep.
+
+        The proxy pipelines detect contacts at the start of the substep within their detection gap; the gap of every
+        detected contact is evaluated again with the body poses of ``state``, the final poses of both bodies.
+        """
+        if cls._contact_buffers is None:
+            solver = NewtonManager._solver
+            proxies = PhysicsManager._cfg.solver_cfg.proxies
+            buffers = [solver.get_proxy_contacts(proxy.source, proxy.destination) for proxy in proxies]
+            cls._contact_buffers = [buffer for buffer in buffers if buffer is not None]
+            if not cls._contact_buffers:
+                raise RuntimeError("Monitored contacts need a proxy with its own collision pipeline.")
+        tolerance = PhysicsManager._cfg.solver_cfg.contact_touch_tolerance
+        for buffer in cls._contact_buffers:
+            wp.launch(
+                _latch_touching_pairs,
+                dim=buffer.rigid_contact_max,
+                inputs=[
+                    buffer.rigid_contact_count,
+                    buffer.rigid_contact_shape0,
+                    buffer.rigid_contact_shape1,
+                    buffer.rigid_contact_point0,
+                    buffer.rigid_contact_point1,
+                    buffer.rigid_contact_normal,
+                    buffer.rigid_contact_margin0,
+                    buffer.rigid_contact_margin1,
+                    model.shape_body,
+                    model.shape_world,
+                    cls._contact_shape_groups,
+                    state.body_q,
+                    tolerance,
+                    len(cls._contact_names),
+                ],
+                outputs=[cls._contact_latch],
+                device=model.device,
+            )
+
+    @classmethod
+    def contact_latch(cls, name: str) -> torch.Tensor:
+        """Whether the monitored pair ``name`` touched in a substep since its last :meth:`clear_contact_latch`.
+
+        Args:
+            name: Key of :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.monitored_contacts`.
+
+        Returns:
+            One flag per world (environment), shape [num_worlds].
+        """
+        if name not in cls._contact_names:
+            raise KeyError(f"Contact pair '{name}' is not monitored; monitored: {cls._contact_names}.")
+        return wp.to_torch(cls._contact_latch)[:, cls._contact_names.index(name)].bool()
+
+    @classmethod
+    def clear_contact_latch(cls, name: str) -> None:
+        """Clear the touch flags of the monitored pair ``name`` in every world.
+
+        Args:
+            name: Key of :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.monitored_contacts`.
+        """
+        wp.to_torch(cls._contact_latch)[:, cls._contact_names.index(name)] = 0
 
     @classmethod
     def set_proxy_particle_contacts(cls, world_ids: Sequence[int], enabled: bool) -> None:
@@ -216,8 +412,13 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _solver_specific_clear(cls) -> None:
-        """Release the articulation mask and the particle entries with the rest of the solver state."""
+        """Release the articulation mask, the particle entries and the contact monitor with the rest of the solver
+        state."""
         super()._solver_specific_clear()
         cls._vbd_articulation_mask = None
         cls._particle_entries = []
         cls._default_shape_flags = []
+        cls._contact_names = []
+        cls._contact_shape_groups = None
+        cls._contact_latch = None
+        cls._contact_buffers = None

@@ -16,11 +16,13 @@ from isaaclab.managers import CommandTerm, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import combine_frame_transforms
 
-from .frames import cloth_center_vel_b
+from .frames import cloth_center_pos_b, cloth_center_vel_b
 from .stages import (
     ClothDragStage,
     cloth_goal_xy_distance,
     ee_raised_node_distance,
+    goal_point_pos_b,
+    goal_point_vel_b,
     gripper_holds_cloth,
     gripper_holds_raised_node,
 )
@@ -46,9 +48,10 @@ class ClothTargetCommand(CommandTerm):
 
     Metrics, logged at reset:
 
-    * ``position_error_xy``: planar distance of the cloth's central node to the target [m].
+    * ``position_error_xy``: planar distance of the goal point (the cloth's central node, or the root of
+      :attr:`ClothTargetCommandCfg.goal_object_name`) to the target [m].
     * ``success``: one if the goal was reached during the episode, so its mean is the episode success rate.
-    * ``center_speed_at_target``: planar speed of the cloth's central node [m/s], averaged over the steps of the last
+    * ``center_speed_at_target``: planar speed of the goal point [m/s], averaged over the steps of the last
       :attr:`ClothTargetCommandCfg.speed_window` steps in which it was inside the success radius. Environments whose
       cloth was not inside in that window are left out; the metric is omitted when none was inside.
     * ``max_stage``: highest stage index reached during the episode.
@@ -58,6 +61,13 @@ class ClothTargetCommand(CommandTerm):
     * ``time_in_wrong_grasp``: time the gripper held the cloth without a raised node among the locked nodes [s].
     * ``time_to_grasp``, ``time_to_drag``, ``time_to_goal``: episode time at which the stage was first reached [s],
       averaged over the environments that reached it; omitted when none did.
+
+    With :attr:`ClothTargetCommandCfg.goal_object_name` set, also:
+
+    * ``object_center_offset``: planar distance of the object's root to the cloth's central node at the end of the
+      episode [m].
+    * ``object_slip_speed``: planar speed of the object relative to the cloth's central node [m/s], averaged over the
+      episode.
     """
 
     cfg: ClothTargetCommandCfg
@@ -95,6 +105,9 @@ class ClothTargetCommand(CommandTerm):
             self.metrics[f"time_in_{stage.name.lower()}"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["drops"] = torch.zeros(self.num_envs, device=self.device)
         self.metrics["time_in_wrong_grasp"] = torch.zeros(self.num_envs, device=self.device)
+        if cfg.goal_object_name is not None:
+            self.metrics["object_center_offset"] = torch.zeros(self.num_envs, device=self.device)
+            self.metrics["object_slip_speed"] = torch.zeros(self.num_envs, device=self.device)
 
         # ring buffers of the last speeds and whether the cloth was inside the success radius; all envs step together,
         # so one write index serves every env
@@ -195,7 +208,16 @@ class ClothTargetCommand(CommandTerm):
         self.update_goal_status()
         in_radius = self.metrics["position_error_xy"] < self.cfg.success_radius
         # planar speed, for the metric only: the pinched fold bobbing up and down moves the cloth without it sliding
-        speed = torch.linalg.norm(cloth_center_vel_b(self._env, self._cloth_cfg, self._robot_cfg)[:, :2], dim=-1)
+        speed = torch.linalg.norm(goal_point_vel_b(self._env, self.cfg)[:, :2], dim=-1)
+        if self.cfg.goal_object_name is not None:
+            center_pos = cloth_center_pos_b(self._env, self._cloth_cfg, self._robot_cfg)
+            offset = goal_point_pos_b(self._env, self.cfg)[:, :2] - center_pos[:, :2]
+            self.metrics["object_center_offset"] = torch.linalg.norm(offset, dim=-1)
+            center_vel = cloth_center_vel_b(self._env, self._cloth_cfg, self._robot_cfg)
+            slip = torch.linalg.norm(goal_point_vel_b(self._env, self.cfg)[:, :2] - center_vel[:, :2], dim=-1)
+            # running mean over the episode's steps
+            steps = self._env.episode_length_buf.clamp(min=1).float()
+            self.metrics["object_slip_speed"] += (slip - self.metrics["object_slip_speed"]) / steps
 
         self._speed_hist[:, self._hist_idx] = speed
         self._at_target_hist[:, self._hist_idx] = in_radius

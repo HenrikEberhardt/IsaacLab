@@ -156,6 +156,30 @@ def test_dwell_delays_the_ramp_and_restarts_after_a_drop():
     assert _call(term, env, params, step=150)["progress"] == pytest.approx(0.22)
 
 
+def test_resume_dwell_shortens_only_the_wait_after_a_pause():
+    """The first opening waits ``dwell_steps``; after a drop the ramp resumes once the average has stayed above the
+    threshold for ``resume_dwell_steps``, and a drop during that wait restarts it."""
+    env, success = _env(num_envs=8)
+    term, params = _hiding(env, dwell_steps=50, resume_dwell_steps=10)
+    success[:] = 1.0
+    _call(term, env, params, step=0)
+    _call(term, env, params, step=10)
+    assert _call(term, env, params, step=59)["progress"] == 0.0  # the first opening keeps the full wait
+    assert _call(term, env, params, step=80)["progress"] == pytest.approx(0.21)
+
+    success[:] = 0.0
+    assert _call(term, env, params, step=90)["progress"] == pytest.approx(0.21)
+    success[:] = 1.0
+    assert _call(term, env, params, step=100)["progress"] == pytest.approx(0.21)
+    success[:] = 0.0
+    assert _call(term, env, params, step=105)["progress"] == pytest.approx(0.21)  # dip within the wait: restart
+    success[:] = 1.0
+    _call(term, env, params, step=106)
+    assert _call(term, env, params, step=115)["progress"] == pytest.approx(0.21)
+    state = _call(term, env, params, step=116)
+    assert state["gate_open"] == 1.0 and state["progress"] == pytest.approx(0.22)
+
+
 def test_chained_block_waits_for_its_predecessor():
     env, success = _env(num_envs=8)
     first, first_params = _hiding(env, ramp_steps=64)  # 1/64 steps sum to exactly one

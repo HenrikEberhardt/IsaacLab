@@ -10,8 +10,9 @@ The state machine grasps the ``IsaacContrib-Drag-Cloth-Franka`` cloth at the rai
 the cloth's central node to the target (without raised nodes, at the node on that segment a few centimeters from the
 central node). It hovers above the node with a fully open gripper, the hand's long side tangent around the cloth
 center so its narrow side faces the center, lowers the open fingers onto the cloth and squeezes, so the cloth creases
-up between the jaws. It then drags the central node to the target, stops until the task counts the cloth as held
-there (the success needs the cloth held by a raised node), releases the cloth and rises. It is
+up between the jaws. It then drags the task's goal point (the cube on the cloth, or the central node without one) to
+the target, stops until the task counts the cloth as held there (the success needs the cloth held by a raised node),
+releases the cloth and rises. It is
 implemented in the kernel function `infer_state_machine`, which uses the `warp` library to run all environments in
 parallel on the GPU.
 
@@ -87,7 +88,7 @@ parser.add_argument(
     "--goal_tolerance",
     type=float,
     default=0.02,
-    help="Planar distance of the central node to the target at which the drag stops [m], at most the success radius.",
+    help="Planar distance of the goal point to the target at which the drag stops [m], at most the success radius.",
 )
 add_launcher_args(parser)
 # the task runs on Newton, so default to the Viser web viewer and let the task pick the device
@@ -220,6 +221,7 @@ def infer_state_machine(
     wrist_pos: wp.array(dtype=float),
     node_pos: wp.array(dtype=wp.vec3),
     center_pos: wp.array(dtype=wp.vec3),
+    goal_pos: wp.array(dtype=wp.vec3),
     target_pos: wp.array(dtype=wp.vec3),
     stage: wp.array(dtype=int),
     is_grasping: wp.array(dtype=int),
@@ -246,8 +248,8 @@ def infer_state_machine(
     tid = wp.tid()
     # retrieve state machine state
     state = sm_state[tid]
-    # planar vector from the cloth's central node to the target
-    to_target = wp.vec3(target_pos[tid][0] - center_pos[tid][0], target_pos[tid][1] - center_pos[tid][1], 0.0)
+    # planar vector from the goal point (cube or central node) to the target
+    to_target = wp.vec3(target_pos[tid][0] - goal_pos[tid][0], target_pos[tid][1] - goal_pos[tid][1], 0.0)
     target_distance = wp.length(to_target)
     # yaw change towards the current heading, before this step's update
     step_now = reachable_yaw_step(des_yaw[tid], ee_yaw[tid], wrist_pos[tid], wrist_lower, wrist_upper)
@@ -317,7 +319,7 @@ def infer_state_machine(
                     sm_state[tid] = DragSmState.RETREAT
             sm_wait_time[tid] = 0.0
     elif state == DragSmState.DRAG_CLOTH:
-        # advance the drag target the way the central node has to go, at the drag speed, leading the lagging arm by at
+        # advance the drag target the way the goal point has to go, at the drag speed, leading the lagging arm by at
         # most DRAG_MAX_LEAD
         step = wp.min(target_distance, drag_speed * dt[tid])
         des = des_ee_pos[tid]
@@ -474,6 +476,7 @@ class DragClothSm:
         wrist_pos: torch.Tensor,
         node_pos: torch.Tensor,
         center_pos: torch.Tensor,
+        goal_pos: torch.Tensor,
         target_pos: torch.Tensor,
         stage: torch.Tensor,
         is_grasping: torch.Tensor,
@@ -488,7 +491,9 @@ class DragClothSm:
             wrist_pos: Positions of the last arm joint [rad], shape [N].
             node_pos: Positions of the grasp node in the robot base frame [m], shape [N, 3].
             center_pos: Positions of the cloth's central node in the robot base frame [m], shape [N, 3].
-            target_pos: Targets of the central node in the robot base frame [m], shape [N, 3].
+            goal_pos: Positions of the point that must reach the target (the task's goal point) in the robot base
+                frame [m], shape [N, 3].
+            target_pos: Targets of the goal point in the robot base frame [m], shape [N, 3].
             stage: Task stage index (:class:`ClothDragStage`), shape [N].
             is_grasping: Whether the gripper action holds locked cloth nodes, shape [N].
             holding: Whether the task counts the cloth as held at the target (its success), shape [N].
@@ -512,6 +517,7 @@ class DragClothSm:
                 wp.from_torch(wrist_pos.float().contiguous(), wp.float32),
                 wp.from_torch(node_pos.contiguous(), wp.vec3),
                 wp.from_torch(center_pos.contiguous(), wp.vec3),
+                wp.from_torch(goal_pos.contiguous(), wp.vec3),
                 wp.from_torch(target_pos.contiguous(), wp.vec3),
                 wp.from_torch(stage.int().contiguous(), wp.int32),
                 wp.from_torch(is_grasping.int().contiguous(), wp.int32),
@@ -645,7 +651,7 @@ def main():
             points_to_base,
             top_down_yaw,
         )
-        from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import ClothDragStage
+        from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import ClothDragStage, goal_point_pos_b
 
         env = gym.make(args_cli.task, cfg=env_cfg)
         unwrapped = env.unwrapped
@@ -731,7 +737,7 @@ def main():
                         if unwrapped.termination_manager.get_term(name)[env_id]
                     ]
                     print(
-                        f"[INFO]: env {env_id}: episode ended ({', '.join(fired)}), {outcome}, central node"
+                        f"[INFO]: env {env_id}: episode ended ({', '.join(fired)}), {outcome}, goal point"
                         f" {last_distance[env_id].item() * 1e2:.1f} cm from the target, peak cloth node speed"
                         f" {peak_node_speed[env_id].item():.2f} m/s; restarting the state machine."
                     )
@@ -744,9 +750,10 @@ def main():
             # observations in the robot base frame
             ee_pos, ee_quat = ee_pose_in_base(unwrapped)
             center_pos = cloth_center_pos_b(unwrapped)
+            goal_pos = goal_point_pos_b(unwrapped, command.cfg)
             nodes_b = points_to_base(unwrapped, cloth.data.nodal_pos_w.torch)
             target_pos = command.command
-            distance = (target_pos[:, :2] - center_pos[:, :2]).norm(dim=-1)
+            distance = (target_pos[:, :2] - goal_pos[:, :2]).norm(dim=-1)
             succeeded |= command.holding & ~dones
             last_distance = torch.where(dones, last_distance, distance)
             node_speed = torch.nan_to_num(cloth.data.nodal_vel_w.torch.norm(dim=-1), nan=torch.inf).amax(dim=1)
@@ -770,6 +777,7 @@ def main():
                 robot.data.joint_pos.torch[:, wrist_joint_id],
                 nodes_b[rows, grasp_node],
                 center_pos,
+                goal_pos,
                 target_pos,
                 command.stage,
                 gripper.is_grasping,
