@@ -38,7 +38,9 @@ __all__ = [
     "ee_velocity_b",
     "edge_included",
     "interior_nodes",
+    "RefreshFrameSensors",
     "ResetClothWithRaisedNodes",
+    "ResetFromBank",
     "reset_cloth_planar_pose",
     "reset_franka_top_down",
     "reset_object_on_cloth_center",
@@ -61,6 +63,8 @@ __all__ = [
     "joint_vel_ratio",
     "nonfinite_state",
     "target_pos_ee",
+    "action_term_l2",
+    "action_term_rate_l2",
     "ee_object_distance",
     "object_center_offset_b",
     "object_pose_b",
@@ -86,6 +90,7 @@ from .curriculums import ActionRateCurriculum, ObservationHidingCurriculum
 from .events import (
     edge_included,
     interior_nodes,
+    RefreshFrameSensors,
     ResetClothWithRaisedNodes,
     reset_cloth_planar_pose,
     reset_franka_top_down,
@@ -114,8 +119,11 @@ from .observations import (
     target_pos_ee,
     termination_flag,
 )
+from .reset_bank import ResetFromBank
 from .rewards import (
     ClothDistanceProgress,
+    action_term_l2,
+    action_term_rate_l2,
     cloth_drag_success_bonus,
     cloth_between_fingers,
     cloth_goal_progress,

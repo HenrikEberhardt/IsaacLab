@@ -351,6 +351,45 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
             self._cloth.write_nodal_kinematic_target_to_sim_index(self.constraint.kinematic_targets())
             self._targets_dirty = False
 
+    def get_grasp_state(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return copies of the gripper and grasp state of the given environments, see :meth:`set_grasp_state`."""
+        if self.constraint is None:
+            raise RuntimeError("The grasp state needs the lock constraint (attach=True).")
+        state = {
+            "closed": self._closed[env_ids].clone(),
+            "finger_target": self._target[env_ids].clone(),
+            "grasp_tried": self._grasp_tried[env_ids].clone(),
+            "held_opening": self._held_opening[env_ids].clone(),
+        }
+        return state | self.constraint.get_state(env_ids)
+
+    def set_grasp_state(self, env_ids: torch.Tensor, state: dict[str, torch.Tensor]) -> None:
+        """Continue a stored gripper and grasp state in the given environments, after their reset.
+
+        Restores the closing latch, the rate-limited finger targets and the lock constraint (see
+        :meth:`~.cloth_grasp.ClothGraspConstraint.set_state`), and locks the grasped nodes where they are now. The next
+        :meth:`apply_actions` moves them with the hand.
+
+        Args:
+            env_ids: The environments, shape [N].
+            state: The state of :meth:`get_grasp_state`, each entry with the environments as first dimension.
+        """
+        if self.constraint is None:
+            raise RuntimeError("The grasp state needs the lock constraint (attach=True).")
+        closed = state["closed"]
+        self._closed[env_ids] = closed
+        self._raw_actions[env_ids, 0] = torch.where(closed, -1.0, 1.0)
+        self._target[env_ids] = state["finger_target"]
+        self._grasp_tried[env_ids] = state["grasp_tried"]
+        self._held_opening[env_ids] = state["held_opening"]
+        self.constraint.set_state(env_ids, state)
+        self._any_active = bool(self.constraint.active.any())
+        nodal_pos_w = self._cloth.data.nodal_pos_w.torch[env_ids]
+        locked = self.constraint.grasped[env_ids] & self.constraint.active[env_ids].unsqueeze(1)
+        targets = torch.cat([nodal_pos_w, (~locked).float().unsqueeze(-1)], dim=-1)
+        self._cloth.write_nodal_kinematic_target_to_sim_index(targets, env_ids=env_ids)
+        self._targets_dirty = False
+
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         """Reset selected grippers, release attached nodes and restore cloth contacts."""
         super().reset(env_ids)

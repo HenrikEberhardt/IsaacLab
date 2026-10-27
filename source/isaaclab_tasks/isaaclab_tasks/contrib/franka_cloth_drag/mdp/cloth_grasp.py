@@ -156,6 +156,36 @@ class ClothGraspConstraint:
             self._set_gripper_contacts(env_ids.tolist(), enabled=True)
             self.contacts_disabled[env_ids] = False
 
+    def get_state(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
+        """Return copies of the grasp state of the given environments, see :meth:`set_state`."""
+        return {
+            "active": self.active[env_ids].clone(),
+            "grasped": self.grasped[env_ids].clone(),
+            "grasp_offsets": self.grasp_offsets[env_ids].clone(),
+            "squeeze_progress": self.squeeze_progress[env_ids].clone(),
+            "contacts_disabled": self.contacts_disabled[env_ids].clone(),
+        }
+
+    def set_state(self, env_ids: torch.Tensor, state: dict[str, torch.Tensor]):
+        """Continue the grasp state of :meth:`get_state` in the given environments.
+
+        Environments whose stored contacts were disabled stop colliding with the cloth. The others keep the contacts of
+        the current state; :meth:`restore_contacts` turns them on after a reset.
+
+        Args:
+            env_ids: The environments, shape [N].
+            state: ``active``, ``grasped`` [N, num_nodes], ``grasp_offsets`` in the EE frame [m] [N, num_nodes, 3],
+                ``squeeze_progress`` and ``contacts_disabled``, each with the environments as first dimension.
+        """
+        self.active[env_ids] = state["active"]
+        self.grasped[env_ids] = state["grasped"]
+        self.grasp_offsets[env_ids] = state["grasp_offsets"]
+        self.squeeze_progress[env_ids] = state["squeeze_progress"]
+        disable = env_ids[state["contacts_disabled"] & ~self.contacts_disabled[env_ids]]
+        if len(disable) > 0 and self._set_gripper_contacts is not None:
+            self._set_gripper_contacts(disable.tolist(), enabled=False)
+            self.contacts_disabled[disable] = True
+
     def advance_squeeze(self, pressing: torch.Tensor):
         """Ramp the squeeze of the holding environments in or out by one step.
 

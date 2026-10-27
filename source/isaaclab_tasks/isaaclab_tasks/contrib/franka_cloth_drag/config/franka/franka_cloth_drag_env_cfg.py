@@ -89,7 +89,8 @@ class PhysicsCfg(NewtonCfg):
                 solver_cfg=VBDSolverCfg(
                     iterations=10,
                     particle_enable_self_contact=False,
-                    rigid_compliant_alm=True,  # compliant ALM (augmented Lagrangian method) for VBD rigid-rigid interaction (gripper-cube-table)
+                    # compliant ALM for VBD rigid-rigid interaction (gripper-cube-table)
+                    rigid_compliant_alm=True,
                     rigid_body_particle_contact_buffer_size=1024,  # rigid-cloth
                     rigid_body_contact_buffer_size=64,  # rigid-rigid
                     friction_epsilon=1.0e-2,  # dynamic-static friction threshold
@@ -171,7 +172,6 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             variants={"Physics": "mujoco", "Colliders": "gripper_only"},
             articulation_props=NewtonArticulationCfg(self_collision_enabled=False),
             rigid_props=[MujocoRigidBodyCfg(gravcomp=1.0)],
-
             # Material of all gripper colliders (finger pads and hand capsule), replaces the asset's material
             physics_material=RigidBodyMaterialBaseCfg(
                 dynamic_friction=1.5,  # finger friction
@@ -210,11 +210,11 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             physics_material=NewtonSurfaceDeformableBodyMaterialCfg(
                 density=0.2,  # areal density [kg/m^2], real cotton 0.12-0.3
                 particle_radius=0.002,
-                tri_ke=1e2, #5e2
-                tri_ka=2e3, #5e2
-                tri_kd=1e-3, #1e-3
-                edge_ke=0.7, #1.0
-                edge_kd=1e-3, #1e-3
+                tri_ke=1e2,  # 5e2
+                tri_ka=2e3,  # 5e2
+                tri_kd=1e-3,  # 1e-3
+                edge_ke=0.7,  # 1.0
+                edge_kd=1e-3,  # 1e-3
             ),
         ),
     )
@@ -231,9 +231,8 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             mass_props=sim_utils.MassPropertiesCfg(mass=0.1),  # [kg]
             collision_props=sim_utils.CollisionPropertiesCfg(),
             physics_material=RigidBodyMaterialBaseCfg(
-                dynamic_friction=1.5, # total friction: sqrt(soft_contact_mu * cube mu)
+                dynamic_friction=1.5,  # total friction: sqrt(soft_contact_mu * cube mu)
             ),
-
         ),
     )
 
@@ -324,13 +323,11 @@ GRIPPER_ACTION_CFG = mdp.ClothGraspActionCfg(
     # Binary gripper action: open <0 or close >0 (e.g sign from distance)
     asset_name="robot",
     joint_names=["panda_finger_joint1"],
-
     # Ensure controller respects joint range and velocity limits
     open_command_expr={"panda_finger_joint1": 0.03},
     close_command_expr={"panda_finger_joint1": 0.005},  # gap keeps the pads
     joint_vel_factor=0.75,  # closing speed as fraction of hardware max speed
     latch_threshold=0.5,  # action threshold to change from open to close
-
     # Grasping parameters
     release_travel=0.002,  # reopen after failed grasp to retry
     squeeze_steps=5,  # Squeezing Model
@@ -344,7 +341,6 @@ class JointDeltaActionsCfg:
     arm_action = mdp.LimitedRelativeJointPositionActionCfg(
         asset_name="robot",
         joint_names=["panda_joint.*"],
-
         # Ensure controller respects joint range and velocity limits
         scale=0.03,  # action scale
         joint_range_margin=0.05,  # reduce range by [rad] on both sides
@@ -367,9 +363,8 @@ class EEDeltaActionsCfg:
             ik_method="dls",  # "Damped Least Squares" => stable near singularities
             ik_params={"lambda_val": 0.1},  # Damping factor
         ),
-        
         # Ensure controller respects joint range and velocity limits
-        scale_trans=0.03,  # action scale
+        scale_trans=0.025,  # [m] per step at action 1 (0.75 m/s); 0.03 left the mean action saturated 75 % of the time
         scale_rot=0.2,
         limit_operation_space=True,  # limit end-effector to reasonable task space
         joint_vel_factor=0.9,  # limit commanded veloctiy by [factor] of hardware max
@@ -544,9 +539,8 @@ class CommandsCfg:
         success_radius=0.04,  # Radius [m] around the target position for success
         hold_time=0.75,  # Time [s] to hold the cube in the target zone for success
         max_ee_height=0.05,  # success only with low EE (maybe delete this)
-        # Success needs a raised node locked during the whole hold (pushing or dragging with different nodes is not enough)
+        # Success needs a raised node locked during the hold; pushing or dragging with different nodes is not enough.
         debug_vis=True,  # Target marker
-        
         # Task stage transitions
         approach_radius=0.04,  # APPROACH -> GRASP: EE frame closer than [m] to a raised node (any node if none)
         grasp_min_nodes=2,  # GRASP -> DRAG: a grasp locking at least this many nodes to the EE, one of them raised
@@ -555,6 +549,33 @@ class CommandsCfg:
 
 
 # ------------------- Event Terms -------------------
+
+
+@configclass
+class ResetFromBankCfg(PresetCfg):
+    """Reset-state presets: default resets only, or the default reset and the bank's stored states, each drawn
+    uniformly inside its bucket."""
+
+    # "env.events.reset_from_bank=off" Default resets only (the term just logs the success per reset source)
+    off = EventTerm(
+        func=mdp.ResetFromBank,
+        mode="reset",
+        params={"bank_path": None, "mode_probabilities": {"default": 1.0}, "command_name": "cloth_target"},
+    )
+
+    # "env.events.reset_from_bank=uniform" Share of the resets per mode (default reset or a stored state of the bucket:
+    # pre-grasp, fresh grasp before the drag, goal-zone edge); states drawn uniformly inside each bucket
+    uniform = EventTerm(
+        func=mdp.ResetFromBank,
+        mode="reset",
+        params={
+            "bank_path": "logs/reset_banks/bank_5000.pt",  # relative to the working directory or the repository root
+            "mode_probabilities": {"default": 0.4, "grasp": 0.35, "drag": 0.15, "goal": 0.10},
+            "command_name": "cloth_target",
+        },
+    )
+
+    default = uniform
 
 
 @configclass
@@ -606,6 +627,18 @@ class EventCfg:
         },
     )
 
+    # Reset states from the offline bank (implementation_log/reset_states.md), after the resets above: it overwrites
+    # them. "env.events.reset_from_bank=uniform" selects the bank; also logs the success per reset source
+    reset_from_bank: ResetFromBankCfg = ResetFromBankCfg()
+
+    # EE frame sensor refresh after the resets (Newton updates it only in a physics step, so the first observation
+    # and grasp check would see the previous episode's pose); runs after every reset event, whatever its position
+    refresh_frame_sensors = EventTerm(
+        func=mdp.RefreshFrameSensors,
+        mode="reset",
+        params={"sensor_names": ["ee_frame"]},
+    )
+
 
 @configclass
 class RewardsCfg:
@@ -632,8 +665,11 @@ class RewardsCfg:
         params={"term_keys": ["cloth_out_of_bounds", "ee_below_table", "cube_fell", "gripper_cube_contact"]},
         weight=-200.0,
     )
-    
-    pen_action_rate = RewTerm(func=mdp.action_rate_l2, weight=-1e-3)
+
+    # Arm actions only (dx, dy, dz, dyaw): the binary gripper action's raw value changes without moving anything.
+    # The weight is the curriculum's start weight.
+    pen_action_magnitude = RewTerm(func=mdp.action_term_l2, params={"action_name": "arm_action"}, weight=-1e-3)
+    pen_action_rate = RewTerm(func=mdp.action_term_rate_l2, params={"action_name": "arm_action"}, weight=-1e-2)
     # Steep penalty only within 0.1 rad of the action's joint bounds (wrist: the yaw window), zero elsewhere; arm only
     pen_joint_limit_barrier = RewTerm(
         func=mdp.joint_limit_barrier,
@@ -709,7 +745,7 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    """Curriculum terms for the MDP, run one after another: stage hiding, grasp-flag hiding, action rate."""
+    """Curriculum terms for the MDP: stage hiding first, then grasp-flag hiding and the action rate in parallel."""
 
     # 1. Hide actor observation of current task stage (easy)
     stage_hiding = CurrTerm(
@@ -719,13 +755,14 @@ class CurriculumCfg:
             "success_threshold": 0.80,  # success ratio; the cube task levels off at about 0.87-0.89
             "dwell_steps": 2400,  # 100 iterations above the threshold before the ramp starts
             "resume_dwell_steps": 240,  # 10 iterations back above the threshold before a paused ramp continues
-            "ramp_steps": 4800,  # 200 iterations at 24 steps/iteration
+            "ramp_steps": 3600,  # 150 iterations at 24 steps/iteration
             "ema_episodes": 2048,
             "initial_progress": 0.1,  # stage hidden in 10 % of episodes from the start, never relied on
+            "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
         },
     )
 
-    # 2. Hide actor grasp flag as this is unkown on real Franka (the DRAG stage would reveal the grasp)
+    # 2. Hide actor grasp flag as this is unknown on real Franka (the DRAG stage would reveal the grasp)
     grasp_hiding = CurrTerm(
         func=mdp.ObservationHidingCurriculum,
         params={
@@ -733,14 +770,34 @@ class CurriculumCfg:
             "success_threshold": 0.80,
             "dwell_steps": 600,  # 25 iterations
             "resume_dwell_steps": 240,  # 10 iterations
-            "ramp_steps": 6000,  # 250 iterations
+            "ramp_steps": 3000,  # 125 iterations
             "ema_episodes": 2048,
             "after": "stage_hiding",
-            "initial_progress": 0.0,
+            "initial_progress": 0.1,  # hidden in 10 % of episodes from the start (from 0 %, success fell 0.06-0.09)
+            "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
         },
     )
 
-    # 3. Increase action rate penalty for smoother trajectories once the actor sees no privileged information
+    # 3. Penalize sustained full-range arm actions once the stage is hidden. At full weight, saturated motion for a
+    # typical 5-10 s successful episode costs about 2-6 points against the 100-point success bonus.
+    action_magnitude = CurrTerm(
+        func=mdp.ActionRateCurriculum,
+        params={
+            "command_name": "cloth_target",
+            "success_threshold": 0.80,
+            "dwell_steps": 600,  # 25 iterations
+            "resume_dwell_steps": 240,  # 10 iterations
+            "ramp_steps": 7200,  # 300 iterations
+            "reward_term": "pen_action_magnitude",
+            "final_weight": -0.2,
+            "ema_episodes": 2048,
+            "after": "stage_hiding",  # in parallel with grasp-flag hiding and action-rate regularization
+            "initial_progress": 0.0,
+            "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
+        },
+    )
+
+    # 4. Increase action rate penalty for smoother trajectories, alongside grasp-flag hiding once the stage is hidden
     action_rate = CurrTerm(
         func=mdp.ActionRateCurriculum,
         params={
@@ -750,10 +807,11 @@ class CurriculumCfg:
             "resume_dwell_steps": 240,  # 10 iterations
             "ramp_steps": 7200,  # 300 iterations
             "reward_term": "pen_action_rate",
-            "final_weight": -1.0,  # ~5-10 % of the positive return, as in the lift tasks
+            "final_weight": -0.6,  # -1.0 was ~12 % of the success reward and raised touch terminations
             "ema_episodes": 2048,
-            "after": "grasp_hiding",
+            "after": "stage_hiding",  # in parallel with grasp-flag hiding
             "initial_progress": 0.0,
+            "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
         },
     )
 
@@ -788,7 +846,8 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.dt = 1.0 / 120
         self.sim.render_interval = self.decimation
         self.sim.physics = PhysicsCfg()
-        
+
+        """
         # Setup Visulaizer settings
         self.sim.visualizer_cfgs = [
             KitVisualizerCfg(
@@ -810,10 +869,10 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
                 eye=(0.5 + 3.18, -3.18, 7.59),
                 lookat=(0.5, 0.0, -0.2),
                 focal_length=23.5,
-                port=8750,  # Change default port to avoid clash with other users on Comino
+                port=8755,  # Change default port to avoid clash with other users on Comino
             ),
         ]
-        
+        """
 
     def play_mode(self):
         """Play with full curriculum progress"""
@@ -826,3 +885,8 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
                 self.curriculum.grasp_hiding.params["initial_progress"] = 1.0
             if self.curriculum.action_rate is not None:
                 self.curriculum.action_rate.params["initial_progress"] = 1.0
+
+        # Play and evaluation start from the task's default resets only, never from stored reset states
+        if self.events.reset_from_bank is not None:
+            self.events.reset_from_bank.params["bank_path"] = None
+            self.events.reset_from_bank.params["mode_probabilities"] = {"default": 1.0}

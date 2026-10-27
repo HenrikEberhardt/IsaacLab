@@ -207,3 +207,29 @@ def test_chain_skips_disabled_blocks_and_rejects_unknown_ones():
     term, params = _action_rate(env, after="grasp_hiding")
     with pytest.raises(ValueError, match="no block 'grasp_hiding'"):
         _call(term, env, params, step=2)
+
+
+def test_success_gate_counts_only_default_starts():
+    """With ``reset_term``, episodes started from stored reset states do not move the success average."""
+    env, success = _env(num_envs=4)
+    rows = torch.tensor([-1, 3, 5, -1])  # bank rows the finished episodes started from, -1 for a default reset
+    reset_term = SimpleNamespace(func=SimpleNamespace(rows=rows))
+    env.event_manager = SimpleNamespace(
+        active_terms={"reset": ["reset_from_bank"]}, get_term_cfg=lambda name: reset_term
+    )
+    gated, gated_params = _hiding(env, reset_term="reset_from_bank")
+    plain, plain_params = _hiding(env)
+    _call(gated, env, gated_params, step=0)
+    _call(plain, env, plain_params, step=0)
+
+    success[:] = torch.tensor([0.0, 1.0, 1.0, 0.0])  # the bank episodes succeeded, the default ones failed
+    assert _call(gated, env, gated_params, step=1)["success_ema"] == 0.0
+    assert _call(plain, env, plain_params, step=1)["success_ema"] == pytest.approx(0.5)
+
+    # a reset of bank episodes only leaves the average unchanged
+    success[:] = 1.0
+    assert _call(gated, env, gated_params, step=2, env_ids=torch.tensor([1, 2]))["success_ema"] == 0.0
+
+    # without the reset event every episode counts
+    env.event_manager.active_terms = {"reset": []}
+    assert _call(gated, env, gated_params, step=3, env_ids=torch.tensor([1, 2]))["success_ema"] == 1.0

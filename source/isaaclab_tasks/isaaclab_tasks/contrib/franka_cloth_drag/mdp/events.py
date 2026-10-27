@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -243,15 +244,39 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
             asset_cfg: Scene entity of the cloth.
         """
         cloth: DeformableObject = env.scene[asset_cfg.name]
+        raised = self._node_set[self._draw_spread(len(env_ids), num_raised_nodes, min_spacing)]
+        shaped = self.set_raised_nodes(env_ids, raised, node_raise_height)
+        displacement = shaped - self._rest_pos
+        nodal_state = _planar_pose_nodal_state(cloth, env_ids, position_range, yaw_range, displacement)
+        cloth.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids)
+
+    def set_raised_nodes(
+        self, env_ids: torch.Tensor, raised: torch.Tensor, node_raise_height: float | None = None
+    ) -> torch.Tensor:
+        """Set the cloth rest shape of the given environments around the given raised nodes.
+
+        Records ``raised`` in :attr:`raised_node_ids` and sets the rest shape as the class docstring describes, without
+        moving the cloth. A reset to a stored cloth state uses this to restore the bumps of its raised nodes.
+
+        Args:
+            env_ids: The environment indices, shape [N].
+            raised: Ids of the nodes to raise, sorted, shape [N, num_raised_nodes].
+            node_raise_height: Height of the raised nodes above the rest of the cloth [m]. Defaults to the term's
+                ``node_raise_height`` parameter.
+
+        Returns:
+            The default nodes about their mean with the raised nodes lifted [m], shape [N, num_nodes, 3].
+        """
+        if node_raise_height is None:
+            node_raise_height = self.cfg.params["node_raise_height"]
         ids = {"edge_rest_angle": self._edge_ids, "edge_rest_length": self._edge_ids}
         ids |= {"tri_poses": self._tri_ids, "tri_areas": self._tri_ids}
         if self._base_rest is None:
             self._base_rest = {name: self._physics.get_cloth_rest(name, ids[name]) for name in ids}
         base = {name: values[env_ids] for name, values in self._base_rest.items()}
         rest_pos = self._rest_pos.expand(len(env_ids), -1, -1)
-        raised = self._node_set[self._draw_spread(len(env_ids), num_raised_nodes, min_spacing)]
         self.raised_node_ids[env_ids] = raised
-        is_raised = torch.zeros(len(env_ids), len(self._rest_pos), dtype=torch.bool, device=env.device)
+        is_raised = torch.zeros(len(env_ids), len(self._rest_pos), dtype=torch.bool, device=rest_pos.device)
         is_raised.scatter_(1, raised, True)
         shaped = rest_pos.clone()
         shaped[..., 2] += node_raise_height * is_raised
@@ -268,9 +293,7 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
         rest["edge_rest_length"] = torch.where(edge_raised, lengths, base["edge_rest_length"])
         for name, values in rest.items():
             self._physics.set_cloth_rest(name, ids[name][env_ids], values)
-
-        nodal_state = _planar_pose_nodal_state(cloth, env_ids, position_range, yaw_range, shaped - rest_pos)
-        cloth.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids)
+        return shaped
 
     def _draw_spread(self, num_envs: int, num_drawn: int, min_spacing: float) -> torch.Tensor:
         """Draw ``num_drawn`` candidate indices per environment, at least ``min_spacing`` [m] apart where possible.
@@ -292,6 +315,49 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
                 chosen[rows, candidate] |= take
                 blocked |= take.unsqueeze(1) & (self._candidate_dist[candidate] < min_spacing)
         return chosen.nonzero()[:, 1].view(num_envs, num_drawn)
+
+
+class RefreshFrameSensors(ManagerTermBase):
+    """Refresh frame transformer sensors at the end of every reset, so they show the poses after the reset.
+
+    On Newton, a frame transformer copies the transforms of a Newton frame-transform sensor, which Newton only updates
+    at the end of a physics step: :meth:`NewtonManager.forward` refreshes the body poses after a state write, but not
+    that sensor. Until the next step, the frame transformers of reset environments would keep the previous episode's
+    poses, in the first observation, the first stage update and the grasp selection of the first gripper action (see
+    ``implementation_log/reset_states.md``).
+
+    The refresh runs in the term's :meth:`reset`, which the event manager calls after all reset events and the
+    manager resets, so the term's position among the reset events does not matter. Calling the term does nothing.
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        """Look up the frame transformers to refresh."""
+        super().__init__(cfg, env)
+        self._sensors = [env.scene[name] for name in cfg.params.get("sensor_names", ("ee_frame",))]
+
+    def __call__(self, env: ManagerBasedEnv, env_ids: torch.Tensor, sensor_names: Sequence[str] = ("ee_frame",)):
+        """Do nothing: the refresh runs in :meth:`reset`, once every reset has written its state.
+
+        Args:
+            env: The environment instance.
+            env_ids: The environment indices to reset.
+            sensor_names: Scene names of the frame transformers to refresh.
+        """
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Update the Newton frame-transform sensors from the reset state and mark the frame transformers outdated."""
+        # private: Newton has no public way to update its sensors outside a step; empty without Newton sensors
+        newton_sensors = NewtonManager._newton_frame_transform_sensors
+        if not newton_sensors:
+            return
+        # forward kinematics of the written joint states, then the sensors from the refreshed body poses
+        NewtonManager.forward()
+        state = NewtonManager.get_state_0()
+        for sensor in newton_sensors:
+            sensor.update(state)
+        # the frame transformers recompute lazily from the updated transforms at their next read
+        for sensor in self._sensors:
+            sensor.reset(env_ids)
 
 
 def _cloth_elements_per_env(

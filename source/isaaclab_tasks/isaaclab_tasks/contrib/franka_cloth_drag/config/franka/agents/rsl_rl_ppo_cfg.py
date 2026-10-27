@@ -11,11 +11,22 @@ from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPp
 
 
 @configclass
-class BoundedGaussianDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
-    """Gaussian action distribution whose standard deviation is clamped to a range."""
+class BoundedHeteroscedasticGaussianDistributionCfg(RslRlMLPModelCfg.HeteroscedasticGaussianDistributionCfg):
+    """Gaussian action distribution whose standard deviation is predicted per state and bounded smoothly to a range.
 
-    std_range: tuple[float, float] = (1.0e-6, 1.0e6)
-    """Range (min, max) the standard deviation is clamped to, passed to rsl_rl's ``GaussianDistribution``."""
+    See ``SigmoidBoundedHeteroscedasticGaussianDistribution`` in
+    :mod:`isaaclab_tasks.contrib.franka_cloth_drag.distributions`.
+    Policies trained with the former state-independent standard deviation play with the override
+    ``agent.actor.distribution_cfg.class_name=isaaclab_tasks.contrib.franka_cloth_drag.distributions:SigmoidBoundedGaussianDistribution``.
+    """
+
+    class_name: str = (
+        "isaaclab_tasks.contrib.franka_cloth_drag.distributions:SigmoidBoundedHeteroscedasticGaussianDistribution"
+    )
+    """The distribution class, resolved by rsl_rl."""
+
+    std_range: tuple[float, float] = (0.2, 1.0)
+    """Bounds (min, max) of the standard deviation."""
 
 
 @configclass
@@ -37,8 +48,12 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         activation="elu",
         obs_normalization=True,
         # Std floor keeps exploring (0.001 entropy let it collapse to 0.15), ceiling at the action clip avoids
-        # bang-bang training (0.006 entropy grew it to 3-6 past the clip)
-        distribution_cfg=BoundedGaussianDistributionCfg(init_std=0.5, std_type="scalar", std_range=(0.2, 1.0)),
+        # bang-bang training (0.006 entropy grew it to 3-6 past the clip); the sigmoid bound keeps a gradient at the
+        # ceiling, where the hard clamp of run 2026-10-26_17-27-14 left 4 of 5 stds stuck at 1.0. The std is predicted
+        # per state, so each stage can explore differently instead of sharing one compromise std
+        distribution_cfg=BoundedHeteroscedasticGaussianDistributionCfg(
+            init_std=0.5, std_type="scalar", std_range=(0.2, 1.0)
+        ),
     )
 
     critic = RslRlMLPModelCfg(
@@ -51,7 +66,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,  # exploration as in the lift tasks; the std range bounds its growth
+        entropy_coef=0.005, 
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=1.0e-3,

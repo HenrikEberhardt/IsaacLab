@@ -156,11 +156,10 @@ class ClothTargetCommand(CommandTerm):
 
         Success termination runs before command computation. Both call this method so termination, reward and
         logged success agree on the current physical state without counting the same control step twice.
-        Episode step zero is excluded because frame sensors may still contain pre-reset poses.
         """
         distance = cloth_goal_xy_distance(self._env, self.target_pos_b, self.cfg)
         step = self._env.episode_length_buf
-        fresh = (step > 0) & (step != self._last_hold_step)
+        fresh = step != self._last_hold_step
         at_target = distance < self.cfg.success_radius
         # the hold counts only while a raised node is locked: a pushed cloth or one held by its edge does not count
         at_target &= gripper_holds_raised_node(self._env, self.cfg)
@@ -199,6 +198,20 @@ class ClothTargetCommand(CommandTerm):
         self._dropped[env_ids] = False
         self._time_to_stage[env_ids] = -1.0
         return extras
+
+    def set_restored(self, env_ids: torch.Tensor, target_pos_b: torch.Tensor, stage: torch.Tensor) -> None:
+        """Continue a stored reset state in the given environments, after their reset.
+
+        Sets the stored target and the stored stage. The stage holds until the first update recomputes it from the
+        restored state, e.g. for the first observation after :meth:`~isaaclab.envs.ManagerBasedEnv.reset`.
+
+        Args:
+            env_ids: The environments, shape [N].
+            target_pos_b: Targets in the robot's root frame [m], shape [N, 3].
+            stage: :class:`~.stages.ClothDragStage` indices, shape [N].
+        """
+        self.target_pos_b[env_ids] = target_pos_b
+        self._stage[env_ids] = stage
 
     """
     Implementation specific functions.
@@ -248,9 +261,6 @@ class ClothTargetCommand(CommandTerm):
         # releasing the cloth while dragging falls back to APPROACH; the next update re-applies the conditions
         self._dropped = (self._stage >= int(ClothDragStage.DRAG)) & ~pinched
         stage[self._dropped] = int(ClothDragStage.APPROACH)
-        # in the step of a reset the poses are still the pre-reset ones until the next physics step, so a hand that
-        # ended the last episode at the cloth would count as near; a fresh episode always starts in APPROACH
-        stage[self._env.episode_length_buf == 0] = int(ClothDragStage.APPROACH)
 
         self._time_in_stage = torch.where(stage == self._stage, self._time_in_stage + dt, 0.0)
         self._stage = stage

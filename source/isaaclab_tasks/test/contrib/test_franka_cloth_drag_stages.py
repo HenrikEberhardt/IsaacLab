@@ -259,3 +259,59 @@ def test_contact_latch_marks_only_touching_monitored_pairs():
         device=device,
     )
     assert latch.numpy()[:, 0].tolist() == [1, 0]
+
+
+def test_action_term_penalties_count_only_the_named_term():
+    from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import action_term_l2, action_term_rate_l2
+
+    # arm term (4 dims) then gripper term (1 dim); the gripper changes a lot, the arm a little
+    manager = SimpleNamespace(
+        active_terms=["arm_action", "gripper_action"],
+        action_term_dim=[4, 1],
+        prev_action=torch.tensor([[0.0, 0.0, 0.0, 0.0, -1.0]]),
+        action=torch.tensor([[0.1, 0.0, -0.2, 0.0, 1.0]]),
+    )
+    env = SimpleNamespace(action_manager=manager)
+    assert torch.allclose(action_term_l2(env, "arm_action"), torch.tensor([0.05]))
+    assert torch.allclose(action_term_l2(env, "gripper_action"), torch.tensor([1.0]))
+    assert torch.allclose(action_term_rate_l2(env, "arm_action"), torch.tensor([0.05]))
+    assert torch.allclose(action_term_rate_l2(env, "gripper_action"), torch.tensor([4.0]))
+
+
+def test_sigmoid_bounded_std_stays_in_range_and_keeps_a_gradient():
+    from isaaclab_tasks.contrib.franka_cloth_drag.distributions import SigmoidBoundedGaussianDistribution
+
+    dist = SigmoidBoundedGaussianDistribution(3, init_std=0.5, std_range=(0.2, 1.0))
+    dist.update(torch.zeros(2, 3))
+    assert torch.allclose(dist.std, torch.full((2, 3), 0.5))
+    with torch.no_grad():
+        dist.std_raw[:] = torch.tensor([-4.0, 0.0, 4.0])  # near the floor, middle, near the ceiling
+    dist.update(torch.zeros(2, 3))
+    assert ((dist.std > 0.2) & (dist.std < 1.0)).all()
+    dist.entropy.sum().backward()
+    assert (dist.std_raw.grad > 0.0).all()  # the entropy bonus can still move every std, the clamp's could not
+
+
+def test_heteroscedastic_sigmoid_std_starts_at_init_depends_on_state_and_keeps_a_gradient():
+    from rsl_rl.modules import MLP
+
+    from isaaclab_tasks.contrib.franka_cloth_drag.distributions import (
+        SigmoidBoundedHeteroscedasticGaussianDistribution,
+    )
+
+    torch.manual_seed(0)
+    dist = SigmoidBoundedHeteroscedasticGaussianDistribution(3, init_std=0.5, std_range=(0.2, 1.0))
+    mlp = MLP(4, dist.input_dim, [8], "elu")
+    dist.init_mlp_weights(mlp)
+    obs = torch.randn(5, 4)
+    output = mlp(obs)
+    dist.update(output)
+    assert torch.allclose(dist.std, torch.full((5, 3), 0.5))  # the same std in every state at the start
+    assert torch.equal(dist.deterministic_output(output), dist.mean)
+    with torch.no_grad():
+        mlp[-2].weight[3:] = 3.0 * torch.randn(3, 8)  # std head pushing towards both bounds, per state
+    dist.update(mlp(obs))
+    assert ((dist.std > 0.2) & (dist.std < 1.0)).all()
+    assert (dist.std.max(dim=0).values - dist.std.min(dim=0).values > 0.1).all()  # the std depends on the state
+    dist.entropy.sum().backward()
+    assert (mlp[-2].bias.grad[3:] > 0.0).all()  # the entropy bonus can still move the std head near the bounds

@@ -300,6 +300,41 @@ def gripper_closed_on_nothing(
     return _stage_gate(penalty, command.stage, stages, saturate=False)
 
 
+def action_term_l2(env: ManagerBasedRLEnv, action_name: str) -> torch.Tensor:
+    """Squared magnitude of one action term's actions, summed over its dimensions.
+
+    Like :func:`isaaclab.envs.mdp.action_l2`, restricted to the term ``action_name``. For the arm term, this leaves out
+    the binary gripper action and penalizes sustained full-range motion in addition to changes between actions.
+
+    Args:
+        env: The environment.
+        action_name: Name of the action term.
+    """
+    manager = env.action_manager
+    index = manager.active_terms.index(action_name)
+    start = sum(manager.action_term_dim[:index])
+    end = start + manager.action_term_dim[index]
+    return torch.sum(torch.square(manager.action[:, start:end]), dim=1)
+
+
+def action_term_rate_l2(env: ManagerBasedRLEnv, action_name: str) -> torch.Tensor:
+    """Squared change of one action term's actions between the last two steps, summed over its dimensions.
+
+    Like :func:`isaaclab.envs.mdp.action_rate_l2`, restricted to the term ``action_name``. For the arm term, this leaves
+    out the binary gripper action, whose raw value changes freely without moving anything until it crosses the latch
+    threshold.
+
+    Args:
+        env: The environment.
+        action_name: Name of the action term.
+    """
+    manager = env.action_manager
+    index = manager.active_terms.index(action_name)
+    start = sum(manager.action_term_dim[:index])
+    end = start + manager.action_term_dim[index]
+    return torch.sum(torch.square(manager.action[:, start:end] - manager.prev_action[:, start:end]), dim=1)
+
+
 def joint_limit_barrier(
     env: ManagerBasedRLEnv, action_name: str, margin: float, asset_cfg: SceneEntityCfg = SceneEntityCfg("robot")
 ) -> torch.Tensor:
