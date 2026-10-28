@@ -140,6 +140,12 @@ class ClothTargetCommand(CommandTerm):
         return self._dropped
 
     @property
+    def time_to_stage(self) -> torch.Tensor:
+        """Episode time at which each :class:`~.stages.ClothDragStage` was first reached [s], negative while not
+        reached. Shape is (num_envs, num_stages)."""
+        return self._time_to_stage
+
+    @property
     def holding(self) -> torch.Tensor:
         """Whether the cloth's central node has stayed within :attr:`ClothTargetCommandCfg.success_radius` of the
         target for :attr:`ClothTargetCommandCfg.hold_time` in a row while the gripper holds the cloth by a raised node,

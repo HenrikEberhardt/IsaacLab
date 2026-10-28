@@ -14,7 +14,9 @@ import torch
 from isaaclab.managers import EventTermCfg
 
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp import reset_bank
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import ClothDragStage
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_states.bank import (
+    BUCKET_NAMES,
     SCHEMA_VERSION,
     ResetBank,
     check_mode_probabilities,
@@ -139,15 +141,21 @@ def test_reset_modes_sample_their_buckets():
 
 
 def _reset_term(monkeypatch, bank, success):
-    """A ResetFromBank term on a fake environment; the restores are no-ops, the finished episodes' success is set."""
+    """A ResetFromBank term on a fake environment; the restores are no-ops. The finished episodes' outcome is set in
+    ``success``, the command's ``reached_*`` metrics and ``time_to_stage`` and the environment's episode length."""
     monkeypatch.setattr(reset_bank, "restore_physical", lambda *args, **kwargs: None)
     monkeypatch.setattr(reset_bank, "restore_task_state", lambda *args, **kwargs: None)
-    command = SimpleNamespace(metrics={"success": success})
+    num = len(success)
+    metrics = {"success": success}
+    metrics |= {f"reached_{stage.name.lower()}": torch.zeros(num) for stage in list(ClothDragStage)[1:]}
+    command = SimpleNamespace(metrics=metrics, time_to_stage=torch.full((num, len(ClothDragStage)), -1.0))
     env = SimpleNamespace(
-        num_envs=len(success),
+        num_envs=num,
         device="cpu",
         common_step_counter=0,
         extras={},
+        episode_length_buf=torch.zeros(num, dtype=torch.long),
+        step_dt=0.25,
         command_manager=SimpleNamespace(get_term=lambda name: command),
     )
     cfg = EventTermCfg(func=reset_bank.ResetFromBank, mode="reset", params={"bank_path": None})
@@ -175,11 +183,24 @@ def test_reset_logs_success_per_source(monkeypatch):
 
     # envs 0-2 end (default success, grasp failure, drag success), env 3 (goal) runs on; all restart from defaults
     success[:] = torch.tensor([1.0, 0.0, 1.0, 1.0])
+    command = env.command_manager.get_term("cloth_target")
+    # env 0 reached GRASP at 2 s and DRAG at 3 s, env 1 never reached DRAG, env 2 reached GOAL at 1.5 s
+    command.metrics["reached_grasp"][:] = torch.tensor([1.0, 1.0, 1.0, 1.0])
+    command.metrics["reached_drag"][:] = torch.tensor([1.0, 0.0, 1.0, 1.0])
+    command.metrics["reached_goal"][:] = torch.tensor([1.0, 0.0, 1.0, 1.0])
+    command.time_to_stage[0, 1:] = torch.tensor([2.0, 3.0, 4.0])
+    command.time_to_stage[1, 1] = 0.25
+    command.time_to_stage[2, 1:] = torch.tensor([0.25, 0.25, 1.5])
     log = _reset(term, env, torch.tensor([0, 1, 2]), step=10)
     assert log == {
         "Reset/success_default": 1.0,
         "Reset/success_grasp": 0.0,
         "Reset/success_drag": 1.0,
+        "Reset/next_stage_default": 1.0,
+        "Reset/next_stage_grasp": 0.0,
+        "Reset/next_stage_drag": 1.0,
+        "Reset/time_to_next_default": 2.0,
+        "Reset/time_to_next_drag": 1.5,
         "Reset/share_default": 1.0,
         "Reset/share_grasp": 0.0,
         "Reset/share_drag": 0.0,
@@ -187,14 +208,31 @@ def test_reset_logs_success_per_source(monkeypatch):
     }
     assert term.rows.tolist() == [-1, -1, -1, 3]
 
+    # env 3 (goal) ends with the success after 8 steps; the time to success is its episode time
+    env.episode_length_buf[3] = 8
+    log = _reset(term, env, torch.tensor([3]), step=20)
+    assert log == {
+        "Reset/success_goal": 1.0,
+        "Reset/time_to_next_goal": 2.0,
+        "Reset/share_default": 1.0,
+        "Reset/share_grasp": 0.0,
+        "Reset/share_drag": 0.0,
+        "Reset/share_goal": 0.0,
+    }
+
 
 def test_reset_logs_default_success_without_a_bank(monkeypatch):
     success = torch.tensor([1.0, 0.0, 0.0, 1.0])
     term, env = _reset_term(monkeypatch, None, success)
     _reset(term, env, torch.arange(4), step=0)
+    command = env.command_manager.get_term("cloth_target")
+    command.metrics["reached_grasp"][:] = torch.tensor([1.0, 1.0, 0.0, 1.0])
+    command.time_to_stage[:, 1] = torch.tensor([1.0, 2.0, -1.0, 3.0])
     log = _reset(term, env, torch.arange(4), step=5)
     assert log == {
         "Reset/success_default": 0.5,
+        "Reset/next_stage_default": 0.75,
+        "Reset/time_to_next_default": 2.0,
         "Reset/share_default": 1.0,
         "Reset/share_grasp": 0.0,
         "Reset/share_drag": 0.0,
@@ -223,37 +261,40 @@ def test_quotas_split_evenly():
 def test_capture_windows():
     # env 0: pre-grasp pose held long enough, still, open; env 1: first step; env 2: pose held too briefly;
     # env 3: still moving; env 4: closed; env 5: fresh grasp, barely moved; env 6: grasp held too long;
-    # env 7: moved too far; env 8: goal point at the goal-zone edge; env 9: inside the success disk; env 10: hold done
+    # env 7: moved too far; env 8: goal point inside the goal zone; env 9: inside the success disk; env 10: hold done;
+    # envs 11-14: as envs 1, 0, 5 and 8, but in another task stage than their bucket's
     inf = math.inf
     collector = ResetCollector.__new__(ResetCollector)
     collector.cfg = CollectCfg()
     hold, other = 8, 4  # DragSmState.PREGRASP_HOLD, DRAG_CLOTH
     collector.sm = SimpleNamespace(
-        sm_state=torch.tensor([hold, 0, hold, hold, hold] + [other] * 6),
-        sm_wait_time=torch.tensor([0.3, 0.0, 0.1, 0.3, 0.3] + [0.0] * 6),
+        sm_state=torch.tensor([hold, 0, hold, hold, hold] + [other] * 6 + [0, hold, other, other]),
+        sm_wait_time=torch.tensor([0.3, 0.0, 0.1, 0.3, 0.3] + [0.0] * 6 + [0.0, 0.3, 0.0, 0.0]),
     )
-    locked = torch.tensor([False] * 5 + [True] * 6)
+    locked = torch.tensor([False] * 5 + [True] * 6 + [False, False, True, True])
     collector.gripper = SimpleNamespace(
-        closed=torch.tensor([False, False, False, False, True] + [True] * 6),
+        closed=torch.tensor([False, False, False, False, True] + [True] * 6 + [False, False, True, True]),
         constraint=SimpleNamespace(active=locked, contacts_disabled=locked),
     )
     collector.command = SimpleNamespace(
-        stage=torch.tensor([0, 0, 0, 0, 0, 2, 2, 2, 2, 3, 3]),
-        holding=torch.tensor([False] * 10 + [True]),
+        stage=torch.tensor([1, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3] + [1, 0, 3, 2]),
+        holding=torch.tensor([False] * 10 + [True] + [False] * 4),
     )
-    ongoing = torch.ones(11, dtype=torch.bool)
-    step = torch.tensor([5, 1] + [5] * 9)
-    progress = torch.tensor([0.0] * 5 + [0.05, 0.05, 0.2, 0.6, 0.9, 0.9])
-    distance = torch.tensor([0.3] * 5 + [0.25, 0.25, 0.2, 0.10, 0.03, 0.03])
-    ee_speed = torch.tensor([0.002, 0.0, 0.002, 0.05, 0.002] + [0.1] * 6)
-    since_squeeze = torch.tensor([inf] * 5 + [0.3, 0.8, 0.3, 2.0, 3.0, 3.0])
+    ongoing = torch.ones(15, dtype=torch.bool)
+    step = torch.tensor([5, 1] + [5] * 9 + [1, 5, 5, 5])
+    progress = torch.tensor([0.0] * 5 + [0.05, 0.05, 0.2, 0.6, 0.9, 0.9] + [0.0, 0.0, 0.05, 0.6])
+    distance = torch.tensor([0.3] * 5 + [0.25, 0.25, 0.2, 0.07, 0.03, 0.03] + [0.3, 0.3, 0.25, 0.07])
+    ee_speed = torch.tensor([0.002, 0.0, 0.002, 0.05, 0.002] + [0.1] * 6 + [0.0, 0.002, 0.1, 0.1])
+    since_squeeze = torch.tensor([inf] * 5 + [0.3, 0.8, 0.3, 2.0, 3.0, 3.0] + [inf, inf, 0.3, 2.0])
     approach, grasp, drag, goal = collector._windows(ongoing, step, progress, distance, ee_speed, since_squeeze)
     assert approach.nonzero().squeeze(-1).tolist() == [1]
     assert grasp.nonzero().squeeze(-1).tolist() == [0]
     assert drag.nonzero().squeeze(-1).tolist() == [5]
     assert goal.nonzero().squeeze(-1).tolist() == [8]
+    # the window of a bucket requires the stage of the same index
+    assert list(BUCKET_NAMES) == [stage.name.lower() for stage in ClothDragStage]
     # a step of a reset never captures
-    windows = collector._windows(torch.zeros(11, dtype=torch.bool), step, progress, distance, ee_speed, since_squeeze)
+    windows = collector._windows(torch.zeros(15, dtype=torch.bool), step, progress, distance, ee_speed, since_squeeze)
     assert not any(window.any() for window in windows)
 
 
@@ -270,6 +311,8 @@ def test_pregrasp_offsets_fill_a_cone_biased_to_the_centre():
     assert (radius <= r_max + 1e-7).all()
     # uniform radius (mean share 0.5), not uniform area (mean share 2/3): more states close above the node
     assert (radius / r_max).mean().item() == pytest.approx(0.5, abs=0.03)
+    # every pre-grasp pose lies within the GRASP stage's approach radius (0.04 m), with margin for the tracking error
+    assert offsets.norm(dim=1).max().item() < 0.035
 
 
 def test_grasp_node_choice():

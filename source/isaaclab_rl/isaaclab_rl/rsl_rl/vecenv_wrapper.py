@@ -34,7 +34,12 @@ class RslRlVecEnvWrapper(VecEnv):
         https://github.com/leggedrobotics/rsl_rl/blob/master/rsl_rl/env/vec_env.py
     """
 
-    def __init__(self, env: ManagerBasedRLEnv | DirectRLEnv, clip_actions: float | None = None):
+    def __init__(
+        self,
+        env: ManagerBasedRLEnv | DirectRLEnv,
+        clip_actions: float | None = None,
+        action_clip_diagnostics: float | None = None,
+    ):
         """Initializes the wrapper.
 
         Note:
@@ -43,6 +48,8 @@ class RslRlVecEnvWrapper(VecEnv):
         Args:
             env: The environment to wrap around.
             clip_actions: The clipping value for actions. If ``None``, then no clipping is done.
+            action_clip_diagnostics: The action magnitude threshold for clipping diagnostics. If ``None``, then no
+                diagnostics are logged.
 
         Raises:
             ValueError: When the environment is not an instance of :class:`ManagerBasedRLEnv` or :class:`DirectRLEnv`.
@@ -76,6 +83,7 @@ class RslRlVecEnvWrapper(VecEnv):
         # initialize the wrapper
         self.env = env
         self.clip_actions = clip_actions
+        self.action_clip_diagnostics = action_clip_diagnostics
 
         # store information required by wrapper
         self.num_envs = self.unwrapped.num_envs
@@ -174,6 +182,7 @@ class RslRlVecEnvWrapper(VecEnv):
         return TensorDict(self.unwrapped.obs_buf, batch_size=[self.num_envs])
 
     def step(self, actions: torch.Tensor) -> tuple[TensorDict, torch.Tensor, torch.Tensor, dict]:
+        raw_actions = actions
         # clip actions
         if self.clip_actions is not None:
             actions = torch.clamp(actions, -self.clip_actions, self.clip_actions)
@@ -185,6 +194,7 @@ class RslRlVecEnvWrapper(VecEnv):
         # this is only needed for infinite horizon tasks
         if not self.unwrapped.cfg.is_finite_horizon:
             extras["time_outs"] = truncated
+        self._log_action_clip_diagnostics(raw_actions, extras)
         # return the step information
         return TensorDict(obs_dict, batch_size=[self.num_envs]), rew, dones, extras
 
@@ -209,3 +219,20 @@ class RslRlVecEnvWrapper(VecEnv):
         self.env.unwrapped.action_space = gym.vector.utils.batch_space(
             self.env.unwrapped.single_action_space, self.num_envs
         )
+
+    def _log_action_clip_diagnostics(self, actions: torch.Tensor, extras: dict):
+        """Log how often raw policy actions would exceed the configured magnitude threshold."""
+        if self.action_clip_diagnostics is None:
+            return
+
+        threshold = self.action_clip_diagnostics
+        excess = torch.clamp(actions.abs() - threshold, min=0.0)
+        exceeded = excess > 0.0
+        log = extras.setdefault("log", {})
+        log["Action/would_clip_fraction"] = exceeded.float().mean()
+        log["Action/would_clip_env_fraction"] = exceeded.any(dim=-1).float().mean()
+        log["Action/would_clip_correction_l1_mean"] = excess.mean()
+        log["Action/would_clip_excess_max"] = excess.max()
+        log["Action/would_clip_excess_mean"] = excess.sum() / exceeded.sum().clamp(min=1)
+        for index in range(actions.shape[-1]):
+            log[f"Action/would_clip_fraction_dim_{index}"] = exceeded[..., index].float().mean()

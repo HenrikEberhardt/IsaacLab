@@ -22,6 +22,7 @@ from ..reset_states import (
     task_fingerprint,
 )
 from ..reset_states.bank import BUCKET_NAMES, RESET_MODES, check_mode_probabilities, sample_reset_rows
+from .stages import ClothDragStage
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -38,10 +39,17 @@ class ResetFromBank(ManagerTermBase):
     them. It restores the physical state when called, and the task state that the action and command resets clear in
     its :meth:`reset`, which the event manager runs after those resets (see :mod:`~..reset_states.restore`).
 
-    Every reset after the first also logs, in ``extras["log"]``, the success of the episodes that just ended per
-    source they started from (``Reset/success_<source>``: ``default`` or the bucket name; a source without a finished
-    episode is left out) and the share of each reset mode among the episodes that start now (``Reset/share_<mode>``),
-    with or without a bank.
+    Every reset after the first also logs, in ``extras["log"]``, per source the episodes that just ended started from
+    (``default`` or the bucket name):
+
+    * ``Reset/success_<source>``: their success rate.
+    * ``Reset/next_stage_<source>``: the share that reached the stage after their start stage (GRASP for default
+      resets), for every source but ``goal``.
+    * ``Reset/time_to_next_<source>``: the episode time [s] until that stage, over the episodes that reached it; for
+      ``goal``, until the success.
+
+    A value without an episode to average is left out. The reset also logs the share of each reset mode among the
+    episodes that start now (``Reset/share_<mode>``), with or without a bank.
     """
 
     def __init__(self, cfg: EventTermCfg, env: ManagerBasedRLEnv):
@@ -140,7 +148,8 @@ class ResetFromBank(ManagerTermBase):
     def _source_log(
         self, env: ManagerBasedRLEnv, env_ids: torch.Tensor, finished: torch.Tensor, started: torch.Tensor
     ) -> dict[str, float]:
-        """Success of the finished episodes per source and share of each reset mode among the started ones.
+        """Success and progress of the finished episodes per source, and share of each reset mode among the started
+        ones.
 
         Args:
             env: The environment.
@@ -149,15 +158,38 @@ class ResetFromBank(ManagerTermBase):
             started: Bank rows the new episodes start from, -1 for a default reset, shape [N].
         """
         names = ("default", *BUCKET_NAMES)
-        success = env.command_manager.get_term(self._command_name).metrics["success"][env_ids].float()
+        command = env.command_manager.get_term(self._command_name)
+        success = command.metrics["success"][env_ids].float()
         finished_source, started_source = self._source(finished), self._source(started)
+        # the buckets are named after their stage, so a bucket's index is its start stage; default resets start in
+        # APPROACH. Column k of reached and time is the stage after stage k, the success after GOAL.
+        start_stage = (finished_source - 1).clamp(min=0).unsqueeze(1)
+        reached = [command.metrics[f"reached_{stage.name.lower()}"][env_ids] for stage in list(ClothDragStage)[1:]]
+        reached = torch.stack([*reached, success], dim=1).gather(1, start_stage).squeeze(1).float()
+        # the success terminates the episode, whose length the environment clears after the reset
+        episode_time = env.episode_length_buf[env_ids].float() * env.step_dt
+        time = torch.cat([command.time_to_stage[env_ids, 1:], episode_time.unsqueeze(1)], dim=1)
+        time = time.gather(1, start_stage).squeeze(1) * reached
         counts = torch.bincount(finished_source, minlength=len(names))
         sums = torch.bincount(finished_source, weights=success, minlength=len(names))
+        reached_counts = torch.bincount(finished_source, weights=reached, minlength=len(names))
+        time_sums = torch.bincount(finished_source, weights=time, minlength=len(names))
         shares = torch.bincount(started_source, minlength=len(names)) / max(len(started), 1)
         # one transfer to the host for all values
-        counts, sums, shares = torch.stack([counts.float(), sums, shares]).cpu().tolist()
-        # a source without a finished episode is left out: a placeholder would distort the logger's mean
+        values = torch.stack([counts.float(), sums, reached_counts, time_sums, shares]).cpu().tolist()
+        counts, sums, reached_counts, time_sums, shares = values
+        # a source without an episode to average is left out: a placeholder would distort the logger's mean
         log = {f"Reset/success_{name}": total / num for name, num, total in zip(names, counts, sums) if num > 0}
+        log |= {
+            f"Reset/next_stage_{name}": total / num
+            for name, num, total in zip(names, counts, reached_counts)
+            if num > 0 and name != "goal"
+        }
+        log |= {
+            f"Reset/time_to_next_{name}": total / num
+            for name, num, total in zip(names, reached_counts, time_sums)
+            if num > 0
+        }
         log |= {f"Reset/share_{name}": share for name, share in zip(names, shares) if name in RESET_MODES}
         return log
 

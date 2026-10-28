@@ -43,6 +43,7 @@ def _make_wrapper(env: _FakeEnv, num_envs: int = 2) -> RslRlVecEnvWrapper:
     wrapper = object.__new__(RslRlVecEnvWrapper)
     wrapper.env = env
     wrapper.num_envs = num_envs
+    wrapper.action_clip_diagnostics = None
     return wrapper
 
 
@@ -93,3 +94,32 @@ def test_invalid_environment_error_reports_unwrapped_type():
 
     assert "_UnsupportedEnv" in str(exc_info.value)
     assert "_OuterEnv" not in str(exc_info.value)
+
+
+def test_action_clip_diagnostics_measure_raw_action_exceedances():
+    """Diagnostics should describe the raw policy samples relative to the configured threshold."""
+    wrapper = _make_wrapper(_FakeEnv())
+    wrapper.action_clip_diagnostics = 1.0
+    actions = torch.tensor([[0.0, 1.5], [-2.0, 0.5]])
+    extras = {}
+
+    wrapper._log_action_clip_diagnostics(actions, extras)
+
+    log = extras["log"]
+    torch.testing.assert_close(log["Action/would_clip_fraction"], torch.tensor(0.5))
+    torch.testing.assert_close(log["Action/would_clip_env_fraction"], torch.tensor(1.0))
+    torch.testing.assert_close(log["Action/would_clip_correction_l1_mean"], torch.tensor(0.375))
+    torch.testing.assert_close(log["Action/would_clip_excess_mean"], torch.tensor(0.75))
+    torch.testing.assert_close(log["Action/would_clip_excess_max"], torch.tensor(1.0))
+    torch.testing.assert_close(log["Action/would_clip_fraction_dim_0"], torch.tensor(0.5))
+    torch.testing.assert_close(log["Action/would_clip_fraction_dim_1"], torch.tensor(0.5))
+
+
+def test_action_clip_diagnostics_are_opt_in():
+    """The wrapper should not add metrics unless a diagnostic threshold is configured."""
+    wrapper = _make_wrapper(_FakeEnv())
+    extras = {}
+
+    wrapper._log_action_clip_diagnostics(torch.ones(2, 2), extras)
+
+    assert extras == {}

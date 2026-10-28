@@ -285,6 +285,12 @@ class RslRlBaseRunnerCfg:
         This clipping is performed inside the :class:`RslRlVecEnvWrapper` wrapper.
     """
 
+    action_clip_diagnostics: float | None = None
+    """Action magnitude threshold for logging clipping diagnostics. Defaults to None.
+
+    If set, the wrapper logs how often raw policy samples would exceed this threshold before optional clipping.
+    """
+
     check_for_nan: bool = True
     """Whether to check for NaN values coming from the environment."""
 

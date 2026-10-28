@@ -33,13 +33,15 @@ from typing import Any
 
 import torch
 
-SCHEMA_VERSION = 2
+SCHEMA_VERSION = 3
 """Version of the bank layout; a bank of another version does not load. Version 2 (2026-10-27): the buckets hold
-pre-grasp, early drag and goal-zone-edge states (see :meth:`~.collect.ResetCollector._windows`)."""
+pre-grasp, early drag and goal-zone-edge states (see :meth:`~.collect.ResetCollector._windows`). Version 3
+(2026-10-28): every state is stored in the task stage of its bucket."""
 
 BUCKET_NAMES = ("approach", "grasp", "drag", "goal")
-"""Names of the buckets: the episode start, a pre-grasp pose with an open gripper, a fresh grasp before the drag, and
-the goal point at the edge of the goal zone (:meth:`~.collect.ResetCollector._windows`)."""
+"""Names of the buckets, in :class:`~..mdp.stages.ClothDragStage` order; each state is in the stage of its bucket:
+the episode start, a pre-grasp pose with an open gripper, a fresh grasp before the drag, and the goal point inside the
+goal zone (:meth:`~.collect.ResetCollector._windows`)."""
 
 RESET_MODES = ("default", "grasp", "drag", "goal")
 """Reset modes of training: the task's default reset events, or a random stored state of the named bucket."""

@@ -19,9 +19,6 @@ from isaaclab_newton.physics import (
 )
 from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg, NewtonArticulationCfg, NewtonDeformableBodyPropertiesCfg
 from isaaclab_newton.sim.spawners.materials import NewtonSurfaceDeformableBodyMaterialCfg
-from isaaclab_visualizers.kit import KitVisualizerCfg
-from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
-from isaaclab_visualizers.viser import ViserVisualizerCfg
 
 import isaaclab.sim as sim_utils
 from isaaclab.actuators import ImplicitActuatorCfg
@@ -515,7 +512,7 @@ class CriticObsCfg(ObsGroup):
 
 @configclass
 class ObservationsCfg:
-    """The actor (``policy``) and the privileged critic (``critic``)"""
+    """The actor (``policy``) and the privileged critic (``critic``)."""
 
     policy: ActorObsCfg = ActorObsCfg()
     critic: CriticObsCfg = CriticObsCfg()
@@ -563,14 +560,15 @@ class ResetFromBankCfg(PresetCfg):
         params={"bank_path": None, "mode_probabilities": {"default": 1.0}, "command_name": "cloth_target"},
     )
 
-    # "env.events.reset_from_bank=uniform" Share of the resets per mode (default reset or a stored state of the bucket:
-    # pre-grasp, fresh grasp before the drag, goal-zone edge); states drawn uniformly inside each bucket
+    # "env.events.reset_from_bank=uniform" Share of the resets per mode (default reset or a stored state of the bucket,
+    # each in its stage: pre-grasp, fresh grasp before the drag, inside the goal zone); states drawn uniformly inside
+    # each bucket. Mostly default resets: with more stored states, the default task learned slower.
     uniform = EventTerm(
         func=mdp.ResetFromBank,
         mode="reset",
         params={
-            "bank_path": "logs/reset_banks/bank_5000.pt",  # relative to the working directory or the repository root
-            "mode_probabilities": {"default": 0.4, "grasp": 0.35, "drag": 0.15, "goal": 0.10},
+            "bank_path": "logs/reset_banks/bank_5000_v3.pt",  # relative to the working directory or the repository root
+            "mode_probabilities": {"default": 0.7, "grasp": 0.15, "drag": 0.10, "goal": 0.05},
             "command_name": "cloth_target",
         },
     )
@@ -650,9 +648,13 @@ class RewardsCfg:
         func=mdp.ClothDistanceProgress, params={"objective": "approach", "distance_scale": 0.1}, weight=1.0
     )
 
+    # Penalty for closing gripper in approach
+    pen_close_in_approach = RewTerm(func=mdp.gripper_closed, params={"stages": ["approach"]}, weight=-0.05)
+
     # Closing earns a small aid only when the attachment selector can capture a raised node.
     grasp_close_on_bump = RewTerm(func=mdp.gripper_closed_on_raised_node, params={"stages": ["grasp"]}, weight=0.05)
 
+    # Dragging the cube to the target earns a large reward, scaled by the distance to the target (0.1 m = 1.0).
     drag_progress = RewTerm(
         func=mdp.ClothDistanceProgress, params={"objective": "drag", "distance_scale": 0.1}, weight=10.0
     )
@@ -680,8 +682,6 @@ class RewardsCfg:
         },
         weight=-1.0,
     )
-    # Approach with open fingers; closing and alignment attempts in GRASP carry no penalty.
-    pen_close_in_approach = RewTerm(func=mdp.gripper_closed, params={"stages": ["approach"]}, weight=-0.05)
 
     # Drag, don't lift: linear penalty if the EE is above 3cm
     pen_ee_height = RewTerm(

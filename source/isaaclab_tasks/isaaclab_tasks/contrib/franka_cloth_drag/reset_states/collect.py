@@ -56,10 +56,12 @@ class CollectCfg:
     yaw_offset_range: tuple[float, float] = (-0.3, 0.3)
     """Range of the offset added to the grasp yaw [rad]."""
 
-    pregrasp_height_range: tuple[float, float] = (0.005, 0.05)
-    """Range of the height of the pre-grasp pose (grasp states) above the grasped raised node [m]."""
+    pregrasp_height_range: tuple[float, float] = (0.005, 0.03)
+    """Range of the height of the pre-grasp pose (grasp states) above the grasped raised node [m]. With
+    :attr:`pregrasp_radius_range`, the pose stays within 3.4 cm of the node, inside the GRASP stage's approach radius
+    (4 cm) with margin for the tracking error."""
 
-    pregrasp_radius_range: tuple[float, float] = (0.005, 0.02)
+    pregrasp_radius_range: tuple[float, float] = (0.005, 0.015)
     """Largest planar offset of the pre-grasp pose from the raised node at the lowest and at the highest pre-grasp
     height [m]: it grows linearly with the height (a cone, approach from the top), and the offset is drawn biased to the
     centre (radius uniform, not area)."""
@@ -79,9 +81,9 @@ class CollectCfg:
     drag_max_progress: float = 0.1
     """Drag states are captured only while the goal point has covered at most this share of its distance."""
 
-    goal_distance_window: tuple[float, float] = (0.08, 0.12)
-    """Planar distance of the goal point to the target of the goal states [m]: around the edge of the goal zone
-    (success radius + goal zone margin, 0.10 m)."""
+    goal_distance_window: tuple[float, float] = (0.05, 0.09)
+    """Planar distance of the goal point to the target of the goal states [m]: inside the goal zone (success radius +
+    goal zone margin, 0.10 m) and outside the success disc (0.04 m)."""
 
     action_noise_std: float = 0.05
     """Standard deviation of the noise on the normalized arm actions; the gripper command gets none."""
@@ -132,7 +134,7 @@ class ResetValidator:
     """Check restored reset states while they are held: arm still, gripper as stored.
 
     A state is rejected when its restore does not reproduce the stored state, when a termination other than success
-    fires (a gripper-cube contact included), when a drag or goal state drops below stage DRAG, when a stored grasp is
+    fires (a gripper-cube contact included), when a state leaves the task stage of its bucket, when a stored grasp is
     lost or its locked nodes change, when a grasp (pre-grasp) state closes or locks, when a cloth node is faster than
     ``max_node_speed`` or when the cube tilts more than ``max_cube_tilt_deg``. A success ends the check of drag and goal
     states as valid.
@@ -156,7 +158,7 @@ class ResetValidator:
         self.failure_terms = [
             name for name in env.termination_manager.active_terms if name not in ("success", "time_out")
         ]
-        self.reasons = ["restore_mismatch", "stage_drop", "grasp_changed", "node_speed", "cube_tilt"]
+        self.reasons = ["restore_mismatch", "stage_change", "grasp_changed", "node_speed", "cube_tilt"]
         self.reasons += ["success_early", "time_out"] + [f"termination:{name}" for name in self.failure_terms]
         """Rejection reasons; a reason code is its index plus one, zero is no rejection."""
 
@@ -219,13 +221,9 @@ class ResetValidator:
             self.ended_ok |= success & late
             self._reject(success & ~late, "success_early")
         self.alive &= ~(terminated | truncated)[ids]
-        # the environments that did not end show the state that followed the stored one: drag and goal states keep
-        # stage DRAG (goal states at the edge of the goal zone are still in DRAG) and their grasp, pre-grasp states
-        # stay open and unlocked
-        from ..mdp.stages import ClothDragStage
-
-        held = self.bucket >= BUCKET_NAMES.index("drag")
-        self._reject(self.alive & held & (self.command.stage[ids] < int(ClothDragStage.DRAG)), "stage_drop")
+        # the environments that did not end show the state that followed the stored one: every state keeps the stage
+        # of its bucket, drag and goal states their grasp, pre-grasp states stay open and unlocked
+        self._reject(self.alive & (self.command.stage[ids] != self.bucket), "stage_change")
         constraint = self.gripper.constraint
         locked = constraint.grasped[ids] & constraint.active[ids].unsqueeze(1)
         changed = self.holds & ((locked != self.grasped).any(dim=1) | ~constraint.active[ids])
@@ -318,6 +316,9 @@ class ResetCollector:
         pool = ResetBank.concat(accepted)
         generator = torch.Generator().manual_seed(cfg.seed)
         bank = pool.select(subsample_to_quotas(pool, quotas, generator))
+        off_stage = int((bank.data["task"]["stage"].long() != bank.data["labels"]["bucket"].long()).sum())
+        if off_stage > 0:
+            raise RuntimeError(f"{off_stage} states are not in the task stage of their bucket.")
         self.stats["wall_time_s"] = round(time.time() - start_time, 1)
         bank.meta = {
             "schema_version": SCHEMA_VERSION,
@@ -454,6 +455,8 @@ class ResetCollector:
     ) -> list[torch.Tensor]:
         """Whether each environment is in the capture window of each level, see :data:`~.bank.BUCKET_NAMES`.
 
+        Every window also requires the task stage of its level, so each state is stored in the stage of its bucket.
+
         * approach: the first step of the episode;
         * grasp (pre-grasp): the state machine holds its pre-grasp pose (for at least ``pregrasp_min_hold``), the arm
           still, the gripper open and nothing locked;
@@ -470,7 +473,6 @@ class ResetCollector:
             ee_speed: End-effector speed over the last step [m/s], shape [N].
             since_squeeze: Time since the squeeze completed [s], infinite while not squeezed, shape [N].
         """
-        from ..mdp.stages import ClothDragStage
         from ..state_machine import DragSmState
 
         cfg = self.cfg
@@ -478,15 +480,16 @@ class ResetCollector:
         unlocked = ~constraint.active & ~constraint.contacts_disabled
         holding_pose = (self.sm.sm_state == DragSmState.PREGRASP_HOLD) & (self.sm.sm_wait_time >= cfg.pregrasp_min_hold)
         pregrasp = holding_pose & (ee_speed <= cfg.pregrasp_max_speed) & ~self.gripper.closed & unlocked
-        dragging = self.command.stage >= int(ClothDragStage.DRAG)
         low, high = cfg.goal_distance_window
         in_goal_window = (distance >= low) & (distance <= high) & (since_squeeze < math.inf)
-        return [
-            ongoing & (step == 1),
-            ongoing & pregrasp,
-            ongoing & dragging & (since_squeeze <= cfg.drag_window) & (progress <= cfg.drag_max_progress),
-            ongoing & dragging & in_goal_window & ~self.command.holding,
+        windows = [
+            step == 1,
+            pregrasp,
+            (since_squeeze <= cfg.drag_window) & (progress <= cfg.drag_max_progress),
+            in_goal_window & ~self.command.holding,
         ]
+        # the bucket index is the stage index
+        return [ongoing & window & (self.command.stage == level) for level, window in enumerate(windows)]
 
     def _finalize(self, env_ids, seen, slots, progress, episode_time) -> ResetBank | None:
         """Collect the captured states of the given environments' finished, successful rollouts."""

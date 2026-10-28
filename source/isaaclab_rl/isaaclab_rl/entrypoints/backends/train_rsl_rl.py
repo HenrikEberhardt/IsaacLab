@@ -208,7 +208,11 @@ def _run(args_cli: argparse.Namespace) -> None:
             screen.stage("Preparing agent")
             start_time = time.time()
             report_activity("Wrapping environment")
-            env = RslRlVecEnvWrapper(env, clip_actions=agent_cfg.clip_actions)
+            env = RslRlVecEnvWrapper(
+                env,
+                clip_actions=agent_cfg.clip_actions,
+                action_clip_diagnostics=agent_cfg.action_clip_diagnostics,
+            )
             report_activity(None)
 
             report_activity("Building policy")
