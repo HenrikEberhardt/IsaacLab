@@ -35,7 +35,7 @@ from .frames import (
     top_down_yaw,
     vectors_to_base,
 )
-from .stages import ClothDragStage
+from .stages import ClothDragStage, grasp_node_pos_w
 
 if TYPE_CHECKING:
     from isaaclab.assets import Articulation, DeformableObject, RigidObject
@@ -282,7 +282,9 @@ class ClothPointsInBaseFrame(ManagerTermBase):
 
     * the 9 landmarks of :func:`~.frames.cloth_landmark_ids`, fixed;
     * the K nodes raised by the reset event ``raised_nodes_event`` (:func:`~.frames.raised_node_ids`), sorted by id.
-      K is that event's ``num_raised_nodes``, read once at initialization; without raised nodes, K is 0;
+      With ``command_name``, the episode's grasp node (:attr:`~.commands.ClothTargetCommand.grasp_node_id`) comes
+      first and the others follow by id. K is that event's ``num_raised_nodes``, read once at initialization; without
+      raised nodes, K is 0;
     * ``num_random_nodes`` nodes sampled without replacement, weighted by cloth area, excluding the landmarks and the
       episode's raised nodes, sorted by id.
 
@@ -331,14 +333,31 @@ class ClothPointsInBaseFrame(ManagerTermBase):
         raised_nodes_event: str | None = "reset_deformable",
         asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
         robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+        command_name: str | None = None,
     ) -> torch.Tensor:
         """Return current node positions [m]; ``num_random_nodes`` and ``raised_nodes_event`` are read once during
-        initialization."""
+        initialization. With ``command_name``, the grasp node of that cloth target command leads the raised nodes."""
         asset: DeformableObject = env.scene[asset_cfg.name]
-        ids = torch.cat([self._landmark_ids.expand(env.num_envs, -1), self._raised_ids, self._random_ids], dim=1)
+        raised = self._raised_ids
+        if command_name is not None and raised.shape[1] > 1:
+            grasp_node = env.command_manager.get_term(command_name).grasp_node_id.unsqueeze(1)
+            # stable sort on "is not the grasp node" moves it to the front and keeps the others in id order
+            raised = raised.gather(1, torch.sort((raised != grasp_node).int(), dim=1, stable=True).indices)
+        ids = torch.cat([self._landmark_ids.expand(env.num_envs, -1), raised, self._random_ids], dim=1)
         points_w = asset.data.nodal_pos_w.torch.gather(1, ids.unsqueeze(-1).expand(-1, -1, 3))
         points_b = points_to_base(env, points_w, robot_cfg).reshape(env.num_envs, -1)
         return torch.nan_to_num(points_b, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def grasp_node_pos_b(env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:
+    """Position of the episode's grasp node in the robot base frame [m], shape [num_envs, 3].
+
+    See :attr:`~.commands.ClothTargetCommand.grasp_node_id` for the grasp node.
+    """
+    command = env.command_manager.get_term(command_name)
+    pos_w = grasp_node_pos_w(env, command.cfg, command.grasp_node_id)
+    pos_b = points_to_base(env, pos_w, SceneEntityCfg(command.cfg.asset_name))
+    return torch.nan_to_num(pos_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def cloth_target_displacement_b(env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:

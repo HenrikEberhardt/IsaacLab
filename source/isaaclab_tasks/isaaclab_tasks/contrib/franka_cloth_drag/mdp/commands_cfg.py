@@ -33,8 +33,9 @@ class ClothTargetCommandCfg(CommandTermCfg):
 
     The command also tracks the task stage (:class:`~.stages.ClothDragStage`):
 
-    * GRASP: the EE frame origin is within :attr:`approach_radius` of a node raised by the reset event
-      :attr:`raised_nodes_event`, or of any cloth node if no node is raised.
+    * GRASP: the EE frame origin is within :attr:`approach_radius` of the episode's grasp node
+      (:attr:`~.commands.ClothTargetCommand.grasp_node_id`): the node raised by the reset event
+      :attr:`raised_nodes_event` closest to the segment from the central node to the target.
     * DRAG: the gripper holds the cloth by nodes locked to the EE frame that include a raised node, see
       :func:`~.stages.gripper_holds_raised_node` and :class:`~.actions.ClothGraspAction`. The nodes lock once the
       closing fingers have come to rest with at least :attr:`grasp_min_nodes` nodes selected; a lock without a raised
@@ -108,15 +109,15 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Name of the actuated finger joint, whose position is the half gap between the finger pads."""
 
     approach_radius: float = 0.05
-    """Distance of the EE frame origin to the nearest raised cloth node below which APPROACH turns into GRASP [m].
+    """Distance of the EE frame origin to the grasp node below which APPROACH turns into GRASP [m].
 
-    Without raised nodes, the distance to the nearest cloth node counts.
+    See :attr:`~.commands.ClothTargetCommand.grasp_node_id` for the grasp node.
     """
 
     raised_nodes_event: str | None = "reset_deformable"
     """Name of the reset event term whose ``raised_node_ids`` are the raised nodes, see
-    :class:`~.events.ResetClothWithRaisedNodes`. None, a missing term, or a term without raised nodes => every cloth
-    node counts for :attr:`approach_radius`, and any lock counts as a grasp."""
+    :class:`~.events.ResetClothWithRaisedNodes`. None, a missing term, or a term without raised nodes => the grasp
+    node is the node a few centimeters from the central node towards the target, and any lock counts as a grasp."""
 
     grasp_min_nodes: int = 1
     """Number of cloth nodes the gripper must lock to hold the cloth.

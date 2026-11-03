@@ -29,13 +29,13 @@ from typing import TYPE_CHECKING
 import torch
 import warp as wp
 
+from .mdp.stages import grasp_node_ids
+
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
 
 # the hover pose lies this far inside the task's approach radius above the grasp node [m]
 HOVER_MARGIN = 0.01
-# without raised nodes, grasp the node this far from the central node towards the target [m]
-FALLBACK_GRASP_OFFSET = 0.06
 # the hand counts as aligned for the descent within this yaw error [rad]
 YAW_TOLERANCE = wp.constant(0.1)
 # yaw action scale of the state machine [rad]: the wrist turns at about kp/kd times the commanded yaw step, so the
@@ -552,42 +552,6 @@ class DragClothSm:
         return self.des_ee_pos, self.yaw_step, self.des_gripper_state
 
 
-def grasp_node_ids(
-    nodes_b: torch.Tensor,
-    center_b: torch.Tensor,
-    target_b: torch.Tensor,
-    candidate_ids: torch.Tensor | None,
-    choice: torch.Tensor | None = None,
-) -> torch.Tensor:
-    """Return the cloth node to grasp: the candidate closest to the segment from the central node to the target.
-
-    With ``choice``, the chosen candidate of every environment instead. Without candidates (no raised nodes), the node
-    closest to the point :data:`FALLBACK_GRASP_OFFSET` from the central node towards the target; the squeeze creases
-    the flat cloth there.
-
-    Args:
-        nodes_b: Cloth node positions in the robot base frame [m], shape [N, P, 3].
-        center_b: Position of the cloth's central node in the robot base frame [m], shape [N, 3].
-        target_b: Target of the central node in the robot base frame [m], shape [N, 3].
-        candidate_ids: Ids of the candidate nodes, shape [N, K], or None.
-        choice: Index of the candidate to grasp in every environment, taken modulo K, shape [N], or None.
-
-    Returns:
-        The node ids, shape [N].
-    """
-    rows = torch.arange(len(nodes_b), device=nodes_b.device)
-    to_target = (target_b - center_b)[:, :2]
-    if candidate_ids is None or candidate_ids.shape[1] == 0:
-        point = center_b[:, :2] + FALLBACK_GRASP_OFFSET * torch.nn.functional.normalize(to_target, dim=-1)
-        return (nodes_b[..., :2] - point.unsqueeze(1)).norm(dim=-1).argmin(dim=1)
-    if choice is not None:
-        return candidate_ids[rows, choice % candidate_ids.shape[1]]
-    rel = nodes_b[rows.unsqueeze(1), candidate_ids, :2] - center_b[:, None, :2]
-    t = (rel * to_target.unsqueeze(1)).sum(dim=-1) / to_target.square().sum(dim=-1, keepdim=True).clamp(min=1e-12)
-    distance = (rel - t.clamp(0.0, 1.0).unsqueeze(-1) * to_target.unsqueeze(1)).norm(dim=-1)
-    return candidate_ids[rows, distance.argmin(dim=1)]
-
-
 def pad_cloth_gaps(
     ee_pos_w: torch.Tensor,
     ee_quat_w: torch.Tensor,
@@ -660,8 +624,9 @@ class ClothDragSmRunner:
         self.raised_node_ids = raised_node_ids(env, raised_nodes_event)
         num_envs, device = env.num_envs, env.device
         self.grasp_choice: torch.Tensor | None = None
-        """Index of the raised node each environment grasps, shape [num_envs]; None grasps the node closest to the
-        segment from the central node to the target."""
+        """Index of the raised node each environment grasps, shape [num_envs]; None grasps the task's grasp node
+        (:attr:`~.mdp.commands.ClothTargetCommand.grasp_node_id`), the node closest to the segment from the central node
+        to the target."""
         self.grasp_node = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.stall_steps = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.stall_limit = round(STALL_TIME / env.step_dt)
@@ -696,7 +661,12 @@ class ClothDragSmRunner:
         # -- grasp node, chosen while resting
         resting = self.sm.sm_state == DragSmState.REST
         if resting.any():
-            node = grasp_node_ids(self.nodes_b, self.center_pos, target_pos, self.raised_node_ids, self.grasp_choice)
+            if self.grasp_choice is None:
+                node = self.command.grasp_node_id
+            else:
+                node = grasp_node_ids(
+                    self.nodes_b, self.center_pos, target_pos, self.raised_node_ids, self.grasp_choice
+                )
             self.grasp_node[resting] = node[resting]
         # -- drag stall: the arm stopped, e.g. at its reach limit next to the robot base
         still = (self.ee_pos - self._prev_ee_pos).norm(dim=-1) < STALL_STEP

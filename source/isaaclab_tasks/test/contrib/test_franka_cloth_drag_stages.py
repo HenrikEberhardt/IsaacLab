@@ -9,9 +9,22 @@ from types import SimpleNamespace
 
 import torch
 
-from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import RewardsCfg
+from isaaclab.managers import TerminationTermCfg as DoneTerm
+
+from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.agents.rsl_rl_ppo_cfg import FrankaClothDragPPORunnerCfg
+from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import (
+    CurriculumCfg,
+    RewardsCfg,
+    TerminationsCfg,
+)
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.cloth_grasp import ClothGraspConstraint
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import gripper_closed, gripper_closed_on_raised_node
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
+    ClothDistanceProgress,
+    cloth_drag_drop_penalty,
+    cloth_drag_termination_penalty,
+    gripper_closed_off_grasp_node,
+    gripper_closed_on_grasp_node,
+)
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import (
     cloth_goal_xy_distance,
     gripper_holds_raised_node,
@@ -20,6 +33,20 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import (
 
 NUM_NODES = 6
 CFG = SimpleNamespace(gripper_action_name="gripper_action", raised_nodes_event="reset_deformable")
+
+
+def test_action_regularization_and_safety_clip_configuration():
+    """Action costs should be fixed from reset one, with separate nominal and safety thresholds."""
+    rewards = RewardsCfg()
+    curriculum = CurriculumCfg()
+    runner = FrankaClothDragPPORunnerCfg()
+
+    assert rewards.pen_action_magnitude.weight == -0.1
+    assert rewards.pen_action_rate.weight == -0.1
+    assert not hasattr(curriculum, "action_magnitude")
+    assert not hasattr(curriculum, "action_rate")
+    assert runner.action_clip_diagnostics == 1.0
+    assert runner.clip_actions == 1.0
 
 
 class _EventManager:
@@ -63,7 +90,7 @@ def test_without_raised_nodes_or_constraint_any_grasp_counts():
     assert gripper_holds_raised_node(env, CFG).tolist() == [True, False]
 
 
-def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.005):
+def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.005, grasp_node=0):
     """Use the real grasp selector with a stationary pad frame and a synthetic cloth mesh."""
 
     points = torch.tensor([points], dtype=torch.float)
@@ -98,7 +125,9 @@ def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.
     constraint.active = torch.tensor([False])
     constraint.grasped = torch.zeros(1, points.shape[1], dtype=torch.bool)
     term = SimpleNamespace(closed=torch.tensor([True]), constraint=constraint, is_grasping=constraint.active)
-    command = SimpleNamespace(cfg=cfg, stage=torch.tensor([1]))
+    command = SimpleNamespace(
+        cfg=cfg, stage=torch.tensor([1]), grasp_node_id=torch.tensor([grasp_node]), time_to_stage=-torch.ones(1, 4)
+    )
     env = SimpleNamespace(
         scene={"ee_frame": frame, "robot": robot, "deformable": cloth},
         action_manager=SimpleNamespace(get_term=lambda name: term),
@@ -109,8 +138,8 @@ def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.
     return env, command, term
 
 
-def test_closing_reward_includes_raised_nodes_captured_through_mesh_cells():
-    # The raised vertex misses the pad width, but its edge midpoint or triangle center is inside.
+def test_closing_reward_includes_grasp_node_captured_through_mesh_cells():
+    # The grasp node misses the pad width, but its edge midpoint or triangle center is inside.
     cases = [
         ([[0.020, 0.0, 0.0], [-0.005, 0.0, 0.008]], [[0, 1]], []),
         ([[0.020, 0.0, 0.0], [-0.005, 0.0, 0.008], [0.0, 0.0, 0.008]], [], [[0, 1, 2]]),
@@ -118,58 +147,94 @@ def test_closing_reward_includes_raised_nodes_captured_through_mesh_cells():
     for points, edges, triangles in cases:
         env, command, term = _grasp_reward_env(points, edges, triangles)
         assert not pad_box_mask(env, command.cfg, env.scene["deformable"].data.nodal_pos_w.torch)[0, 0]
-        assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 1.0
+        assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+        assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 0.0
         term.closed[:] = False
-        assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 0.0
+        assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
+        assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 0.0
 
 
-def test_closing_reward_requires_minimum_count_and_a_selected_raised_node():
-    # Two capturable flat nodes do not qualify while the raised node is outside every selected cell.
-    env, command, term = _grasp_reward_env([[0.04, 0.0, 0.0], [0.0, 0.0, 0.0], [0.005, 0.0, 0.0]])
-    assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 0.0
-    env.event_manager = _EventManager(torch.tensor([[1]]))
-    assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 1.0
+def test_closing_reward_requires_minimum_count_and_the_selected_grasp_node():
+    # Two capturable nodes do not qualify while the grasp node is outside every selected cell.
+    env, command, term = _grasp_reward_env([[0.04, 0.0, 0.0], [0.0, 0.0, 0.0], [0.005, 0.0, 0.0]], raised=[[0, 1]])
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
+    assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 1.0
+    command.grasp_node_id[:] = 1
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
     command.cfg.grasp_min_nodes = 3
-    assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 0.0
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
+    # the penalty only asks whether the grasp node is between the pads, not whether the lock would form
+    assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 0.0
+
+
+def test_closing_reward_grows_with_the_grasped_nodes_up_to_the_full_count():
+    # three nodes between the pads with the grasp node among them, one outside
+    env, command, term = _grasp_reward_env([[0.0, 0.0, 0.0], [0.003, 0.0, 0.0], [0.006, 0.0, 0.0], [0.04, 0.0, 0.0]])
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+    assert abs(gripper_closed_on_grasp_node(env, ["grasp"], num_nodes_full=6).item() - 0.5) < 1e-6
+    assert gripper_closed_on_grasp_node(env, ["grasp"], num_nodes_full=3).item() == 1.0
+    assert gripper_closed_on_grasp_node(env, ["grasp"], num_nodes_full=2).item() == 1.0
+    # more nodes do not pay without the grasp node
+    command.grasp_node_id[:] = 3
+    assert gripper_closed_on_grasp_node(env, ["grasp"], num_nodes_full=6).item() == 0.0
+
+
+def test_closing_reward_can_pay_only_for_the_first_grasp_of_an_episode():
+    env, command, term = _grasp_reward_env([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]])
+    assert gripper_closed_on_grasp_node(env, ["grasp"], first_grasp_only=True).item() == 1.0
+    # DRAG was reached at 2 s: a grasp after a release pays nothing
+    command.time_to_stage[:, 2] = 2.0
+    assert gripper_closed_on_grasp_node(env, ["grasp"], first_grasp_only=True).item() == 0.0
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+
+
+def test_closing_reward_stops_after_the_lock_attempt():
+    env, _, term = _grasp_reward_env([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]])
+    term.grasp_tried = torch.tensor([False])
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+    # the lock attempt found too few nodes: holding the gripper closed over the node pays nothing until it reopens
+    term.grasp_tried = torch.tensor([True])
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
 
 
 def test_closing_reward_uses_stored_attachment_and_does_not_pay_for_wrong_attachment():
     env, command, term = _grasp_reward_env([[0.04, 0.0, 0.0], [0.05, 0.0, 0.0], [0.06, 0.0, 0.0]])
     term.constraint.active[:] = True
     term.constraint.grasped[:, :2] = True
-    assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 1.0
-    # A capturable raised node beside an existing flat-node attachment cannot earn a valid-grasp reward.
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+    # A capturable grasp node beside an existing attachment of other nodes cannot earn a valid-grasp reward.
     env.scene["deformable"].data.nodal_pos_w.torch.zero_()
     term.constraint.grasped[:, 0] = False
     term.constraint.grasped[:, 2] = True
-    assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 0.0
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
+    assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 1.0
 
 
 def test_closing_rewards_are_limited_to_their_stages():
-    env, command, term = _grasp_reward_env([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]])
+    env, command, term = _grasp_reward_env([[0.04, 0.0, 0.0], [0.005, 0.0, 0.0]])
     for stage in range(4):
         command.stage[:] = stage
-        assert gripper_closed(env, ["approach"]).item() == float(stage == 0)
-        assert gripper_closed_on_raised_node(env, ["grasp"]).item() == float(stage == 1)
-    command.stage[:] = 0
-    term.closed[:] = False
-    assert gripper_closed(env, ["approach"]).item() == 0.0
+        assert gripper_closed_off_grasp_node(env, ["approach", "grasp"]).item() == float(stage < 2)
+    env.scene["deformable"].data.nodal_pos_w.torch[0, 0] = 0.0
+    for stage in range(4):
+        command.stage[:] = stage
+        assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == float(stage == 1)
 
 
 def test_closing_reward_without_raised_nodes_or_attachment_constraint():
     env, command, term = _grasp_reward_env([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]], raised=None)
-    assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 1.0
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+    # without the lock constraint, the grasp node must lie between the pads
     term.constraint = None
-    assert gripper_closed_on_raised_node(env, ["grasp"]).item() == 0.0
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+    env.scene["deformable"].data.nodal_pos_w.torch[0, 0, 0] = 0.04
+    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
+    assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 1.0
 
 
-def test_configured_closing_rewards_prefer_capture_over_waiting_open():
+def test_configured_closing_rewards_pay_capture_and_penalize_misses():
     cfg = RewardsCfg()
-    closing_terms = [
-        getattr(cfg, name)
-        for name in ("grasp_between_fingers", "pen_close_without_bump", "grasp_close_on_bump", "pen_close_in_approach")
-        if hasattr(cfg, name)
-    ]
+    closing_terms = [cfg.grasp_close_on_node, cfg.pen_close_off_node]
     env, command, term = _grasp_reward_env([[0.020, 0.0, 0.0], [-0.005, 0.0, 0.008]], edges=[[0, 1]])
 
     def closing_reward():
@@ -179,11 +244,120 @@ def test_configured_closing_rewards_prefer_capture_over_waiting_open():
     assert closing_reward() == 0.0
     term.closed[:] = True
     assert closing_reward() > 0.0
+    env.scene["deformable"].data.nodal_pos_w.torch += 0.1
+    assert closing_reward() < 0.0
     command.stage[:] = 0
     assert closing_reward() < 0.0
-    command.stage[:] = 1
-    env.scene["deformable"].data.nodal_pos_w.torch += 0.1
+    command.stage[:] = 2
     assert closing_reward() == 0.0
+
+
+def test_ee_height_penalties_cover_drag_and_goal():
+    # both stages need their own term: a repeated attribute name silently replaces the first definition
+    cfg = RewardsCfg()
+    assert cfg.pen_ee_height_drag.params["stages"] == ["drag"]
+    assert cfg.pen_ee_height_goal.params["stages"] == ["goal"]
+
+
+def test_termination_penalty_counts_each_terminated_episode_once_over_the_step():
+    # env 0: two failure terms at once, env 1: one, env 2: none; integrated over the 0.5 s step it costs one weight
+    terms = {"cube_fell": torch.tensor([True, False, False]), "ee_below_table": torch.tensor([True, True, False])}
+    env = SimpleNamespace(
+        num_envs=3,
+        device="cpu",
+        step_dt=0.5,
+        termination_manager=SimpleNamespace(get_term=lambda name: terms[name]),
+    )
+    penalty = cloth_drag_termination_penalty(env, ["cube_fell", "ee_below_table"]) * env.step_dt
+    assert penalty.tolist() == [1.0, 1.0, 0.0]
+
+
+def test_termination_penalty_covers_every_failure_termination():
+    # an unpenalized failure would be a cheaper way out of a losing episode than the penalized ones
+    terms = {name: term for name, term in vars(TerminationsCfg()).items() if isinstance(term, DoneTerm)}
+    failures = {name for name, term in terms.items() if name != "success" and not term.time_out}
+    assert set(RewardsCfg().pen_termination.params["term_keys"]) == failures
+
+
+def test_drop_penalty_counts_each_drop_once_over_the_step_in_the_stage_it_happened():
+    # at the last command update env 0 released the cloth in DRAG and env 1 in GOAL (both are back in APPROACH now),
+    # env 2 still holds it in DRAG; integrated over the 0.5 s step a drop costs one weight
+    command = SimpleNamespace(
+        dropped=torch.tensor([True, True, False]),
+        previous_stage=torch.tensor([2, 3, 2]),
+        stage=torch.tensor([0, 0, 2]),
+    )
+    env = SimpleNamespace(step_dt=0.5, command_manager=SimpleNamespace(get_term=lambda name: command))
+    assert (cloth_drag_drop_penalty(env, ["drag", "goal"]) * env.step_dt).tolist() == [1.0, 1.0, 0.0]
+    assert (cloth_drag_drop_penalty(env, ["drag"]) * env.step_dt).tolist() == [1.0, 0.0, 0.0]
+
+
+class _Scene(dict):
+    """Fake scene: entities by name and the environment origins."""
+
+    env_origins = torch.zeros(1, 3)
+
+
+def _progress_env(ee_pos, stage):
+    """A fake environment with two cloth nodes, the grasp node 0 at 1 cm height, and an EE frame at ``ee_pos``."""
+    nodes = torch.tensor([[[0.5, 0.0, 0.01], [0.6, 0.0, 0.01]]])
+    cloth = SimpleNamespace(data=SimpleNamespace(nodal_pos_w=SimpleNamespace(torch=nodes)))
+    frame = SimpleNamespace(data=SimpleNamespace(target_pos_w=SimpleNamespace(torch=torch.tensor([[ee_pos]]))))
+    cfg = SimpleNamespace(object_name="deformable", ee_frame_name="ee_frame")
+    command = SimpleNamespace(cfg=cfg, stage=torch.tensor([stage]), grasp_node_id=torch.tensor([0]))
+    return SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        step_dt=0.5,
+        scene=_Scene(deformable=cloth, ee_frame=frame),
+        command_manager=SimpleNamespace(get_term=lambda name: command),
+    )
+
+
+def test_distance_progress_rejects_mixed_stages_and_heights_outside_the_approach():
+    env = _progress_env([0.5, 0.0, 0.1], stage=0)
+    for params in ({"stages": ["grasp", "drag"]}, {"stages": []}, {"stages": ["drag"], "target_height": 0.01}):
+        try:
+            ClothDistanceProgress(SimpleNamespace(params=params), env)
+        except ValueError:
+            continue
+        raise AssertionError(f"{params} should be rejected.")
+
+
+def test_distance_progress_pays_approach_in_its_stages_and_settles_the_change_on_reentry():
+    env = _progress_env([0.5, 0.0, 0.1], stage=0)
+    command = env.command_manager.get_term("cloth_target")
+    ee_pos = env.scene["ee_frame"].data.target_pos_w.torch
+    params = {"stages": ["approach", "grasp"], "target_height": 0.0095}
+    term = ClothDistanceProgress(SimpleNamespace(params=params), env)
+    # the first sample only sets the reference
+    assert term(env, **params).item() == 0.0
+    # 4 cm closer to the point at 9.5 mm above the table pays 0.4 per 0.5 s step
+    ee_pos[0, 0, 2] = 0.06
+    assert abs(term(env, **params).item() - 0.04 / 0.1 / 0.5) < 1e-5
+    # a lap through DRAG pays nothing: the 3 cm lifted outside the stages is charged on the first step back and the
+    # same 3 cm down pays it back
+    lap = []
+    command.stage[:] = 2
+    ee_pos[0, 0, 2] = 0.09
+    lap.append(term(env, **params).item())
+    command.stage[:] = 1
+    lap.append(term(env, **params).item())
+    ee_pos[0, 0, 2] = 0.06
+    lap.append(term(env, **params).item())
+    assert lap[0] == 0.0
+    assert abs(lap[1] + 0.03 / 0.1 / 0.5) < 1e-5
+    assert abs(sum(lap)) < 1e-5
+    # a new episode only sets the reference again
+    term.reset([0])
+    ee_pos[0, 0, 2] = 0.02
+    assert term(env, **params).item() == 0.0
+    # rising from 2 cm to 3 cm comes 1 cm closer to the hover point 4 cm above the table
+    hover = {"stages": ["grasp"], "target_height": 0.04}
+    hover_term = ClothDistanceProgress(SimpleNamespace(params=hover), env)
+    hover_term(env, **hover)
+    env.scene["ee_frame"].data.target_pos_w.torch[0, 0, 2] = 0.03
+    assert abs(hover_term(env, **hover).item() - 0.01 / 0.1 / 0.5) < 1e-5
 
 
 class _Cloth:

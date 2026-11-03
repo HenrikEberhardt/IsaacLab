@@ -5,6 +5,8 @@
 from __future__ import annotations
 
 import contextlib
+import warnings
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import gymnasium as gym
@@ -39,6 +41,7 @@ class RslRlVecEnvWrapper(VecEnv):
         env: ManagerBasedRLEnv | DirectRLEnv,
         clip_actions: float | None = None,
         action_clip_diagnostics: float | None = None,
+        action_dim_names: Sequence[str] | None = None,
     ):
         """Initializes the wrapper.
 
@@ -48,8 +51,10 @@ class RslRlVecEnvWrapper(VecEnv):
         Args:
             env: The environment to wrap around.
             clip_actions: The clipping value for actions. If ``None``, then no clipping is done.
-            action_clip_diagnostics: The action magnitude threshold for clipping diagnostics. If ``None``, then no
-                diagnostics are logged.
+            action_clip_diagnostics: The nominal action magnitude threshold for clipping diagnostics. If ``None``,
+                nominal-range diagnostics are not logged. Safety-clip diagnostics use ``clip_actions`` when configured.
+            action_dim_names: Names of the action dimensions in the per-dimension diagnostics. If ``None``, or if
+                their number differs from the action dimension, the dimensions are named ``dim_<index>``.
 
         Raises:
             ValueError: When the environment is not an instance of :class:`ManagerBasedRLEnv` or :class:`DirectRLEnv`.
@@ -95,6 +100,19 @@ class RslRlVecEnvWrapper(VecEnv):
             self.num_actions = self.unwrapped.action_manager.total_action_dim
         else:
             self.num_actions = gym.spaces.flatdim(self.unwrapped.single_action_space)
+
+        # names of the action dimensions in the per-dimension diagnostics
+        self.action_dim_names = [f"dim_{index}" for index in range(self.num_actions)]
+        if action_dim_names is not None:
+            if len(action_dim_names) == self.num_actions:
+                self.action_dim_names = list(action_dim_names)
+            else:
+                warnings.warn(
+                    f"Got {len(action_dim_names)} action dimension names for {self.num_actions} action dimensions;"
+                    " naming them by index instead."
+                )
+        # policy whose action distribution is logged with the diagnostics, see :meth:`set_diagnostics_policy`
+        self._diagnostics_policy = None
 
         # modify the action space to the clip range
         self._modify_action_space()
@@ -201,6 +219,19 @@ class RslRlVecEnvWrapper(VecEnv):
     def close(self):  # noqa: D102
         return self.env.close()
 
+    def set_diagnostics_policy(self, policy: object | None):
+        """Set the policy whose action distribution the action diagnostics log.
+
+        At every :meth:`step`, the diagnostics then log the mean over the environments of the policy's distribution
+        mean and standard deviation per action dimension (``Action/policy_mean_<name>`` and
+        ``Action/policy_std_<name>``). The policy must expose ``output_mean`` and ``output_std`` of the distribution
+        it sampled the stepped actions from, as the RSL-RL models do after acting.
+
+        Args:
+            policy: The policy, or None to stop logging its distribution.
+        """
+        self._diagnostics_policy = policy
+
     """
     Helper functions
     """
@@ -221,18 +252,31 @@ class RslRlVecEnvWrapper(VecEnv):
         )
 
     def _log_action_clip_diagnostics(self, actions: torch.Tensor, extras: dict):
-        """Log how often raw policy actions would exceed the configured magnitude threshold."""
-        if self.action_clip_diagnostics is None:
+        """Log nominal-range violations and actual safety clipping of raw policy actions, and the distribution of the
+        diagnostics policy per action dimension."""
+        if self.action_clip_diagnostics is None and self.clip_actions is None and self._diagnostics_policy is None:
             return
 
-        threshold = self.action_clip_diagnostics
+        log = extras.setdefault("log", {})
+        if self.action_clip_diagnostics is not None:
+            self._log_action_threshold(actions, log, self.action_clip_diagnostics, "Action/outside_nominal")
+        if self.clip_actions is not None:
+            self._log_action_threshold(actions, log, self.clip_actions, "Action/safety_clip")
+        if self._diagnostics_policy is not None:
+            mean = self._diagnostics_policy.output_mean.reshape(-1, self.num_actions).mean(dim=0)
+            std = self._diagnostics_policy.output_std.reshape(-1, self.num_actions).mean(dim=0)
+            for index, name in enumerate(self.action_dim_names):
+                log[f"Action/policy_mean_{name}"] = mean[index]
+                log[f"Action/policy_std_{name}"] = std[index]
+
+    def _log_action_threshold(self, actions: torch.Tensor, log: dict, threshold: float, prefix: str):
+        """Log raw-action exceedance statistics for one symmetric magnitude threshold."""
         excess = torch.clamp(actions.abs() - threshold, min=0.0)
         exceeded = excess > 0.0
-        log = extras.setdefault("log", {})
-        log["Action/would_clip_fraction"] = exceeded.float().mean()
-        log["Action/would_clip_env_fraction"] = exceeded.any(dim=-1).float().mean()
-        log["Action/would_clip_correction_l1_mean"] = excess.mean()
-        log["Action/would_clip_excess_max"] = excess.max()
-        log["Action/would_clip_excess_mean"] = excess.sum() / exceeded.sum().clamp(min=1)
-        for index in range(actions.shape[-1]):
-            log[f"Action/would_clip_fraction_dim_{index}"] = exceeded[..., index].float().mean()
+        log[f"{prefix}_fraction"] = exceeded.float().mean()
+        log[f"{prefix}_env_fraction"] = exceeded.any(dim=-1).float().mean()
+        log[f"{prefix}_correction_l1_mean"] = excess.mean()
+        log[f"{prefix}_excess_max"] = excess.max()
+        log[f"{prefix}_excess_mean"] = excess.sum() / exceeded.sum().clamp(min=1)
+        for index, name in enumerate(self.action_dim_names):
+            log[f"{prefix}_fraction_{name}"] = exceeded[..., index].float().mean()

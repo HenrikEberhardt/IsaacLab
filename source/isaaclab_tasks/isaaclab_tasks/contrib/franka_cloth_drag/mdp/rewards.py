@@ -26,7 +26,6 @@ from .frames import (
     cloth_center_vel_b,
     ee_pose_in_base,
     ee_twist_in_base,
-    raised_node_ids,
     vectors_to_base,
 )
 from .observations import _robot_with_action_joints
@@ -34,12 +33,10 @@ from .stages import (
     ClothDragStage,
     cloth_goal_xy_distance,
     ee_cloth_distance,
-    ee_raised_node_distance,
+    ee_grasp_node_distance,
+    grasp_node_capturable,
     gripper_closing,
-    gripper_holds_cloth,
-    gripper_holds_raised_node,
     nodes_in_grasp,
-    pad_box_mask,
 )
 
 if TYPE_CHECKING:
@@ -244,34 +241,70 @@ def gripper_closed(env: ManagerBasedRLEnv, stages: Sequence[str], command_name: 
     return _stage_gate(gripper_closing(env, command.cfg).float(), command.stage, stages, saturate=False)
 
 
-def gripper_closed_on_raised_node(
-    env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target"
+def gripper_closed_on_grasp_node(
+    env: ManagerBasedRLEnv,
+    stages: Sequence[str],
+    num_nodes_full: int | None = None,
+    first_grasp_only: bool = False,
+    command_name: str = "cloth_target",
 ) -> torch.Tensor:
-    """Reward closing on a capturable raised-node grasp, only in the active stages.
+    """Reward closing while the closing captures the grasp node, in the active stages.
 
-    Readiness uses the attachment selector, including edge midpoints and triangle centers: at least
-    ``grasp_min_nodes`` nodes must be selected, including a reset-raised node. Without raised nodes any selection
-    meeting the count qualifies. An existing attachment uses its stored captured nodes instead of the changing pad
-    box. Without an attachment constraint, the reward is zero. The term never saturates into later stages.
+    The grasp node is :attr:`~.commands.ClothTargetCommand.grasp_node_id`; capture is
+    :func:`~.stages.grasp_node_capturable`: the attachment selector, including edge midpoints and triangle centers,
+    picks at least ``grasp_min_nodes`` nodes with the grasp node among them, or an active lock holds it. The pad box
+    bounds the EE height above the node by the pad half length. It never saturates into later stages.
+
+    Only a close before its lock attempt pays (:attr:`~.actions.ClothGraspAction.grasp_tried`): once the fingers
+    settle, the lock either forms or finds too few nodes, and a gripper held closed after a failed attempt earns
+    nothing until it reopens and closes again.
+
+    Without ``num_nodes_full`` the reward is one while closing captures the grasp node. With it, the reward grows with
+    the number of nodes the grasp would lock (:func:`~.stages.nodes_in_grasp`), ``min(n, num_nodes_full) /
+    num_nodes_full``: a larger pinch pays more, and the cap keeps pushing the cloth into a heap from paying extra.
 
     Args:
         env: The environment.
         stages: Names of the stages in which closing is rewarded.
+        num_nodes_full: Number of nodes in the grasp at which the reward reaches one, or None for one at any count.
+        first_grasp_only: Whether to pay only until the episode first reaches DRAG
+            (:attr:`~.commands.ClothTargetCommand.time_to_stage`), so releasing and grasping again does not pay twice.
+        command_name: Name of the cloth target command.
+    """
+    if num_nodes_full is not None and num_nodes_full < 1:
+        raise ValueError("num_nodes_full must be at least one.")
+    command = _command(env, command_name)
+    capturable = grasp_node_capturable(env, command.cfg, command.grasp_node_id)
+    reward = (gripper_closing(env, command.cfg) & capturable).float()
+    grasp_tried = getattr(env.action_manager.get_term(command.cfg.gripper_action_name), "grasp_tried", None)
+    if grasp_tried is not None:
+        reward *= (~grasp_tried).float()
+    if num_nodes_full is not None:
+        reward *= (nodes_in_grasp(env, command.cfg).float() / num_nodes_full).clamp(max=1.0)
+    if first_grasp_only:
+        reward *= (command.time_to_stage[:, int(ClothDragStage.DRAG)] < 0.0).float()
+    return _stage_gate(reward, command.stage, stages, saturate=False)
+
+
+def gripper_closed_off_grasp_node(
+    env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target"
+) -> torch.Tensor:
+    """Return one while the gripper is commanded closed without the grasp node between the pads, in the active stages.
+
+    Between the pads as the lock selects nodes (:func:`~.stages.grasp_node_capturable` without the minimum node
+    count): the grasp node, or a mesh edge or triangle through it, lies in the pad box. Closing away from the grasp
+    node, a grasp node that escapes the closing pads, or a lock without it (e.g. an edge pinch) costs. A penalty: it
+    never saturates.
+
+    Args:
+        env: The environment.
+        stages: Names of the stages in which closing is penalized.
         command_name: Name of the cloth target command.
     """
     command = _command(env, command_name)
-    cfg = command.cfg
-    constraint = getattr(env.action_manager.get_term(cfg.gripper_action_name), "constraint", None)
-    if constraint is None:
-        return torch.zeros_like(command.stage, dtype=torch.float)
-    selected = constraint.select()
-    ready = selected.sum(dim=1) >= max(cfg.grasp_min_nodes, 1)
-    ids = raised_node_ids(env, cfg.raised_nodes_event)
-    if ids is not None:
-        ready &= selected.gather(1, ids).any(dim=1)
-    ready = torch.where(constraint.active, gripper_holds_raised_node(env, cfg), ready)
-    reward = (gripper_closing(env, cfg) & ready).float()
-    return _stage_gate(reward, command.stage, stages, saturate=False)
+    between = grasp_node_capturable(env, command.cfg, command.grasp_node_id, require_min_nodes=False)
+    penalty = (gripper_closing(env, command.cfg) & ~between).float()
+    return _stage_gate(penalty, command.stage, stages, saturate=False)
 
 
 def gripper_closed_on_cloth(
@@ -360,28 +393,6 @@ def joint_limit_barrier(
     room = torch.minimum(joint_pos - lower, upper - joint_pos)
     penalty = ((margin - room) / margin).clamp(0.0, 1.0).square().sum(dim=1)
     return torch.nan_to_num(penalty, nan=0.0, posinf=0.0, neginf=0.0)
-
-
-def gripper_closed_without_raised_node(
-    env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target"
-) -> torch.Tensor:
-    """Return one while the gripper is commanded closed and no raised node is between the pads. A penalty.
-
-    Gate it on GRASP: there the policy must open, bring a raised node between the pads (:func:`~.stages.pad_box_mask`)
-    and only then close. Closing next to the bump, or holding a lock without a raised node (an edge pinch, which stays
-    in GRASP), costs. While the fingers close around a raised node it stays in the box, so a correct grasp costs
-    nothing. Without raised nodes, any cloth node between the pads counts. It never saturates.
-    """
-    command = _command(env, command_name)
-    ids = raised_node_ids(env, command.cfg.raised_nodes_event)
-    if ids is None:
-        bump_between = nodes_in_grasp(env, command.cfg) > 0
-    else:
-        cloth: DeformableObject = env.scene[command.cfg.object_name]
-        raised_w = cloth.data.nodal_pos_w.torch.gather(1, ids.unsqueeze(-1).expand(-1, -1, 3))
-        bump_between = pad_box_mask(env, command.cfg, raised_w).any(dim=1)
-    penalty = (gripper_closing(env, command.cfg) & ~bump_between).float()
-    return _stage_gate(penalty, command.stage, stages, saturate=False)
 
 
 def cloth_node_speed(env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target") -> torch.Tensor:
@@ -589,56 +600,128 @@ def cloth_settled_at_target(
 
 
 class ClothDistanceProgress(ManagerTermBase):
-    """Signed distance improvement for approach or attached cloth transport.
+    """Signed distance improvement toward the grasp node or of the goal point toward the target, in the active stages.
 
-    ``objective="approach"`` tracks the distance of the EE frame origin to the nearest raised cloth node before
-    attachment, the distance of the GRASP stage (:func:`~.stages.ee_raised_node_distance`; the nearest cloth node if
-    none is raised). ``objective="drag"`` tracks the planar distance of the goal point to the target
+    ``stages`` within APPROACH and GRASP tracks the distance of the EE frame origin to the grasp node
+    (:attr:`~.commands.ClothTargetCommand.grasp_node_id`, see :func:`~.stages.ee_grasp_node_distance`), or to the
+    point straight above or below it at ``target_height`` above the table.
+    ``stages`` within DRAG and GOAL tracks the planar distance of the goal point to the target
     (:func:`~.stages.cloth_goal_xy_distance`: the cloth's central node, or the object on the cloth that must reach the
-    target) while the gripper holds the cloth by a raised node (:func:`~.stages.gripper_holds_raised_node`); a grasp
-    of other nodes pays neither. The first eligible sample establishes a reference; inactive samples still update the
-    reference. Negative increments are retained. No stage-completion reward is paid. Attachment boundaries
-    intentionally restart progress and do not imply a globally telescoping return.
+    target); DRAG and GOAL hold a raised node. The first active sample of an episode establishes a reference. While the
+    stages are inactive the reference keeps the last active sample, so the first sample back pays or charges the change
+    made meanwhile: the return telescopes over the episode, and leaving and re-entering the stages, e.g. lifting and
+    dropping the cloth before re-grasping it, cannot pay the same distance twice. Negative increments are retained. No
+    stage-completion reward is paid.
+
+    With ``kernel_std`` [m], the tracked quantity is ``tanh(distance / kernel_std)`` instead of the distance: the
+    progress over the whole approach still sums to at most one, but nearly all of it is paid within a few
+    ``kernel_std`` of the target, where a precise final alignment is decided. Hovering still pays nothing.
     """
 
+    _APPROACH_STAGES = frozenset({"approach", "grasp"})
+    _DRAG_STAGES = frozenset({"drag", "goal"})
+
     def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
-        """Initialize per-environment progress references."""
+        """Initialize per-environment progress references and check the stages."""
         super().__init__(cfg, env)
+        stages = {name.lower() for name in cfg.params.get("stages", ())}
+        if stages and stages <= self._APPROACH_STAGES:
+            self._approach = True
+        elif stages and stages <= self._DRAG_STAGES:
+            self._approach = False
+            if cfg.params.get("target_height") is not None:
+                raise ValueError("target_height only applies to the approach and grasp stages.")
+        else:
+            raise ValueError(
+                f"Progress stages must lie within {sorted(self._APPROACH_STAGES)} or {sorted(self._DRAG_STAGES)},"
+                f" got {cfg.params.get('stages')!r}."
+            )
         self._previous_distance = torch.zeros(self.num_envs, device=self.device)
-        self._was_eligible = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        self._has_reference = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
         """Invalidate distance references for the selected environments."""
-        self._was_eligible[slice(None) if env_ids is None else env_ids] = False
+        self._has_reference[slice(None) if env_ids is None else env_ids] = False
 
     def __call__(
         self,
         env: ManagerBasedRLEnv,
-        objective: str,
+        stages: Sequence[str],
         distance_scale: float = 0.1,
+        kernel_std: float | None = None,
+        target_height: float | None = None,
         command_name: str = "cloth_target",
     ) -> torch.Tensor:
-        """Return signed improvement per control second, normalized by ``distance_scale`` [m]."""
+        """Return signed improvement per control second, normalized by ``distance_scale`` [m], or of the tanh kernel
+        of width ``kernel_std`` [m] if given (``distance_scale`` is then unused).
+
+        Args:
+            env: The environment.
+            stages: Names of the stages the term is active in, within APPROACH and GRASP or within DRAG and GOAL.
+            distance_scale: Distance improvement that pays one [m].
+            kernel_std: Width of the tanh kernel on the distance [m], or None.
+            target_height: Approach only: height of the tracked point above the table top [m], or None for the grasp
+                node's own height.
+            command_name: Name of the cloth target command.
+        """
         if distance_scale <= 0.0:
             raise ValueError("distance_scale must be positive.")
+        if kernel_std is not None and kernel_std <= 0.0:
+            raise ValueError("kernel_std must be positive.")
         command = _command(env, command_name)
-        attached = gripper_holds_cloth(env, command.cfg)
-        if objective == "approach":
-            distance = ee_raised_node_distance(env, command.cfg)
-            eligible = ~attached
-        elif objective == "drag":
-            distance = cloth_goal_xy_distance(env, command.command, command.cfg)
-            eligible = gripper_holds_raised_node(env, command.cfg)
+        if self._approach:
+            distance = ee_grasp_node_distance(env, command.cfg, command.grasp_node_id, target_height)
         else:
-            raise ValueError(f"Unknown progress objective {objective!r}; expected 'approach' or 'drag'.")
-        eligible = eligible & torch.isfinite(distance)
+            distance = cloth_goal_xy_distance(env, command.command, command.cfg)
+        active = _stage_gate(torch.ones_like(distance), command.stage, stages, saturate=False) > 0.0
+        eligible = active & torch.isfinite(distance)
+        if kernel_std is not None:
+            distance, distance_scale = torch.tanh(distance / kernel_std), 1.0
         progress = (self._previous_distance - distance) / distance_scale
-        reward = torch.where(eligible & self._was_eligible, progress, 0.0) / env.step_dt
-        self._previous_distance.copy_(distance)
-        self._was_eligible.copy_(eligible)
+        reward = torch.where(eligible & self._has_reference, progress, 0.0) / env.step_dt
+        # inactive steps keep the reference, so re-entering the stages settles what changed meanwhile
+        self._previous_distance.copy_(torch.where(eligible, distance, self._previous_distance))
+        self._has_reference |= eligible
         return reward
 
 
 def cloth_drag_success_bonus(env: ManagerBasedRLEnv, termination_name: str = "success") -> torch.Tensor:
     """Pay one on successful termination, compensating for reward-manager time integration."""
     return env.termination_manager.get_term(termination_name).float() / env.step_dt
+
+
+def cloth_drag_termination_penalty(env: ManagerBasedRLEnv, term_keys: Sequence[str]) -> torch.Tensor:
+    """Pay one when any of the termination terms ``term_keys`` ends the episode, compensating for reward-manager time
+    integration like :func:`cloth_drag_success_bonus`. Use a negative weight: the weight is the cost per termination.
+
+    Several terms firing in the same step still count once.
+
+    Args:
+        env: The environment.
+        term_keys: Names of the termination terms that are penalized.
+    """
+    terminated = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
+    for name in term_keys:
+        terminated |= env.termination_manager.get_term(name)
+    return terminated.float() / env.step_dt
+
+
+def cloth_drag_drop_penalty(
+    env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target"
+) -> torch.Tensor:
+    """Pay one when the gripper releases the cloth in one of ``stages`` (:attr:`~.commands.ClothTargetCommand.dropped`),
+    compensating for reward-manager time integration like :func:`cloth_drag_success_bonus`. Use a negative weight: the
+    weight is the cost per drop.
+
+    A drop already returns the stage to APPROACH, so ``stages`` is checked against the stage before the drop
+    (:attr:`~.commands.ClothTargetCommand.previous_stage`). Only DRAG and GOAL hold the cloth, so other stages never
+    pay. Rewards are computed before the command update, so a release is paid on the step after it, with the same
+    one-step lag as the stage gates.
+
+    Args:
+        env: The environment.
+        stages: Names of the stages a drop is penalized in, within DRAG and GOAL.
+        command_name: Name of the cloth target command.
+    """
+    command = _command(env, command_name)
+    return _stage_gate(command.dropped.float(), command.previous_stage, stages, saturate=False) / env.step_dt

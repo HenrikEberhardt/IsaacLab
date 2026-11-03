@@ -47,6 +47,10 @@ class CollectCfg:
     randomize: bool = True
     """Whether the state machine is randomized per rollout with the ranges below."""
 
+    random_grasp_node: bool = False
+    """Whether each randomized rollout grasps a random raised node instead of the task's grasp node
+    (:attr:`~..mdp.commands.ClothTargetCommand.grasp_node_id`), which the approach rewards target."""
+
     drag_speed_range: tuple[float, float] = (0.05, 0.12)
     """Range of the drag speed [m/s]."""
 
@@ -534,7 +538,7 @@ class ResetCollector:
             offset[:, 2] = sum(cfg.pregrasp_height_range) / 2.0
             self.sm.set_params(env_ids, pregrasp_offset=offset)
             return
-        if self.runner.raised_node_ids is not None:
+        if cfg.random_grasp_node and self.runner.raised_node_ids is not None:
             if self.runner.grasp_choice is None:
                 self.runner.grasp_choice = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
             num_raised = self.runner.raised_node_ids.shape[1]

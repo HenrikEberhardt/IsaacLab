@@ -66,9 +66,7 @@ def test_std_is_state_independent_and_mean_uses_only_policy_observations():
 
 def test_entropy_keeps_a_gradient_near_both_std_bounds():
     """The smooth parameterization retains a gradient near the floor and ceiling."""
-    distribution = SigmoidBoundedGaussianDistribution(
-        NUM_ACTIONS, init_std=INIT_STD, std_range=(STD_MIN, STD_MAX)
-    )
+    distribution = SigmoidBoundedGaussianDistribution(NUM_ACTIONS, init_std=INIT_STD, std_range=(STD_MIN, STD_MAX))
     for raw in (-4.0, 4.0):
         distribution.std_raw.grad = None
         with torch.no_grad():
@@ -77,3 +75,29 @@ def test_entropy_keeps_a_gradient_near_both_std_bounds():
         distribution.entropy.sum().backward()
         assert distribution.std_raw.grad is not None
         assert (distribution.std_raw.grad > 0.0).all()
+
+
+def test_bounds_loss_gradient_pulls_only_an_excess_mean_back():
+    """The hook adds exactly the bounds-loss gradient, which is zero for a mean inside the bound."""
+    coef, bound = 0.5, 1.0
+    distribution = SigmoidBoundedGaussianDistribution(
+        NUM_ACTIONS, init_std=INIT_STD, std_range=(STD_MIN, STD_MAX), mean_bound=bound, mean_bound_coef=coef
+    )
+    mean = torch.tensor([[0.3, -0.9, 1.6, -2.5, 1.0], [-1.2, 0.0, 0.5, 3.0, -0.4]])
+    actions = torch.zeros_like(mean)
+
+    def log_prob_grad(with_bounds_loss: bool) -> torch.Tensor:
+        distribution.mean_bound_coef = coef if with_bounds_loss else 0.0
+        leaf = mean.clone().requires_grad_(True)
+        distribution.update(leaf)
+        distribution.log_prob(actions).sum().backward()
+        return leaf.grad
+
+    hooked, plain = log_prob_grad(True), log_prob_grad(False)
+    # independent reference: autograd of the explicit loss
+    leaf = mean.clone().requires_grad_(True)
+    (coef * (leaf.abs() - bound).clamp(min=0.0).square().sum(dim=-1).mean()).backward()
+    torch.testing.assert_close(hooked - plain, leaf.grad)
+    inside = mean.abs() <= bound
+    torch.testing.assert_close(hooked[inside], plain[inside])
+    assert (torch.sign(hooked - plain)[~inside] == torch.sign(mean)[~inside]).all()

@@ -19,6 +19,12 @@ class BoundedGaussianDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
     std_range: tuple[float, float] = (0.05, 1.0)
     """Bounds (min, max) of the standard deviation."""
 
+    mean_bound: float = 1.0
+    """Magnitude of the mean action above which the bounds loss acts."""
+
+    mean_bound_coef: float = 0.0
+    """Weight of the bounds loss pulling the mean action back inside ``mean_bound``. Zero disables it."""
+
 
 @configclass
 class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
@@ -32,16 +38,21 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     logger = "wandb"
     wandb_project = "non-prehensile_cloth_task"
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
-    # Avoid collapsing distinct Gaussian samples to the same action at a wrapper clip. The action term still enforces
-    # workspace, joint-position and velocity safety limits.
-    clip_actions = None
+    # Nominal action range; the actor's bounds loss keeps the mean inside it, so only noise tails are clipped.
+    clip_actions = 1.0
     action_clip_diagnostics = 1.0
+    # Names of the delta EE action dimensions in the action diagnostics (the joint_delta preset falls back to indices)
+    action_dim_names = ["dx", "dy", "dz", "dyaw", "gripper"]
 
     actor = RslRlMLPModelCfg(
         hidden_dims=[256, 128, 64],
         activation="elu",
         obs_normalization=True,
-        distribution_cfg=BoundedGaussianDistributionCfg(init_std=0.5, std_type="scalar", std_range=(0.05, 1.0)),
+        # The bounds loss keeps the mean inside the nominal range: the runner clip hides any excess from the
+        # environment and its rewards, so nothing else pulls a saturated mean back.
+        distribution_cfg=BoundedGaussianDistributionCfg(
+            init_std=0.5, std_type="scalar", std_range=(0.05, 1.0), mean_bound=1.0, mean_bound_coef=0.01
+        ),
     )
 
     critic = RslRlMLPModelCfg(

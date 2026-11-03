@@ -261,6 +261,14 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
         return self.constraint.active
 
     @property
+    def grasp_tried(self) -> torch.Tensor:
+        """Whether the current close has attempted the lock (it locked, or found too few nodes); cleared when the
+        gripper reopens. Shape is (num_envs,)."""
+        if self.constraint is None:
+            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        return self._grasp_tried
+
+    @property
     def num_grasped(self) -> torch.Tensor:
         """Number of cloth nodes locked to the EE frame. Shape is (num_envs,)."""
         if self.constraint is None:

@@ -16,13 +16,14 @@ from isaaclab.managers import CommandTerm, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import combine_frame_transforms
 
-from .frames import cloth_center_pos_b, cloth_center_vel_b
+from .frames import cloth_center_pos_b, cloth_center_vel_b, points_to_base, raised_node_ids
 from .stages import (
     ClothDragStage,
     cloth_goal_xy_distance,
-    ee_raised_node_distance,
+    ee_grasp_node_distance,
     goal_point_pos_b,
     goal_point_vel_b,
+    grasp_node_ids,
     gripper_holds_cloth,
     gripper_holds_raised_node,
 )
@@ -88,8 +89,13 @@ class ClothTargetCommand(CommandTerm):
         self._steps_held = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         self._last_hold_step = torch.full((self.num_envs,), -1, dtype=torch.long, device=self.device)
 
+        # grasp node of the episode, chosen on first use after a reset, once the target and the cloth are final
+        self._grasp_node = torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
+        self._grasp_node_stale = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
+
         # stage machine
         self._stage = torch.full((self.num_envs,), int(ClothDragStage.APPROACH), dtype=torch.long, device=self.device)
+        self._previous_stage = self._stage.clone()
         self._time_in_stage = torch.zeros(self.num_envs, device=self.device)
         self._dropped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # episode time at which each stage was first reached [s]; negative while not reached
@@ -125,9 +131,33 @@ class ClothTargetCommand(CommandTerm):
         return self.target_pos_b
 
     @property
+    def grasp_node_id(self) -> torch.Tensor:
+        """Cloth node the gripper should grasp in this episode. Shape is (num_envs,).
+
+        The raised node (see :attr:`ClothTargetCommandCfg.raised_nodes_event`) closest to the segment from the cloth's
+        central node to the target, the node the scripted state machine grasps (:func:`~.stages.grasp_node_ids`).
+        Without raised nodes, the node a few centimeters from the central node towards the target. It is chosen on the
+        first use after a reset, after a restored target is set, and kept for the episode.
+        """
+        if self._grasp_node_stale.any():
+            nodes_b = points_to_base(self._env, self.cloth.data.nodal_pos_w.torch, self._robot_cfg)
+            center_b = cloth_center_pos_b(self._env, self._cloth_cfg, self._robot_cfg)
+            ids = raised_node_ids(self._env, self.cfg.raised_nodes_event)
+            node = grasp_node_ids(nodes_b, center_b, self.target_pos_b, ids)
+            self._grasp_node = torch.where(self._grasp_node_stale, node, self._grasp_node)
+            self._grasp_node_stale[:] = False
+        return self._grasp_node
+
+    @property
     def stage(self) -> torch.Tensor:
         """Current :class:`~.stages.ClothDragStage` index. Shape is (num_envs,)."""
         return self._stage
+
+    @property
+    def previous_stage(self) -> torch.Tensor:
+        """:class:`~.stages.ClothDragStage` index before the last update, e.g. the stage a drop happened in.
+        Shape is (num_envs,)."""
+        return self._previous_stage
 
     @property
     def time_in_stage(self) -> torch.Tensor:
@@ -199,7 +229,9 @@ class ClothTargetCommand(CommandTerm):
             if reached.any():
                 extras[f"time_to_{stage.name.lower()}"] = time_to_stage[reached, int(stage)].mean().item()
 
+        self._grasp_node_stale[env_ids] = True
         self._stage[env_ids] = int(ClothDragStage.APPROACH)
+        self._previous_stage[env_ids] = int(ClothDragStage.APPROACH)
         self._time_in_stage[env_ids] = 0.0
         self._dropped[env_ids] = False
         self._time_to_stage[env_ids] = -1.0
@@ -218,6 +250,7 @@ class ClothTargetCommand(CommandTerm):
         """
         self.target_pos_b[env_ids] = target_pos_b
         self._stage[env_ids] = stage
+        self._grasp_node_stale[env_ids] = True
 
     """
     Implementation specific functions.
@@ -256,8 +289,8 @@ class ClothTargetCommand(CommandTerm):
         """Advance the stage machine on the current state."""
         cfg = self.cfg
         dt = self._env.step_dt
-        # GRASP: near a raised node; DRAG: holding a raised node; GOAL: DRAG and the center near the target
-        near = ee_raised_node_distance(self._env, cfg) < cfg.approach_radius
+        # GRASP: near the grasp node; DRAG: holding a raised node; GOAL: DRAG and the center near the target
+        near = ee_grasp_node_distance(self._env, cfg, self.grasp_node_id) < cfg.approach_radius
         # locked nodes cannot slip: the grasp holds until the policy opens the gripper, so no hysteresis is needed
         pinched = gripper_holds_raised_node(self._env, cfg)
         wrong_grasp = gripper_holds_cloth(self._env, cfg) & ~pinched
@@ -269,6 +302,7 @@ class ClothTargetCommand(CommandTerm):
         stage[self._dropped] = int(ClothDragStage.APPROACH)
 
         self._time_in_stage = torch.where(stage == self._stage, self._time_in_stage + dt, 0.0)
+        self._previous_stage = self._stage
         self._stage = stage
 
         # episode bookkeeping

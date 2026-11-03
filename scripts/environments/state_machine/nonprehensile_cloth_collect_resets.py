@@ -7,8 +7,8 @@
 Script to generate the reset states of the non-prehensile cloth task with the randomized state machine.
 
 The state machine of :mod:`isaaclab_tasks.contrib.franka_cloth_drag.state_machine` runs in all environments of
-``IsaacContrib-Drag-Cloth-Franka``, randomized per rollout (grasped raised node, drag speed, drag height, grasp yaw
-offset, arm action noise). Each successful rollout contributes one state per stage window (approach, grasp, drag,
+``IsaacContrib-Drag-Cloth-Franka``, randomized per rollout (drag speed, drag height, grasp yaw offset, arm action
+noise, and with ``--random_grasp_node`` the grasped raised node instead of the task's grasp node). Each successful rollout contributes one state per stage window (approach, grasp, drag,
 goal), captured at a uniformly random time inside the window: the pre-grasp pose the state machine holds (open
 gripper, offset and yaw error per rollout), the fresh grasp before the drag, and the goal point at the edge of the goal
 zone. Every candidate is restored through the training reset
@@ -68,6 +68,11 @@ parser.add_argument(
     "--validation_steps", type=int, default=defaults.validation_steps, help="Steps each candidate is held."
 )
 parser.add_argument("--no_randomize", action="store_true", help="Run the state machine without randomization.")
+parser.add_argument(
+    "--random_grasp_node",
+    action="store_true",
+    help="Grasp a random raised node per rollout instead of the task's grasp node.",
+)
 parser.add_argument(
     "--drag_speed_range", type=float, nargs=2, default=defaults.drag_speed_range, help="Drag speed range [m/s]."
 )
@@ -143,6 +148,7 @@ def main():
         num_states=args_cli.num_states,
         validation_steps=args_cli.validation_steps,
         randomize=not args_cli.no_randomize,
+        random_grasp_node=args_cli.random_grasp_node,
         drag_speed_range=tuple(args_cli.drag_speed_range),
         drag_height_range=tuple(args_cli.drag_height_range),
         yaw_offset_range=tuple(args_cli.yaw_offset_range),
