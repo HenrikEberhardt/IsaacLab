@@ -549,19 +549,16 @@ class CommandsCfg:
 
 @configclass
 class ResetFromBankCfg(PresetCfg):
-    """Reset-state presets: default resets only, or the default reset and the bank's stored states, each drawn
-    uniformly inside its bucket."""
+    """Preset for selecting the reset strategie"""
 
-    # "env.events.reset_from_bank=off" Default resets only (the term just logs the success per reset source)
+    # Default resets form the beginning of the task only
     off = EventTerm(
         func=mdp.ResetFromBank,
         mode="reset",
         params={"bank_path": None, "mode_probabilities": {"default": 1.0}, "command_name": "cloth_target"},
     )
 
-    # "env.events.reset_from_bank=uniform" Share of the resets per mode (default reset or a stored state of the bucket,
-    # each in its stage: pre-grasp, fresh grasp before the drag, inside the goal zone); states drawn uniformly inside
-    # each bucket. Mostly default resets: with more stored states, the default task learned slower.
+    # Resets to stage at all 4 stages safed in the reset buffers
     uniform = EventTerm(
         func=mdp.ResetFromBank,
         mode="reset",
@@ -572,7 +569,21 @@ class ResetFromBankCfg(PresetCfg):
         },
     )
 
-    default = uniform
+    # Adaptive buffer ratios depending on EMA success rate of the stages
+    adaptive = EventTerm(
+        func=mdp.ResetFromBank,
+        mode="reset",
+        params={
+            "bank_path": "logs/reset_banks/bank_5000_v4.pt",
+            "mode_probabilities": {"default": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},  # start ratios
+            "min_probabilities": {"default": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05}, # min ratios
+            "success_range": (0.85, 0.95),  # ratio barriers for adaptation
+            "ema_episodes": 256,  # EMA scope
+            "command_name": "cloth_target",
+        },
+    )
+
+    default = adaptive
 
 
 @configclass
@@ -812,7 +823,7 @@ class CurriculumCfg:
         func=mdp.ObservationHidingCurriculum,
         params={
             "command_name": "cloth_target",
-            "success_threshold": 0.75,  # success ratio
+            "success_threshold": 0.99,  # success ratio
             "dwell_steps": 600,  # 25 iterations above the threshold before the ramp starts
             "resume_dwell_steps": 240,  # 10 iterations back above the threshold before a paused ramp continues
             "ramp_steps": 3600,  # 150 iterations at 24 steps/iteration
@@ -827,7 +838,7 @@ class CurriculumCfg:
         func=mdp.ObservationHidingCurriculum,
         params={
             "command_name": "cloth_target",
-            "success_threshold": 0.75,
+            "success_threshold": 0.99,
             "dwell_steps": 600,  # 25 iterations
             "resume_dwell_steps": 240,  # 10 iterations
             "ramp_steps": 3600,  # 150 iterations
@@ -913,3 +924,4 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         if self.events.reset_from_bank is not None:
             self.events.reset_from_bank.params["bank_path"] = None
             self.events.reset_from_bank.params["mode_probabilities"] = {"default": 1.0}
+            self.events.reset_from_bank.params["min_probabilities"] = None

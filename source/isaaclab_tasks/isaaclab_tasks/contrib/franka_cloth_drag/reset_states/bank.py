@@ -231,6 +231,68 @@ def check_mode_probabilities(mode_probabilities: dict[str, float], bank: ResetBa
     return shares / shares.sum()
 
 
+def check_min_probabilities(
+    min_probabilities: dict[str, float],
+    start_shares: torch.Tensor,
+    success_range: Sequence[float],
+    ema_episodes: int,
+) -> torch.Tensor:
+    """Check the settings of the adaptive reset shares and return the minimum shares in the order of
+    :data:`RESET_MODES`.
+
+    Args:
+        min_probabilities: Minimum share of the resets per mode name; missing modes get none.
+        start_shares: Start shares of the modes, from :func:`check_mode_probabilities`, shape [M].
+        success_range: Success (low, high) between which a bucket gives up its share.
+        ema_episodes: Number of finished episodes the success average of a mode effectively spans.
+
+    Raises:
+        ValueError: On an unknown mode, a minimum outside 0 and its start share, a ``success_range`` that is not
+            increasing inside [0, 1], or a non-positive ``ema_episodes``.
+    """
+    unknown = set(min_probabilities) - set(RESET_MODES)
+    if unknown:
+        raise ValueError(f"Unknown reset modes {sorted(unknown)}, expected names from {RESET_MODES}.")
+    minimum = torch.tensor([float(min_probabilities.get(mode, 0.0)) for mode in RESET_MODES])
+    if (minimum < 0.0).any() or (minimum > start_shares + 1e-6).any():
+        raise ValueError(f"Every minimum must lie between 0 and its start share {start_shares.tolist()}: {minimum}.")
+    low, high = success_range
+    if not 0.0 <= low < high <= 1.0:
+        raise ValueError(f"success_range must increase inside [0, 1], got {success_range}.")
+    if ema_episodes <= 0:
+        raise ValueError(f"ema_episodes must be positive, got {ema_episodes}.")
+    return minimum
+
+
+def cascade_shares(
+    start: torch.Tensor, minimum: torch.Tensor, success: torch.Tensor, success_range: Sequence[float]
+) -> torch.Tensor:
+    """Move the reset shares of solved buckets to the stage before them.
+
+    Resets of an earlier stage run through the later ones, so a bucket gives up its share to the mode before it in
+    :data:`RESET_MODES`: goal to drag, drag to grasp, grasp to default. A bucket keeps all it holds, its start share and
+    what it received, up to the low end of ``success_range``, only its minimum from the high end, and linearly between.
+    The default reset gives up nothing, so it never falls below its start share.
+
+    Args:
+        start: Start shares in the order of :data:`RESET_MODES`, shape [M].
+        minimum: Minimum shares in the same order, shape [M].
+        success: Success of each mode in [0, 1] in the same order, shape [M]. The default reset's is not used.
+        success_range: Success (low, high) between which a bucket gives up its share.
+
+    Returns:
+        The shares in the same order, shape [M].
+    """
+    low, high = success_range
+    given_up = ((success - low) / (high - low)).clamp(0.0, 1.0)
+    shares = start.clone()
+    for mode_id in range(len(shares) - 1, 0, -1):
+        released = (shares[mode_id] - minimum[mode_id]) * given_up[mode_id]
+        shares[mode_id] -= released
+        shares[mode_id - 1] += released
+    return shares
+
+
 def sample_reset_rows(bank: ResetBank, shares: torch.Tensor, num: int) -> torch.Tensor:
     """Draw the reset of ``num`` environments: a mode by its share, then a uniform state of that mode's bucket.
 

@@ -21,7 +21,14 @@ from ..reset_states import (
     restore_task_state,
     task_fingerprint,
 )
-from ..reset_states.bank import BUCKET_NAMES, RESET_MODES, check_mode_probabilities, sample_reset_rows
+from ..reset_states.bank import (
+    BUCKET_NAMES,
+    RESET_MODES,
+    cascade_shares,
+    check_min_probabilities,
+    check_mode_probabilities,
+    sample_reset_rows,
+)
 from .stages import ClothDragStage
 
 if TYPE_CHECKING:
@@ -34,6 +41,11 @@ class ResetFromBank(ManagerTermBase):
     Every reset draws a mode per environment by ``mode_probabilities`` (:data:`~..reset_states.bank.RESET_MODES`): the
     task's default reset, or a uniformly drawn stored state of the ``grasp``, ``drag`` or ``goal`` bucket. Rows given
     with :meth:`force_rows` take precedence for the next reset. Without a bank, every reset is the default one.
+
+    With ``min_probabilities``, the shares adapt to the success of the buckets: ``mode_probabilities`` are the start
+    shares, and a solved bucket gives up its share to the stage before it, down to its minimum (see
+    :func:`~..reset_states.bank.cascade_shares`). The success of a source is a moving average over its finished
+    episodes that spans about ``ema_episodes`` of them, logged as ``Reset/success_ema_<mode>``.
 
     The term must come after the other reset events, so the default resets run first and a stored state overwrites
     them. It restores the physical state when called, and the task state that the action and command resets clear in
@@ -63,6 +75,17 @@ class ResetFromBank(ManagerTermBase):
         self._fingerprint_checked = bank_path is None
         self._mode_probabilities = cfg.params.get("mode_probabilities") or {"default": 1.0}
         self._shares = check_mode_probabilities(self._mode_probabilities, self.bank)
+        # adaptive shares: start shares, minimum shares (None for fixed shares) and success average of the modes
+        self._start_shares = self._shares
+        self._min_shares: torch.Tensor | None = None
+        self._success_ema = torch.zeros(len(RESET_MODES))
+        self._success_range = cfg.params.get("success_range", (0.85, 0.95))
+        self._ema_episodes = cfg.params.get("ema_episodes", 256)
+        min_probabilities = cfg.params.get("min_probabilities")
+        if min_probabilities is not None:
+            self._min_shares = check_min_probabilities(
+                min_probabilities, self._start_shares, self._success_range, self._ema_episodes
+            )
         self.rows = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
         """Bank row the current episode of every environment started from, -1 for a default reset."""
         self._forced_rows = torch.full_like(self.rows, -1)
@@ -100,6 +123,9 @@ class ResetFromBank(ManagerTermBase):
         mode_probabilities: dict[str, float] | None = None,
         allow_settings_mismatch: bool = False,
         command_name: str = "cloth_target",
+        min_probabilities: dict[str, float] | None = None,
+        success_range: tuple[float, float] = (0.85, 0.95),
+        ema_episodes: int = 256,
     ) -> None:
         """Draw the reset of every environment and restore the physical state of the stored ones.
 
@@ -113,6 +139,10 @@ class ResetFromBank(ManagerTermBase):
             allow_settings_mismatch: Whether a bank made with other physics or task settings may be loaded.
             command_name: Name of the cloth target command, whose ``success`` metric still holds the outcome of the
                 finished episodes (the command reset clears it later in the same reset).
+            min_probabilities: Minimum share of the resets per mode. Enables the adaptive shares, with
+                ``mode_probabilities`` as the start shares. Defaults to fixed shares.
+            success_range: Success average (low, high) between which a bucket gives up its share.
+            ema_episodes: Number of finished episodes the success average of a source effectively spans.
         """
         if not self._fingerprint_checked:
             # the event terms are built before the action and command managers that the fingerprint reads
@@ -191,7 +221,26 @@ class ResetFromBank(ManagerTermBase):
             if num > 0
         }
         log |= {f"Reset/share_{name}": share for name, share in zip(names, shares) if name in RESET_MODES}
+        if self._min_shares is not None:
+            log |= self._adapt_shares(dict(zip(names, counts)), dict(zip(names, sums)))
         return log
+
+    def _adapt_shares(self, counts: dict[str, float], successes: dict[str, float]) -> dict[str, float]:
+        """Fold the finished episodes into the success average of every mode and set the shares of the next resets.
+
+        Args:
+            counts: Number of finished episodes per source.
+            successes: Number of successful ones per source.
+
+        Returns:
+            The success averages to log.
+        """
+        for mode_id, mode in enumerate(RESET_MODES):
+            if counts[mode] > 0:
+                alpha = counts[mode] / (counts[mode] + self._ema_episodes)
+                self._success_ema[mode_id] += alpha * (successes[mode] / counts[mode] - self._success_ema[mode_id])
+        self._shares = cascade_shares(self._start_shares, self._min_shares, self._success_ema, self._success_range)
+        return {f"Reset/success_ema_{mode}": value for mode, value in zip(RESET_MODES, self._success_ema.tolist())}
 
     def _source(self, rows: torch.Tensor) -> torch.Tensor:
         """Index of the source of each bank row in ``("default", *BUCKET_NAMES)``: 0 for -1, else its bucket + 1."""

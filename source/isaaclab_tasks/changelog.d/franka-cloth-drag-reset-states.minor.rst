@@ -13,6 +13,11 @@ Added
   reset source and the share of each reset mode, and ``Reset/next_stage_<source>`` and ``Reset/time_to_next_<source>``,
   the share of finished episodes per source that reached the stage after their start stage and the time to it (to the
   success for goal starts).
+* Added the ``adaptive`` reset preset (``env.events.reset_from_bank=adaptive``) to ``IsaacContrib-Drag-Cloth-Franka``:
+  the bank and start shares of ``uniform``, but a solved stage hands its share of the resets to the stage before it
+  (goal to drag, drag to grasp, grasp to default), down to a minimum share. ``ResetFromBank`` takes the new optional
+  ``min_probabilities``, ``success_range`` and ``ema_episodes`` parameters and logs the moving success averages as
+  ``Reset/success_ema_<mode>``.
 
 Changed
 ^^^^^^^

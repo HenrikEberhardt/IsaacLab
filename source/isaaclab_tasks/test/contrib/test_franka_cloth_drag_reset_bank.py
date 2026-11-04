@@ -19,6 +19,8 @@ from isaaclab_tasks.contrib.franka_cloth_drag.reset_states.bank import (
     BUCKET_NAMES,
     SCHEMA_VERSION,
     ResetBank,
+    cascade_shares,
+    check_min_probabilities,
     check_mode_probabilities,
     sample_reset_rows,
     stable_hash,
@@ -140,7 +142,38 @@ def test_reset_modes_sample_their_buckets():
         check_mode_probabilities({"default": 0.5, "grasp": 0.5}, None)
 
 
-def _reset_term(monkeypatch, bank, success):
+@pytest.mark.parametrize(
+    "success, expected",
+    [
+        ([1.0, 0.5, 0.5, 0.5], [0.30, 0.45, 0.15, 0.10]),  # nothing solved; default's success does not count
+        ([0.0, 0.5, 0.5, 1.0], [0.30, 0.45, 0.20, 0.05]),  # goal solved: its share goes to drag
+        ([0.0, 0.5, 1.0, 1.0], [0.30, 0.60, 0.05, 0.05]),  # drag too: all it holds goes to grasp
+        ([0.0, 1.0, 1.0, 1.0], [0.85, 0.05, 0.05, 0.05]),  # all solved: only the minimums stay in the buckets
+        ([0.0, 1.0, 0.5, 0.5], [0.70, 0.05, 0.15, 0.10]),  # only grasp solved: drag and goal keep theirs
+        ([0.0, 0.5, 0.5, 0.91], [0.30, 0.45, 0.175, 0.075]),  # goal halfway through the range: half of its surplus
+    ],
+)
+def test_cascade_moves_solved_shares_to_the_stage_before(success, expected):
+    start = torch.tensor([0.30, 0.45, 0.15, 0.10])
+    minimum = torch.tensor([0.20, 0.05, 0.05, 0.05])
+    shares = cascade_shares(start, minimum, torch.tensor(success), (0.85, 0.97))
+    assert shares.tolist() == pytest.approx(expected, abs=1e-6)
+    assert shares.sum().item() == pytest.approx(1.0)
+
+
+def test_adaptive_share_settings_are_checked():
+    start = torch.tensor([0.30, 0.45, 0.15, 0.10])
+    with pytest.raises(ValueError, match="Unknown"):
+        check_min_probabilities({"approach": 0.1}, start, (0.85, 0.97), 256)
+    with pytest.raises(ValueError, match="minimum"):
+        check_min_probabilities({"goal": 0.2}, start, (0.85, 0.97), 256)
+    with pytest.raises(ValueError, match="success_range"):
+        check_min_probabilities({"goal": 0.05}, start, (0.97, 0.85), 256)
+    with pytest.raises(ValueError, match="ema_episodes"):
+        check_min_probabilities({"goal": 0.05}, start, (0.85, 0.97), 0)
+
+
+def _reset_term(monkeypatch, bank, success, **params):
     """A ResetFromBank term on a fake environment; the restores are no-ops. The finished episodes' outcome is set in
     ``success``, the command's ``reached_*`` metrics and ``time_to_stage`` and the environment's episode length."""
     monkeypatch.setattr(reset_bank, "restore_physical", lambda *args, **kwargs: None)
@@ -158,7 +191,7 @@ def _reset_term(monkeypatch, bank, success):
         step_dt=0.25,
         command_manager=SimpleNamespace(get_term=lambda name: command),
     )
-    cfg = EventTermCfg(func=reset_bank.ResetFromBank, mode="reset", params={"bank_path": None})
+    cfg = EventTermCfg(func=reset_bank.ResetFromBank, mode="reset", params={"bank_path": None, **params})
     term = reset_bank.ResetFromBank(cfg, env)
     if bank is not None:
         term.set_bank(bank)
@@ -238,6 +271,54 @@ def test_reset_logs_default_success_without_a_bank(monkeypatch):
         "Reset/share_drag": 0.0,
         "Reset/share_goal": 0.0,
     }
+
+
+def test_adaptive_shares_follow_the_success_average(monkeypatch, tmp_path):
+    success = torch.ones(4)
+    bank = _bank([0, 1, 2, 3], [0] * 4)
+    bank.save(tmp_path / "bank.pt")
+    term, env = _reset_term(
+        monkeypatch,
+        bank,
+        success,
+        bank_path=str(tmp_path / "bank.pt"),
+        mode_probabilities={"default": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
+        min_probabilities={"default": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},
+        success_range=(0.85, 0.97),
+        ema_episodes=3,
+    )
+    drawn = []
+
+    def record_shares(_, shares, num):
+        drawn.append(shares.tolist())
+        return torch.full((num,), -1)
+
+    monkeypatch.setattr(reset_bank, "sample_reset_rows", record_shares)
+    all_envs, goal_envs = torch.arange(4), torch.arange(1, 4)
+
+    def goal_batch(step):
+        """Restart three environments from a goal state and let the first draw, which shows the current shares."""
+        term.force_rows(goal_envs, torch.full((3,), 3))
+        return _reset(term, env, all_envs, step=step), drawn[-1]
+
+    start = [0.30, 0.45, 0.15, 0.10]
+    assert goal_batch(step=0)[1] == pytest.approx(start)
+    # three goal episodes with three episodes of memory: the average covers half the way to their success
+    log, _ = goal_batch(step=1)
+    assert log["Reset/success_ema_goal"] == pytest.approx(0.5)
+    assert log["Reset/success_ema_grasp"] == 0.0
+    # one lucky batch moves no share
+    assert goal_batch(step=2)[1] == pytest.approx(start)
+    # sustained success hands the goal share to drag
+    for step in range(3, 9):
+        log, _ = goal_batch(step)
+    assert log["Reset/success_ema_goal"] > 0.97
+    assert goal_batch(step=9)[1] == pytest.approx([0.30, 0.45, 0.20, 0.05])
+    # failures take it back
+    success.zero_()
+    for step in range(10, 13):
+        goal_batch(step)
+    assert goal_batch(step=13)[1] == pytest.approx(start)
 
 
 def test_bank_path_falls_back_to_the_repository_root(tmp_path, monkeypatch):

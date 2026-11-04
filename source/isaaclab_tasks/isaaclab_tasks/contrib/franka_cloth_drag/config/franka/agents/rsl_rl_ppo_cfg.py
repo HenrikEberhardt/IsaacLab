@@ -38,11 +38,10 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     logger = "wandb"
     wandb_project = "non-prehensile_cloth_task"
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
-    # No runner clip: PPO would learn from samples the environment never executed, which pushes the mean past the
-    # bound. The action penalties and the bounds loss keep actions near the nominal range, whose excess is only logged.
+    
+    # Action clipping setup
     clip_actions = None
     action_clip_diagnostics = 1.0
-    # Names of the delta EE action dimensions in the action diagnostics (the joint_delta preset falls back to indices)
     action_dim_names = ["dx", "dy", "dz", "dyaw", "gripper"]
 
     actor = RslRlMLPModelCfg(
