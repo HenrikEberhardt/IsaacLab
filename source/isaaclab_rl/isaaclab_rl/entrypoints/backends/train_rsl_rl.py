@@ -211,7 +211,6 @@ def _run(args_cli: argparse.Namespace) -> None:
             env = RslRlVecEnvWrapper(
                 env,
                 clip_actions=agent_cfg.clip_actions,
-                action_clip_diagnostics=agent_cfg.action_clip_diagnostics,
                 action_dim_names=agent_cfg.action_dim_names,
             )
             report_activity(None)
@@ -223,8 +222,8 @@ def _run(args_cli: argparse.Namespace) -> None:
                 runner = DistillationRunner(env, agent_cfg.to_dict(), log_dir=log_dir, device=agent_cfg.device)
             else:
                 raise ValueError(f"Unsupported runner class: {agent_cfg.class_name}")
-            if agent_cfg.action_clip_diagnostics is not None:
-                # log the policy's action distribution per action dimension with the action diagnostics
+            if agent_cfg.action_dim_names is not None:
+                # log the policy's action distribution and the commanded actions per action dimension
                 env.set_diagnostics_policy(runner.alg.get_policy())
             report_activity(None)
 

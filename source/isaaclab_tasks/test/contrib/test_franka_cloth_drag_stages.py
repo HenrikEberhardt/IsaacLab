@@ -13,6 +13,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 
 from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.agents.rsl_rl_ppo_cfg import FrankaClothDragPPORunnerCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import (
+    ActorObsCfg,
     CurriculumCfg,
     RewardsCfg,
     TerminationsCfg,
@@ -36,7 +37,7 @@ CFG = SimpleNamespace(gripper_action_name="gripper_action", raised_nodes_event="
 
 
 def test_action_regularization_and_clip_configuration():
-    """Action costs should be fixed from reset one; samples beyond the nominal range are logged, not clipped."""
+    """Action costs should be fixed from reset one; samples beyond the nominal range are not clipped."""
     rewards = RewardsCfg()
     curriculum = CurriculumCfg()
     runner = FrankaClothDragPPORunnerCfg()
@@ -45,8 +46,16 @@ def test_action_regularization_and_clip_configuration():
     assert rewards.pen_action_rate.weight == -0.1
     assert not hasattr(curriculum, "action_magnitude")
     assert not hasattr(curriculum, "action_rate")
-    assert runner.action_clip_diagnostics == 1.0
     assert runner.clip_actions is None
+
+
+def test_stage_and_grasp_flag_are_hidden_by_the_same_curriculum_term():
+    """An observation naming an unknown term stays visible without an error, so the names must match the term."""
+    actor = ActorObsCfg()
+
+    assert CurriculumCfg().observation_hiding is not None
+    assert actor.stage.params["hide_curriculum"] == "observation_hiding"
+    assert actor.cloth_grasped.params["hide_curriculum"] == "observation_hiding"
 
 
 class _EventManager:

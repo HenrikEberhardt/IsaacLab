@@ -59,7 +59,6 @@ def _make_wrapper(env: _FakeEnv, num_envs: int = 2) -> RslRlVecEnvWrapper:
     wrapper.env = env
     wrapper.num_envs = num_envs
     wrapper.clip_actions = None
-    wrapper.action_clip_diagnostics = None
     wrapper.num_actions = 2
     wrapper.action_dim_names = ["dim_0", "dim_1"]
     wrapper._diagnostics_policy = None
@@ -115,37 +114,9 @@ def test_invalid_environment_error_reports_unwrapped_type():
     assert "_OuterEnv" not in str(exc_info.value)
 
 
-def test_action_clip_diagnostics_separate_nominal_and_safety_thresholds():
-    """Diagnostics should distinguish nominal-range violations from actual safety clipping."""
+def test_action_diagnostics_log_policy_distribution_and_commanded_magnitude_per_named_dimension():
+    """With named dimensions and a policy, the diagnostics should log its distribution and the commanded magnitude."""
     wrapper = _make_wrapper(_FakeEnv())
-    wrapper.action_clip_diagnostics = 1.0
-    wrapper.clip_actions = 2.0
-    actions = torch.tensor([[0.0, 1.5], [-3.0, 0.5]])
-    extras = {}
-
-    wrapper._log_action_clip_diagnostics(actions, extras)
-
-    log = extras["log"]
-    torch.testing.assert_close(log["Action/outside_nominal_fraction"], torch.tensor(0.5))
-    torch.testing.assert_close(log["Action/outside_nominal_env_fraction"], torch.tensor(1.0))
-    torch.testing.assert_close(log["Action/outside_nominal_correction_l1_mean"], torch.tensor(0.625))
-    torch.testing.assert_close(log["Action/outside_nominal_excess_mean"], torch.tensor(1.25))
-    torch.testing.assert_close(log["Action/outside_nominal_excess_max"], torch.tensor(2.0))
-    torch.testing.assert_close(log["Action/outside_nominal_fraction_dim_0"], torch.tensor(0.5))
-    torch.testing.assert_close(log["Action/outside_nominal_fraction_dim_1"], torch.tensor(0.5))
-    torch.testing.assert_close(log["Action/safety_clip_fraction"], torch.tensor(0.25))
-    torch.testing.assert_close(log["Action/safety_clip_env_fraction"], torch.tensor(0.5))
-    torch.testing.assert_close(log["Action/safety_clip_correction_l1_mean"], torch.tensor(0.25))
-    torch.testing.assert_close(log["Action/safety_clip_excess_mean"], torch.tensor(1.0))
-    torch.testing.assert_close(log["Action/safety_clip_excess_max"], torch.tensor(1.0))
-    torch.testing.assert_close(log["Action/safety_clip_fraction_dim_0"], torch.tensor(0.5))
-    torch.testing.assert_close(log["Action/safety_clip_fraction_dim_1"], torch.tensor(0.0))
-
-
-def test_action_diagnostics_log_policy_distribution_and_clipping_per_named_dimension():
-    """With named dimensions and a policy, the diagnostics should log its distribution and the clipping per name."""
-    wrapper = _make_wrapper(_FakeEnv())
-    wrapper.clip_actions = 1.0
     wrapper.action_dim_names = ["dx", "gripper"]
     policy = SimpleNamespace(
         output_mean=torch.tensor([[0.2, -1.0], [0.6, 1.0]]), output_std=torch.tensor([[0.5, 0.1], [0.5, 0.1]])
@@ -153,37 +124,38 @@ def test_action_diagnostics_log_policy_distribution_and_clipping_per_named_dimen
     wrapper.set_diagnostics_policy(policy)
     extras = {}
 
-    wrapper._log_action_clip_diagnostics(torch.tensor([[1.5, -0.5], [0.5, 2.0]]), extras)
+    wrapper._log_action_diagnostics(torch.tensor([[1.5, -0.5], [-0.5, 2.0]]), extras)
 
     log = extras["log"]
+    assert len(log) == 6
     torch.testing.assert_close(log["Action/policy_mean_dx"], torch.tensor(0.4))
     torch.testing.assert_close(log["Action/policy_mean_gripper"], torch.tensor(0.0))
     torch.testing.assert_close(log["Action/policy_std_dx"], torch.tensor(0.5))
     torch.testing.assert_close(log["Action/policy_std_gripper"], torch.tensor(0.1))
-    torch.testing.assert_close(log["Action/safety_clip_fraction_dx"], torch.tensor(0.5))
-    torch.testing.assert_close(log["Action/safety_clip_fraction_gripper"], torch.tensor(0.5))
+    torch.testing.assert_close(log["Action/commanded_abs_dx"], torch.tensor(1.0))
+    torch.testing.assert_close(log["Action/commanded_abs_gripper"], torch.tensor(1.25))
 
 
-def test_action_clip_diagnostics_are_opt_in():
-    """The wrapper should not add metrics unless a diagnostic threshold is configured."""
+def test_action_diagnostics_are_opt_in():
+    """The wrapper should not add metrics without a diagnostics policy."""
     wrapper = _make_wrapper(_FakeEnv())
     extras = {}
 
-    wrapper._log_action_clip_diagnostics(torch.ones(2, 2), extras)
+    wrapper._log_action_diagnostics(torch.ones(2, 2), extras)
 
     assert extras == {}
 
 
-def test_step_applies_safety_clip_but_logs_raw_actions():
-    """The environment should receive clipped actions while diagnostics retain the original samples."""
+def test_step_logs_the_clipped_action_sent_to_the_environment():
+    """The commanded magnitude should describe what the environment received, not the raw sample."""
     env = _StepEnv()
     wrapper = _make_wrapper(env)
     wrapper.clip_actions = 2.0
-    wrapper.action_clip_diagnostics = 1.0
+    wrapper.set_diagnostics_policy(SimpleNamespace(output_mean=torch.zeros(2, 2), output_std=torch.ones(2, 2)))
     actions = torch.tensor([[3.0, -1.5], [-4.0, 0.5]])
 
     _, _, _, extras = wrapper.step(actions)
 
     torch.testing.assert_close(env.received_actions, torch.tensor([[2.0, -1.5], [-2.0, 0.5]]))
-    torch.testing.assert_close(extras["log"]["Action/outside_nominal_fraction"], torch.tensor(0.75))
-    torch.testing.assert_close(extras["log"]["Action/safety_clip_fraction"], torch.tensor(0.5))
+    torch.testing.assert_close(extras["log"]["Action/commanded_abs_dim_0"], torch.tensor(2.0))
+    torch.testing.assert_close(extras["log"]["Action/commanded_abs_dim_1"], torch.tensor(1.0))

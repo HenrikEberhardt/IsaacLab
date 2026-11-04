@@ -70,8 +70,8 @@ class _SuccessGatedRamp(ManagerTermBase):
         Args:
             env: The environment.
             env_ids: The environments being reset.
-            command_name: Name of the :class:`~.commands.ClothTargetCommand`, whose ``success`` metric still holds the
-                finished episode's success: the command reset clears it later in the same reset.
+            command_name: Name of the :class:`~.commands.ClothTargetCommand`, whose ``success`` still holds the finished
+                episode's success: the command reset clears it later in the same reset.
             success_threshold: Success average from which the progress grows.
             ramp_steps: Environment steps (policy steps per environment) above the threshold from zero to full
                 progress. With 24 steps per iteration, 7200 steps are 300 iterations.
@@ -91,7 +91,7 @@ class _SuccessGatedRamp(ManagerTermBase):
         # the reset at the start of training ends no episode
         if step > 0:
             env_ids = _default_start_ids(env, env_ids, reset_term)
-            success = env.command_manager.get_term(command_name).metrics["success"][env_ids]
+            success = env.command_manager.get_term(command_name).success[env_ids]
             if success.numel() > 0:
                 alpha = success.numel() / (success.numel() + ema_episodes)
                 self.success_ema += alpha * (success.float().mean().item() - self.success_ema)
@@ -262,7 +262,7 @@ class ObservationHidingCurriculum(_SuccessGatedRamp):
             reset_term: See :meth:`_SuccessGatedRamp._update`.
 
         Returns:
-            The state to log: success average, gate, progress and share of hidden episodes.
+            The state to log: progress and success average.
         """
         self._update(
             env,
@@ -279,9 +279,4 @@ class ObservationHidingCurriculum(_SuccessGatedRamp):
         num_reset = self.hidden[env_ids].shape[0]
         draw = torch.rand(num_reset, generator=self._generator, device=self.hidden.device)
         self.hidden[env_ids] = draw < self.progress
-        return {
-            "success_ema": self.success_ema,
-            "gate_open": float(self.gate_open),
-            "progress": self.progress,
-            "hidden_fraction": self.hidden.float().mean().item(),
-        }
+        return {"progress": self.progress, "success_ema": self.success_ema}

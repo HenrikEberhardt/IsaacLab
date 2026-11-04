@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from ..state_machine import ClothDragSmRunner
 
 SAMPLED_BUCKETS = ("grasp", "drag", "goal")
-"""Buckets that training samples from; the approach rows are the starts of the rollouts' ladders."""
+"""Buckets that training samples from and the collector stores."""
 
 
 @dataclass
@@ -39,7 +39,7 @@ class CollectCfg:
     """Settings of the reset-state generation."""
 
     num_states: int = 5000
-    """Number of stored grasp, drag and goal states, split evenly; the rollouts' approach rows come on top."""
+    """Number of stored grasp, drag and goal states, split evenly."""
 
     validation_steps: int = 30
     """Steps each candidate is held after its restore before it counts as valid."""
@@ -255,11 +255,11 @@ class ResetValidator:
 class ResetCollector:
     """Run the randomized state machine, capture candidate reset states, validate them and fill a bank.
 
-    Rollouts stream in all environments: every success hands its captured states to the candidate pool under a new
-    ``context_id``, every failure is dropped. Each window of :data:`~.bank.BUCKET_NAMES` has one reservoir slot per
-    environment, so the capture time is uniform over the window. Candidates are then restored in chunks of the
-    environments through :class:`~..mdp.reset_bank.ResetFromBank` and checked by :class:`ResetValidator`. Rounds of
-    rollouts and validation alternate until every bucket of :meth:`CollectCfg.quotas` is full.
+    Rollouts stream in all environments: every success hands its captured grasp, drag and goal states to the candidate
+    pool, and every failure is dropped. Each sampled window has one reservoir slot per environment, so the capture
+    time is uniform over the window. Candidates are then restored in chunks of the environments through
+    :class:`~..mdp.reset_bank.ResetFromBank` and checked by :class:`ResetValidator`. Rounds of rollouts and validation
+    alternate until every bucket of :meth:`CollectCfg.quotas` is full.
     """
 
     def __init__(self, env: ManagerBasedRLEnv, runner: ClothDragSmRunner, bank_term: ResetFromBank, cfg: CollectCfg):
@@ -285,7 +285,6 @@ class ResetCollector:
         self._rows = torch.arange(self.num_envs, device=self.device)
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(cfg.seed)
-        self._next_context = 0
         self.stats: Counter = Counter()
 
     def run(self) -> ResetBank:
@@ -404,6 +403,8 @@ class ResetCollector:
             ee_speed = (ee_pose_in_base(env)[0] - runner.ee_pos).norm(dim=-1) / env.step_dt
             windows = self._windows(ongoing, step, covered, distance, ee_speed, since_squeeze)
             for level, eligible in enumerate(windows):
+                if BUCKET_NAMES[level] not in SAMPLED_BUCKETS:
+                    continue
                 seen[level] += eligible.long()
                 draw = torch.rand(num_envs, device=device, generator=self._generator)
                 replace = eligible & (draw * seen[level] < 1.0)
@@ -497,8 +498,6 @@ class ResetCollector:
 
     def _finalize(self, env_ids, seen, slots, progress, episode_time) -> ResetBank | None:
         """Collect the captured states of the given environments' finished, successful rollouts."""
-        contexts = torch.arange(self._next_context, self._next_context + len(env_ids), device=self.device)
-        self._next_context += len(env_ids)
         # grasp choice, drag speed, drag height, grasp yaw offset, pre-grasp offset (x, y, z), pre-grasp yaw error
         sm = self.sm
         sm_params = torch.cat(
@@ -518,8 +517,6 @@ class ResetCollector:
             data = {group: {key: value[ids] for key, value in slot[group].items()} for group in slot}
             data["labels"] = {
                 "bucket": torch.full((len(ids),), level, dtype=torch.long, device=self.device),
-                "level": torch.full((len(ids),), level, dtype=torch.long, device=self.device),
-                "context_id": contexts[filled],
                 "progress": progress[level, ids],
                 "episode_time": episode_time[level, ids],
                 "sm_params": sm_params[ids],

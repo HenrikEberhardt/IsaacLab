@@ -8,13 +8,14 @@ Script to generate the reset states of the non-prehensile cloth task with the ra
 
 The state machine of :mod:`isaaclab_tasks.contrib.franka_cloth_drag.state_machine` runs in all environments of
 ``IsaacContrib-Drag-Cloth-Franka``, randomized per rollout (drag speed, drag height, grasp yaw offset, arm action
-noise, and with ``--random_grasp_node`` the grasped raised node instead of the task's grasp node). Each successful rollout contributes one state per stage window (approach, grasp, drag,
-goal), captured at a uniformly random time inside the window: the pre-grasp pose the state machine holds (open
+noise, and with ``--random_grasp_node`` the grasped raised node instead of the task's grasp node). Each successful
+rollout contributes one state per training reset window (grasp, drag, goal), captured at a uniformly random time
+inside the window: the pre-grasp pose the state machine holds (open
 gripper, offset and yaw error per rollout), the fresh grasp before the drag, and the goal point at the edge of the goal
 zone. Every candidate is restored through the training reset
 path into a freshly reset environment and held for ``--validation_steps`` steps; only valid states are kept. The bank
-holds ``--num_states`` grasp, drag and goal states, split evenly, plus the approach rows of their rollouts, and is
-saved to ``--output``. See ``franka_cloth_drag/implementation_log/reset_states.md``.
+holds exactly ``--num_states`` grasp, drag and goal states, split evenly, and is saved to ``--output``. See
+``franka_cloth_drag/implementation_log/reset_states.md``.
 
 .. code-block:: bash
 

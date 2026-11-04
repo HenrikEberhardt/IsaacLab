@@ -41,22 +41,19 @@ FINGERPRINT = {
 }
 
 
-def _bank(buckets, contexts):
-    """A bank with the given bucket and context of every row; the row index is stored as a joint position."""
+def _bank(buckets):
+    """A bank with the given bucket of every row; the row index is stored as a joint position."""
     num = len(buckets)
     data = {
         "scene": {"joint_pos": torch.arange(num, dtype=torch.float).unsqueeze(1).repeat(1, 2)},
         "task": {"grasped": torch.zeros(num, 2, dtype=torch.bool)},
-        "labels": {
-            "bucket": torch.tensor(buckets, dtype=torch.long),
-            "context_id": torch.tensor(contexts, dtype=torch.long),
-        },
+        "labels": {"bucket": torch.tensor(buckets, dtype=torch.long)},
     }
     return ResetBank(data, {"schema_version": SCHEMA_VERSION, "fingerprint": dict(FINGERPRINT)})
 
 
 def test_save_and_load_round_trip(tmp_path):
-    bank = _bank([0, 1, 2, 3], [0, 0, 0, 0])
+    bank = _bank([0, 1, 2, 3])
     path = tmp_path / "bank.pt"
     bank.save(path)
     loaded = ResetBank.load(path)
@@ -68,7 +65,7 @@ def test_save_and_load_round_trip(tmp_path):
 
 
 def test_load_rejects_another_schema_version(tmp_path):
-    bank = _bank([1], [0])
+    bank = _bank([1])
     bank.meta["schema_version"] = SCHEMA_VERSION + 1
     bank.save(tmp_path / "old.pt")
     with pytest.raises(ValueError, match="schema version"):
@@ -76,7 +73,7 @@ def test_load_rejects_another_schema_version(tmp_path):
 
 
 def test_fingerprint_mismatch():
-    bank = _bank([1], [0])
+    bank = _bank([1])
     bank.check_fingerprint(dict(FINGERPRINT))
     with pytest.raises(ValueError, match="joint_names"):
         bank.check_fingerprint(FINGERPRINT | {"joint_names": ["b", "a"]})
@@ -110,25 +107,20 @@ def test_physics_hash_ignores_the_proxy_bodies_resolved_per_env():
     assert stable_hash(_without_resolved_bodies(changed)) != stable_hash(_without_resolved_bodies(physics([8, 9])))
 
 
-def test_subsample_keeps_quotas_and_the_approach_rows_of_kept_rollouts():
-    # rollouts 0-2 have all four levels, rollout 3 only an approach row
-    buckets = [0, 1, 2, 3] * 3 + [0]
-    contexts = [0] * 4 + [1] * 4 + [2] * 4 + [3]
-    bank = _bank(buckets, contexts)
+def test_subsample_keeps_exact_bucket_quotas_without_approach_rows():
+    bank = _bank([0, 1, 2, 3] * 3 + [0])
     rows = subsample_to_quotas(bank, {"grasp": 2, "drag": 2, "goal": 2}, torch.Generator().manual_seed(0))
     kept = bank.select(rows)
     counts = kept.bucket_counts()
+    assert len(kept) == 6
+    assert counts["approach"] == 0
     assert (counts["grasp"], counts["drag"], counts["goal"]) == (2, 2, 2)
-    kept_contexts = set(kept.data["labels"]["context_id"].tolist())
-    approach_contexts = set(kept.data["labels"]["context_id"][kept.bucket_rows("approach")].tolist())
-    assert approach_contexts == kept_contexts
-    assert 3 not in kept_contexts
     with pytest.raises(ValueError, match="fewer"):
         subsample_to_quotas(bank, {"grasp": 4})
 
 
 def test_reset_modes_sample_their_buckets():
-    bank = _bank([0, 1, 1, 2, 3, 3], [0] * 6)
+    bank = _bank([0, 1, 1, 2, 3, 3])
     shares = check_mode_probabilities({"default": 1.0}, bank)
     assert (sample_reset_rows(bank, shares, 50) == -1).all()
     shares = check_mode_probabilities({"grasp": 1.0, "goal": 1.0}, bank)
@@ -137,7 +129,7 @@ def test_reset_modes_sample_their_buckets():
     with pytest.raises(ValueError, match="Unknown"):
         check_mode_probabilities({"approach": 1.0}, bank)
     with pytest.raises(ValueError, match="no stored states"):
-        check_mode_probabilities({"drag": 1.0}, _bank([1], [0]))
+        check_mode_probabilities({"drag": 1.0}, _bank([1]))
     with pytest.raises(ValueError, match="no stored states"):
         check_mode_probabilities({"default": 0.5, "grasp": 0.5}, None)
 
@@ -164,31 +156,34 @@ def test_cascade_moves_solved_shares_to_the_stage_before(success, expected):
 def test_adaptive_share_settings_are_checked():
     start = torch.tensor([0.30, 0.45, 0.15, 0.10])
     with pytest.raises(ValueError, match="Unknown"):
-        check_min_probabilities({"approach": 0.1}, start, (0.85, 0.97), 256)
+        check_min_probabilities({"approach": 0.1}, start, (0.85, 0.97))
     with pytest.raises(ValueError, match="minimum"):
-        check_min_probabilities({"goal": 0.2}, start, (0.85, 0.97), 256)
+        check_min_probabilities({"goal": 0.2}, start, (0.85, 0.97))
     with pytest.raises(ValueError, match="success_range"):
-        check_min_probabilities({"goal": 0.05}, start, (0.97, 0.85), 256)
-    with pytest.raises(ValueError, match="ema_episodes"):
-        check_min_probabilities({"goal": 0.05}, start, (0.85, 0.97), 0)
+        check_min_probabilities({"goal": 0.05}, start, (0.97, 0.85))
 
 
-def _reset_term(monkeypatch, bank, success, **params):
+DEFAULT_ONLY_SHARES = {
+    "Reset/share_default_raw": 1.0,
+    "Reset/share_grasp_raw": 0.0,
+    "Reset/share_drag_raw": 0.0,
+    "Reset/share_goal_raw": 0.0,
+}
+
+
+def _reset_term(monkeypatch, bank, success, log_dir=None, **params):
     """A ResetFromBank term on a fake environment; the restores are no-ops. The finished episodes' outcome is set in
-    ``success``, the command's ``reached_*`` metrics and ``time_to_stage`` and the environment's episode length."""
+    ``success`` and the command's ``time_to_stage``."""
     monkeypatch.setattr(reset_bank, "restore_physical", lambda *args, **kwargs: None)
     monkeypatch.setattr(reset_bank, "restore_task_state", lambda *args, **kwargs: None)
     num = len(success)
-    metrics = {"success": success}
-    metrics |= {f"reached_{stage.name.lower()}": torch.zeros(num) for stage in list(ClothDragStage)[1:]}
-    command = SimpleNamespace(metrics=metrics, time_to_stage=torch.full((num, len(ClothDragStage)), -1.0))
+    command = SimpleNamespace(success=success, time_to_stage=torch.full((num, len(ClothDragStage)), -1.0))
     env = SimpleNamespace(
         num_envs=num,
         device="cpu",
         common_step_counter=0,
         extras={},
-        episode_length_buf=torch.zeros(num, dtype=torch.long),
-        step_dt=0.25,
+        cfg=SimpleNamespace(log_dir=log_dir),
         command_manager=SimpleNamespace(get_term=lambda name: command),
     )
     cfg = EventTermCfg(func=reset_bank.ResetFromBank, mode="reset", params={"bank_path": None, **params})
@@ -204,12 +199,17 @@ def _reset(term, env, env_ids, step):
     term(env, env_ids)
     env.extras["log"] = {}
     term.reset(env_ids)
-    return {key: value for key, value in env.extras["log"].items() if key.startswith("Reset/")}
+    return env.extras["log"]
+
+
+def _rates(source, suffix, task, stage):
+    """Expected task and stage success of a source."""
+    return {f"Reset/task_success_{source}_{suffix}": task, f"Reset/stage_success_{source}_{suffix}": stage}
 
 
 def test_reset_logs_success_per_source(monkeypatch):
     success = torch.zeros(4)
-    term, env = _reset_term(monkeypatch, _bank([0, 1, 2, 3], [0] * 4), success)
+    term, env = _reset_term(monkeypatch, _bank([0, 1, 2, 3]), success)
     all_envs = torch.arange(4)
     term.force_rows(all_envs, torch.tensor([-1, 1, 2, 3]))  # default, grasp, drag, goal
     assert _reset(term, env, all_envs, step=0) == {}  # the initial reset ends no episode
@@ -217,41 +217,27 @@ def test_reset_logs_success_per_source(monkeypatch):
     # envs 0-2 end (default success, grasp failure, drag success), env 3 (goal) runs on; all restart from defaults
     success[:] = torch.tensor([1.0, 0.0, 1.0, 1.0])
     command = env.command_manager.get_term("cloth_target")
-    # env 0 reached GRASP at 2 s and DRAG at 3 s, env 1 never reached DRAG, env 2 reached GOAL at 1.5 s
-    command.metrics["reached_grasp"][:] = torch.tensor([1.0, 1.0, 1.0, 1.0])
-    command.metrics["reached_drag"][:] = torch.tensor([1.0, 0.0, 1.0, 1.0])
-    command.metrics["reached_goal"][:] = torch.tensor([1.0, 0.0, 1.0, 1.0])
+    # env 0 reached GRASP, env 1 never reached DRAG, env 2 reached GOAL
     command.time_to_stage[0, 1:] = torch.tensor([2.0, 3.0, 4.0])
     command.time_to_stage[1, 1] = 0.25
     command.time_to_stage[2, 1:] = torch.tensor([0.25, 0.25, 1.5])
     log = _reset(term, env, torch.tensor([0, 1, 2]), step=10)
-    assert log == {
-        "Reset/success_default": 1.0,
-        "Reset/success_grasp": 0.0,
-        "Reset/success_drag": 1.0,
-        "Reset/next_stage_default": 1.0,
-        "Reset/next_stage_grasp": 0.0,
-        "Reset/next_stage_drag": 1.0,
-        "Reset/time_to_next_default": 2.0,
-        "Reset/time_to_next_drag": 1.5,
-        "Reset/share_default": 1.0,
-        "Reset/share_grasp": 0.0,
-        "Reset/share_drag": 0.0,
-        "Reset/share_goal": 0.0,
-    }
+    first_episodes = _rates("default", "smoothed", 1.0, 1.0)
+    first_episodes |= _rates("grasp", "smoothed", 0.0, 0.0) | _rates("drag", "smoothed", 1.0, 1.0)
+    assert log == (
+        DEFAULT_ONLY_SHARES
+        | _rates("default", "raw", 1.0, 1.0)
+        | _rates("grasp", "raw", 0.0, 0.0)
+        | _rates("drag", "raw", 1.0, 1.0)
+        | first_episodes
+    )
     assert term.rows.tolist() == [-1, -1, -1, 3]
 
-    # env 3 (goal) ends with the success after 8 steps; the time to success is its episode time
-    env.episode_length_buf[3] = 8
+    # env 3 (goal) ends with the success, which is its next stage, though it reached no stage on the way
     log = _reset(term, env, torch.tensor([3]), step=20)
-    assert log == {
-        "Reset/success_goal": 1.0,
-        "Reset/time_to_next_goal": 2.0,
-        "Reset/share_default": 1.0,
-        "Reset/share_grasp": 0.0,
-        "Reset/share_drag": 0.0,
-        "Reset/share_goal": 0.0,
-    }
+    assert log == (
+        DEFAULT_ONLY_SHARES | _rates("goal", "raw", 1.0, 1.0) | first_episodes | _rates("goal", "smoothed", 1.0, 1.0)
+    )
 
 
 def test_reset_logs_default_success_without_a_bank(monkeypatch):
@@ -259,23 +245,100 @@ def test_reset_logs_default_success_without_a_bank(monkeypatch):
     term, env = _reset_term(monkeypatch, None, success)
     _reset(term, env, torch.arange(4), step=0)
     command = env.command_manager.get_term("cloth_target")
-    command.metrics["reached_grasp"][:] = torch.tensor([1.0, 1.0, 0.0, 1.0])
     command.time_to_stage[:, 1] = torch.tensor([1.0, 2.0, -1.0, 3.0])
     log = _reset(term, env, torch.arange(4), step=5)
-    assert log == {
-        "Reset/success_default": 0.5,
-        "Reset/next_stage_default": 0.75,
-        "Reset/time_to_next_default": 2.0,
-        "Reset/share_default": 1.0,
-        "Reset/share_grasp": 0.0,
-        "Reset/share_drag": 0.0,
-        "Reset/share_goal": 0.0,
-    }
+    assert log == DEFAULT_ONLY_SHARES | _rates("default", "raw", 0.5, 0.75) | _rates("default", "smoothed", 0.5, 0.75)
 
 
-def test_adaptive_shares_follow_the_success_average(monkeypatch, tmp_path):
+def test_reset_smooths_success_over_the_window(monkeypatch):
+    """The window grows from the first episodes, weighs every episode equally and forgets the steps that left it."""
     success = torch.ones(4)
-    bank = _bank([0, 1, 2, 3], [0] * 4)
+    term, env = _reset_term(monkeypatch, _bank([3]), success, window_steps=10)
+    term.force_rows(torch.tensor([3]), torch.tensor([0]))  # env 3 starts from the goal state
+    _reset(term, env, torch.arange(4), step=0)
+    default_key, goal_key = "Reset/task_success_default_smoothed", "Reset/task_success_goal_smoothed"
+
+    log = _reset(term, env, torch.tensor([0, 3]), step=1)
+    assert log[default_key] == 1.0 and log[goal_key] == 1.0
+
+    success.zero_()
+    log = _reset(term, env, torch.tensor([1, 2, 3]), step=5)
+    assert log["Reset/task_success_default_raw"] == 0.0
+    assert log[default_key] == pytest.approx(0.25)  # 1 of 4 episodes, not the mean of the two steps
+    assert log[goal_key] == 1.0 and "Reset/task_success_goal_raw" not in log
+
+    log = _reset(term, env, torch.tensor([0]), step=10)  # the window of 10 steps still holds step 1
+    assert log[default_key] == pytest.approx(0.2) and log[goal_key] == 1.0
+
+    log = _reset(term, env, torch.tensor([0]), step=11)
+    assert log[default_key] == 0.0 and goal_key not in log
+
+
+def test_reset_averaging_settings_are_checked(monkeypatch):
+    with pytest.raises(ValueError, match="row_ema_episodes"):
+        _reset_term(monkeypatch, None, torch.zeros(1), row_ema_episodes=0)
+    with pytest.raises(ValueError, match="window_steps"):
+        _reset_term(monkeypatch, None, torch.zeros(1), window_steps=0)
+    with pytest.raises(ValueError, match="hold_steps"):
+        _reset_term(monkeypatch, None, torch.zeros(1), hold_steps=-1)
+
+
+def test_reset_estimates_success_per_bank_row(monkeypatch):
+    success = torch.zeros(4)
+    term, env = _reset_term(monkeypatch, _bank([1, 1, 2, 3]), success)
+    all_envs = torch.arange(4)
+    term.force_rows(all_envs, torch.tensor([0, 0, 2, 3]))
+    _reset(term, env, all_envs, step=0)
+
+    # Row 0 has two outcomes: one reaches DRAG and one finishes the task. Row 2 reaches GOAL but does not finish;
+    # row 3 finishes, which is both its next-stage and full-task success.
+    command = env.command_manager.get_term("cloth_target")
+    command.time_to_stage[:, 2] = torch.tensor([1.0, -1.0, 1.0, 1.0])
+    command.time_to_stage[:, 3] = torch.tensor([-1.0, -1.0, 1.0, 1.0])
+    success[:] = torch.tensor([0.0, 1.0, 0.0, 1.0])
+    _reset(term, env, all_envs, step=1)
+
+    torch.testing.assert_close(term.row_next_stage_success, torch.tensor([0.1, 0.0, 1.0 / 9.0, 1.0 / 9.0]))
+    torch.testing.assert_close(term.row_full_task_success, torch.tensor([0.1, 0.0, 0.0, 1.0 / 9.0]))
+    assert term.row_episode_count.tolist() == [2, 0, 1, 1]
+
+    term.set_bank(_bank([1]))
+    assert term.row_next_stage_success.tolist() == [0.0]
+    assert term.row_full_task_success.tolist() == [0.0]
+    assert term.row_episode_count.tolist() == [0]
+
+
+def test_reset_exports_row_estimates_periodically(monkeypatch, tmp_path):
+    success = torch.ones(1)
+    term, env = _reset_term(
+        monkeypatch,
+        _bank([3]),
+        success,
+        log_dir=str(tmp_path),
+        row_stats_export_interval_steps=5,
+    )
+    term.force_rows(torch.tensor([0]), torch.tensor([0]))
+    _reset(term, env, torch.tensor([0]), step=0)
+    term.force_rows(torch.tensor([0]), torch.tensor([0]))
+    _reset(term, env, torch.tensor([0]), step=4)
+    assert not (tmp_path / "reset_state_success").exists()
+
+    _reset(term, env, torch.tensor([0]), step=5)
+    snapshot = torch.load(tmp_path / "reset_state_success" / "step_00000005.pt", weights_only=True)
+    latest = torch.load(tmp_path / "reset_state_success" / "latest.pt", weights_only=True)
+    assert snapshot.keys() == latest.keys()
+    assert snapshot["env_step"] == 5
+    assert snapshot["row_ema_episodes"] == 8
+    assert snapshot["bank_fingerprint"] == FINGERPRINT
+    assert snapshot["bucket"].tolist() == [3]
+    assert snapshot["episode_count"].tolist() == [2]
+    assert snapshot["next_stage_success"].tolist() == pytest.approx([17.0 / 81.0])
+    assert snapshot["full_task_success"].tolist() == pytest.approx([17.0 / 81.0])
+
+
+def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path):
+    success = torch.ones(4)
+    bank = _bank([0, 1, 2, 3])
     bank.save(tmp_path / "bank.pt")
     term, env = _reset_term(
         monkeypatch,
@@ -285,7 +348,8 @@ def test_adaptive_shares_follow_the_success_average(monkeypatch, tmp_path):
         mode_probabilities={"default": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
         min_probabilities={"default": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},
         success_range=(0.85, 0.97),
-        ema_episodes=3,
+        window_steps=3,
+        hold_steps=2,
     )
     drawn = []
 
@@ -301,24 +365,23 @@ def test_adaptive_shares_follow_the_success_average(monkeypatch, tmp_path):
         term.force_rows(goal_envs, torch.full((3,), 3))
         return _reset(term, env, all_envs, step=step), drawn[-1]
 
-    start = [0.30, 0.45, 0.15, 0.10]
+    start, handed_over = [0.30, 0.45, 0.15, 0.10], [0.30, 0.45, 0.20, 0.05]
     assert goal_batch(step=0)[1] == pytest.approx(start)
-    # three goal episodes with three episodes of memory: the average covers half the way to their success
+    # the hold keeps the start shares, although the goal starts succeed from the first episodes
     log, _ = goal_batch(step=1)
-    assert log["Reset/success_ema_goal"] == pytest.approx(0.5)
-    assert log["Reset/success_ema_grasp"] == 0.0
-    # one lucky batch moves no share
+    assert log["Reset/task_success_goal_smoothed"] == 1.0
     assert goal_batch(step=2)[1] == pytest.approx(start)
-    # sustained success hands the goal share to drag
-    for step in range(3, 9):
-        log, _ = goal_batch(step)
-    assert log["Reset/success_ema_goal"] > 0.97
-    assert goal_batch(step=9)[1] == pytest.approx([0.30, 0.45, 0.20, 0.05])
+    # after the hold, the solved goal bucket hands its share to drag
+    assert goal_batch(step=3)[1] == pytest.approx(handed_over)
+    # a bucket without episodes in the window stays solved
+    for step in range(4, 8):
+        log = _reset(term, env, torch.tensor([0]), step=step)
+    assert "Reset/task_success_goal_smoothed" not in log
+    assert drawn[-1] == pytest.approx(handed_over)
     # failures take it back
     success.zero_()
-    for step in range(10, 13):
-        goal_batch(step)
-    assert goal_batch(step=13)[1] == pytest.approx(start)
+    goal_batch(step=8)
+    assert goal_batch(step=9)[1] == pytest.approx(start)
 
 
 def test_bank_path_falls_back_to_the_repository_root(tmp_path, monkeypatch):

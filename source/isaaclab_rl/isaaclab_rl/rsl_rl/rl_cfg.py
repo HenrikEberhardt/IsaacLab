@@ -285,19 +285,12 @@ class RslRlBaseRunnerCfg:
         This clipping is performed inside the :class:`RslRlVecEnvWrapper` wrapper.
     """
 
-    action_clip_diagnostics: float | None = None
-    """Nominal action magnitude threshold for logging clipping diagnostics. Defaults to None.
-
-    If set, the wrapper logs how often raw policy samples exceed this nominal range. When :attr:`clip_actions` is also
-    set, it separately logs how often the same samples activate the actual safety clip. The training entrypoint then
-    also logs the mean and standard deviation of the policy's action distribution per action dimension.
-    """
-
     action_dim_names: list[str] | None = None
     """Names of the action dimensions in the per-dimension action diagnostics. Defaults to None.
 
-    If None, or if their number differs from the environment's action dimension, the dimensions are named
-    ``dim_<index>``.
+    If set, the training entrypoint logs per action dimension the mean and standard deviation of the policy's action
+    distribution and the magnitude of the action sent to the environment. If None, these diagnostics are not logged. If
+    their number differs from the environment's action dimension, the dimensions are named ``dim_<index>``.
     """
 
     check_for_nan: bool = True

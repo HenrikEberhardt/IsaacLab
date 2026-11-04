@@ -23,8 +23,7 @@ class FrankaClothDragEnv(ManagerBasedRLEnv):
     The coupled cloth simulation can blow up into NaN. The ``nonfinite_state`` termination then resets the env, but
     the step's reward is computed on the broken state, and some observations after the reset still read it, since the
     end-effector frame is only recomputed by the next simulation step. This class replaces non-finite rewards and
-    observations with zeros, so one broken env does not stop training of all others. The number of affected envs is
-    logged as ``Metrics/nonfinite_envs``.
+    observations with zeros, so one broken env does not stop training of all others.
 
     Adapted from ``FrankaNonpClothEnv`` on the ``non-prehensile-cloth`` branch.
     """
@@ -45,6 +44,4 @@ class FrankaClothDragEnv(ManagerBasedRLEnv):
                 else:
                     for term, term_value in value.items():
                         value[term] = _nan_to_zero(term_value)
-        # set every step: the log dict is only cleared on resets, so a stale count would otherwise persist
-        extras.setdefault("log", {})["Metrics/nonfinite_envs"] = broken.sum().item()
         return obs, rew, terminated, truncated, extras

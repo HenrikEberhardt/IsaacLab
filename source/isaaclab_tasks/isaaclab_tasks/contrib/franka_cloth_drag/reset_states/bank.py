@@ -9,10 +9,9 @@ A bank holds N reset states as a nested dictionary of tensors whose first dimens
 
 * ``scene``: the physical state, positions relative to the environment origin, see :mod:`.capture`.
 * ``task``: the task state a reset would clear: raised nodes, target, stage and the gripper and grasp state.
-* ``labels``: where the state comes from: ``bucket`` (index into :data:`BUCKET_NAMES`, the capture window), ``level``
-  (its rung on the rollout's ladder, equal to the bucket), ``context_id`` (the state machine rollout it comes from),
-  ``progress`` (share of the goal distance covered), ``episode_time`` [s] and ``sm_params`` (grasp choice, drag speed
-  [m/s], drag height [m], grasp yaw offset [rad], pre-grasp offset x, y, z [m], pre-grasp yaw error [rad]).
+* ``labels``: where the state comes from: ``bucket`` (index into :data:`BUCKET_NAMES`, the capture window), ``progress``
+  (share of the goal distance covered), ``episode_time`` [s] and ``sm_params`` (grasp choice, drag speed [m/s], drag
+  height [m], grasp yaw offset [rad], pre-grasp offset x, y, z [m], pre-grasp yaw error [rad]).
 
 ``meta`` holds JSON-serializable information: the schema version, the fingerprint of the task the states belong to,
 the generator settings and statistics.
@@ -33,10 +32,11 @@ from typing import Any
 
 import torch
 
-SCHEMA_VERSION = 3
+SCHEMA_VERSION = 4
 """Version of the bank layout; a bank of another version does not load. Version 2 (2026-10-27): the buckets hold
 pre-grasp, early drag and goal-zone-edge states (see :meth:`~.collect.ResetCollector._windows`). Version 3
-(2026-10-28): every state is stored in the task stage of its bucket."""
+(2026-10-28): every state is stored in the task stage of its bucket. Version 4 (2026-11-04): the bank holds only
+training reset states and drops the rollout ladder fields and approach rows."""
 
 BUCKET_NAMES = ("approach", "grasp", "drag", "goal")
 """Names of the buckets, in :class:`~..mdp.stages.ClothDragStage` order; each state is in the stage of its bucket:
@@ -235,7 +235,6 @@ def check_min_probabilities(
     min_probabilities: dict[str, float],
     start_shares: torch.Tensor,
     success_range: Sequence[float],
-    ema_episodes: int,
 ) -> torch.Tensor:
     """Check the settings of the adaptive reset shares and return the minimum shares in the order of
     :data:`RESET_MODES`.
@@ -244,11 +243,10 @@ def check_min_probabilities(
         min_probabilities: Minimum share of the resets per mode name; missing modes get none.
         start_shares: Start shares of the modes, from :func:`check_mode_probabilities`, shape [M].
         success_range: Success (low, high) between which a bucket gives up its share.
-        ema_episodes: Number of finished episodes the success average of a mode effectively spans.
 
     Raises:
-        ValueError: On an unknown mode, a minimum outside 0 and its start share, a ``success_range`` that is not
-            increasing inside [0, 1], or a non-positive ``ema_episodes``.
+        ValueError: On an unknown mode, a minimum outside 0 and its start share, or a ``success_range`` that is not
+            increasing inside [0, 1].
     """
     unknown = set(min_probabilities) - set(RESET_MODES)
     if unknown:
@@ -259,8 +257,6 @@ def check_min_probabilities(
     low, high = success_range
     if not 0.0 <= low < high <= 1.0:
         raise ValueError(f"success_range must increase inside [0, 1], got {success_range}.")
-    if ema_episodes <= 0:
-        raise ValueError(f"ema_episodes must be positive, got {ema_episodes}.")
     return minimum
 
 
@@ -321,9 +317,6 @@ def subsample_to_quotas(
 ) -> torch.Tensor:
     """Pick the rows of a bank to keep: ``quotas[name]`` random rows of each named bucket.
 
-    The approach rows (level 0) are not part of the quotas: those of every rollout (``context_id``) with at least one
-    kept row are kept too, as the start of its ladder.
-
     Args:
         bank: The bank to pick from.
         quotas: Number of rows to keep per bucket name, e.g. ``{"grasp": 333, "drag": 333, "goal": 333}``.
@@ -341,9 +334,4 @@ def subsample_to_quotas(
         if len(rows) < quota:
             raise ValueError(f"Bucket '{name}' has {len(rows)} states, fewer than its quota of {quota}.")
         kept.append(rows[torch.randperm(len(rows), generator=generator)[:quota]])
-    kept = torch.cat(kept) if kept else torch.zeros(0, dtype=torch.long)
-    if "approach" not in quotas:
-        contexts = bank.data["labels"]["context_id"].cpu()
-        approach = bank.bucket_rows("approach").cpu()
-        kept = torch.cat([kept, approach[torch.isin(contexts[approach], contexts[kept])]])
-    return kept.sort().values
+    return (torch.cat(kept) if kept else torch.zeros(0, dtype=torch.long)).sort().values

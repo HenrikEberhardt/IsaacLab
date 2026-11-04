@@ -38,10 +38,9 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     logger = "wandb"
     wandb_project = "non-prehensile_cloth_task"
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
-    
+
     # Action clipping setup
     clip_actions = None
-    action_clip_diagnostics = 1.0
     action_dim_names = ["dx", "dy", "dz", "dyaw", "gripper"]
 
     actor = RslRlMLPModelCfg(

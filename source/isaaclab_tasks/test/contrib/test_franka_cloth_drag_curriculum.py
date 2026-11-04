@@ -40,7 +40,7 @@ def _env(num_envs: int):
         cfg=SimpleNamespace(seed=0),
         common_step_counter=0,
         reward_manager=_RewardManager(START_WEIGHT),
-        command_manager=SimpleNamespace(get_term=lambda name: SimpleNamespace(metrics={"success": success})),
+        command_manager=SimpleNamespace(get_term=lambda name: SimpleNamespace(success=success)),
     )
     return env, success
 
@@ -73,7 +73,7 @@ def test_progress_is_gated_linear_and_held():
 
     success[:] = 1.0
     state = _call(term, env, params, step=0)  # initial reset: no finished episode counts
-    assert state["success_ema"] == 0.0 and state["progress"] == 0.0 and state["hidden_fraction"] == 0.0
+    assert state == {"progress": 0.0, "success_ema": 0.0} and not term.hidden.any()
 
     success[:] = 0.0
     assert _call(term, env, params, step=50)["progress"] == 0.0
@@ -86,7 +86,7 @@ def test_progress_is_gated_linear_and_held():
 
     success[:] = 1.0
     state = _call(term, env, params, step=400)
-    assert state["progress"] == 1.0 and state["hidden_fraction"] == 1.0
+    assert state["progress"] == 1.0 and term.hidden.all()
 
 
 def test_action_rate_weight_ramps_geometrically():
@@ -142,10 +142,11 @@ def test_dwell_delays_the_ramp_and_restarts_after_a_drop():
     term, params = _hiding(env, dwell_steps=50)
     success[:] = 1.0
     _call(term, env, params, step=0)
-    assert _call(term, env, params, step=10)["gate_open"] == 0.0  # above the threshold from here on
+    _call(term, env, params, step=10)  # above the threshold from here on
+    assert not term.gate_open
     assert _call(term, env, params, step=59)["progress"] == 0.0
     state = _call(term, env, params, step=60)
-    assert state["gate_open"] == 1.0 and state["progress"] == pytest.approx(0.01)
+    assert term.gate_open and state["progress"] == pytest.approx(0.01)
     assert _call(term, env, params, step=80)["progress"] == pytest.approx(0.21)
 
     success[:] = 0.0
@@ -177,7 +178,7 @@ def test_resume_dwell_shortens_only_the_wait_after_a_pause():
     _call(term, env, params, step=106)
     assert _call(term, env, params, step=115)["progress"] == pytest.approx(0.21)
     state = _call(term, env, params, step=116)
-    assert state["gate_open"] == 1.0 and state["progress"] == pytest.approx(0.22)
+    assert term.gate_open and state["progress"] == pytest.approx(0.22)
 
 
 def test_chained_block_waits_for_its_predecessor():

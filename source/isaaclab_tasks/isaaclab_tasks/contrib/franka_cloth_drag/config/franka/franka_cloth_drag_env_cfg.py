@@ -87,12 +87,12 @@ class PhysicsCfg(NewtonCfg):
                 solver_cfg=VBDSolverCfg(
                     iterations=10,
                     particle_enable_self_contact=False,
-                    rigid_compliant_alm=True, # AVBD for rigid-rigid contacts
+                    rigid_compliant_alm=True,  # AVBD for rigid-rigid contacts
                     rigid_body_particle_contact_buffer_size=1024,  # rigid-soft
                     rigid_body_contact_buffer_size=64,  # rigid-rigid
                     friction_epsilon=1.0e-2,  # dynamic-static friction threshold
                 ),
-                bodies=[r"/World/envs/env_[^/]+/Cube"], # Include Cube
+                bodies=[r"/World/envs/env_[^/]+/Cube"],  # Include Cube
                 all_particles=True,
                 include_static_shapes=True,  # Include Table
             ),
@@ -113,7 +113,7 @@ class PhysicsCfg(NewtonCfg):
                 mass_scale=5.0,
             )
         ],
-        iterations=1, # Solve coupling once per step
+        iterations=1,  # Solve coupling once per step
         # No Cube-Tablecollision
         collision_filter_pairs=[(r"/World/envs/env_[^/]+/Cube", r"/World/envs/env_[^/]+/Table(/.*)?")],
         # Monitor Franka-Cube Contacts
@@ -140,6 +140,7 @@ PHYSICS_CFG = PhysicsCfg()
 ##
 #################### Scene definition ####################
 ##
+
 
 @configclass
 class FrankaClothDragSceneCfg(InteractiveSceneCfg):
@@ -182,7 +183,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                     "panda_link4/panda_link5/panda_link6/panda_link7/panda_hand"
                 ),
                 name="end_effector",
-                offset=OffsetCfg(pos=(0.0, 0.0, 0.10365)), # centered between the pads
+                offset=OffsetCfg(pos=(0.0, 0.0, 0.10365)),  # centered between the pads
             ),
         ],
     )
@@ -288,7 +289,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                 joint_names_expr=["panda_finger_joint1"],
                 joint_effort_limit=70.0,  # grasp force limit [N]
                 joint_velocity_limit=0.05,
-                stiffness=7.5e3, # pinon-rack mechanism with high stiffness
+                stiffness=7.5e3,  # pinon-rack mechanism with high stiffness
                 damping=150.0,
                 armature=0.1,
             ),
@@ -313,13 +314,11 @@ GRIPPER_ACTION_CFG = mdp.ClothGraspActionCfg(
     # Binary gripper action: open <0 or close >0 (e.g sign from distance)
     asset_name="robot",
     joint_names=["panda_finger_joint1"],
-
     # Ensure controller respects joint range and velocity limits
     open_command_expr={"panda_finger_joint1": 0.03},
     close_command_expr={"panda_finger_joint1": 0.005},  # gap keeps the pads
     joint_vel_factor=0.75,  # closing speed as fraction of hardware max speed
     latch_threshold=0.5,  # action threshold to change from open to close
-
     # Grasping parameters
     release_travel=0.002,  # reopen after failed grasp to retry
     squeeze_steps=5,  # Squeezing Model
@@ -405,7 +404,7 @@ class ActorObsCfg(ObsGroup):
         func=mdp.gripper_width, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])}
     )
     # Privileged grasp flag (+1 / -1), hidden for whole episodes by the curriculum after success (zero)
-    cloth_grasped = ObsTerm(func=mdp.cloth_grasped, params={"hide_curriculum": "grasp_hiding"})
+    cloth_grasped = ObsTerm(func=mdp.cloth_grasped, params={"hide_curriculum": "observation_hiding"})
 
     # Last action applied to the robot
     actions = ObsTerm(func=mdp.last_action)
@@ -428,7 +427,7 @@ class ActorObsCfg(ObsGroup):
 
     # Current task stage, hidden for whole episodes by the curriculum after success (all zeros)
     stage = ObsTerm(
-        func=mdp.cloth_drag_stage, params={"command_name": "cloth_target", "hide_curriculum": "stage_hiding"}
+        func=mdp.cloth_drag_stage, params={"command_name": "cloth_target", "hide_curriculum": "observation_hiding"}
     )
 
     def __post_init__(self) -> None:
@@ -563,22 +562,24 @@ class ResetFromBankCfg(PresetCfg):
         func=mdp.ResetFromBank,
         mode="reset",
         params={
-            "bank_path": "logs/reset_banks/bank_5000_v4.pt",  # relative to the working directory or the repository root
+            "bank_path": "logs/reset_banks/bank_5000_v5.pt",
             "mode_probabilities": {"default": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
             "command_name": "cloth_target",
         },
     )
 
-    # Adaptive buffer ratios depending on EMA success rate of the stages
+    # Adaptive buffer ratios depending on the smoothed task success for each stage
     adaptive = EventTerm(
         func=mdp.ResetFromBank,
         mode="reset",
         params={
-            "bank_path": "logs/reset_banks/bank_5000_v4.pt",
-            "mode_probabilities": {"default": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},  # start ratios
-            "min_probabilities": {"default": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05}, # min ratios
+            "bank_path": "logs/reset_banks/bank_5000_v5.pt",
+            "mode_probabilities": {"default": 0.20, "grasp": 0.30, "drag": 0.10, "goal": 0.40},  # start ratios
+            "min_probabilities": {"default": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},  # min ratios
             "success_range": (0.85, 0.95),  # ratio barriers for adaptation
-            "ema_episodes": 256,  # EMA scope
+            "window_steps": 480,  # moving average over 20 iterations at 24 steps/iteration
+            "hold_steps": 300,  # 12.5 iterations: all first episodes, shortened by random start lengths, have ended
+            "row_stats_export_interval_steps": 120,  # save per-state success every 5 iterations at 24 steps/iteration
             "command_name": "cloth_target",
         },
     )
@@ -595,7 +596,7 @@ class EventCfg:
         func=mdp.reset_franka_top_down,
         mode="reset",
         params={
-            "joint_offset_ranges": { #linear ee pos offset through joint variations
+            "joint_offset_ranges": {  # linear ee pos offset through joint variations
                 "panda_joint1": (-0.25, 0.25),
                 "panda_joint2": (-0.15, 0.15),
                 "panda_joint4": (-0.15, 0.15),
@@ -613,7 +614,6 @@ class EventCfg:
             # Cloth position and orientation
             "position_range": {"x": (-0.03, 0.03), "y": (-0.05, 0.05)},
             "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),  # symmetrie covers all angles
-
             # Node perturbation
             "include_edge_nodes": False,
             "num_raised_nodes": 3,  # redrawn at every episode reset
@@ -651,68 +651,54 @@ class EventCfg:
 
 @configclass
 class RewardsCfg:
-    """Heavily stage dependend rewards shaping with a discrete large success bonus"""
+    """Heavily stage dependent rewards shaping with a discrete large success bonus"""
 
     # -------------- Approach --------------
     # Linear reward for approaching towards point above the raised node
     approach_progress = RewTerm(
         func=mdp.ClothDistanceProgress,
         params={"stages": ["approach", "grasp"], "distance_scale": 0.1, "target_height": 0.04},
-        weight=1.0
+        weight=1.0,
     )
-    # Penalty for closing the gripper if the target node is not inbetween the pads
+    # Penalty for closing the gripper if the target node is not between the pads
     pen_close_off_node = RewTerm(
-        func=mdp.gripper_closed_off_grasp_node,
-        params={"stages": ["approach", "grasp"]},
-        weight=-1.0
+        func=mdp.gripper_closed_off_grasp_node, params={"stages": ["approach", "grasp"]}, weight=-1.0
     )
 
     # -------------- Grasp --------------
-    # Tanh reward for approaching hightened node at same hight as in state machine
+    # Tanh reward for approaching heightened node at the same height as in the state machine
     approach_precision = RewTerm(
         func=mdp.ClothDistanceProgress,
         params={"stages": ["approach", "grasp"], "kernel_std": 0.02, "target_height": 0.0085},
-        weight=2.0
+        weight=2.0,
     )
-    # Reward for closing the gripper with traget node between the pads increasing with total number of nodes grasped
+    # Reward for closing the gripper with target node between the pads increasing with total number of nodes grasped
     grasp_close_on_node = RewTerm(
         func=mdp.gripper_closed_on_grasp_node,
         params={"stages": ["grasp"], "num_nodes_full": 6, "first_grasp_only": True},
-        weight=4.0
+        weight=4.0,
     )
 
     # -------------- Drag --------------
     # Linear reward on moving the cube closer to the target in planar distance
     drag_progress = RewTerm(
-        func=mdp.ClothDistanceProgress,
-        params={"stages": ["drag", "goal"], "distance_scale": 0.1},
-        weight=3.0
+        func=mdp.ClothDistanceProgress, params={"stages": ["drag", "goal"], "distance_scale": 0.1}, weight=3.0
     )
     # Penalty for lifting the EE above 4cm during the drag stage
     pen_ee_height_drag = RewTerm(
-        func=mdp.ee_height_above,
-        params={"max_height": 0.04, "stages": ["drag"]},
-        weight=-15.0
+        func=mdp.ee_height_above, params={"max_height": 0.04, "stages": ["drag"]}, weight=-15.0
     )
     # Penalty for dopping the cloth during pulling the cloth
-    pen_drop = RewTerm(
-        func=mdp.cloth_drag_drop_penalty,
-        params={"stages": ["drag", "goal"]},
-        weight=-3.0
-    )
+    pen_drop = RewTerm(func=mdp.cloth_drag_drop_penalty, params={"stages": ["drag", "goal"]}, weight=-3.0)
 
     # -------------- Goal --------------
     # Penalty for lifting the EE above 4cm during the goal stage
     pen_ee_height_goal = RewTerm(
-        func=mdp.ee_height_above,
-        params={"max_height": 0.04, "stages": ["goal"]},
-        weight=-15.0
+        func=mdp.ee_height_above, params={"max_height": 0.04, "stages": ["goal"]}, weight=-15.0
     )
-    # Tanh reward for placing the cube precisely at the target 
+    # Tanh reward for placing the cube precisely at the target
     goal_precision = RewTerm(
-        func=mdp.ClothDistanceProgress,
-        params={"stages": ["drag", "goal"], "kernel_std": 0.02},
-        weight=2.0
+        func=mdp.ClothDistanceProgress, params={"stages": ["drag", "goal"], "kernel_std": 0.02}, weight=2.0
     )
     # Peanilty on cube relative velocity to cloth above 0.01 m/s
     # pen_cube_slip = RewTerm(
@@ -723,10 +709,7 @@ class RewardsCfg:
 
     # -------------- Task Rewards / Penalties --------------
     # Onetime reward after task success
-    success = RewTerm(
-        func=mdp.cloth_drag_success_bonus, 
-        weight=75.0
-    )
+    success = RewTerm(func=mdp.cloth_drag_success_bonus, weight=75.0)
     # Penalty for failing episode
     pen_termination = RewTerm(
         func=mdp.cloth_drag_termination_penalty,
@@ -745,17 +728,9 @@ class RewardsCfg:
 
     # -------------- Action Penalties --------------
     # Smooth action magnitude to avoid action clipping
-    pen_action_magnitude = RewTerm(
-        func=mdp.action_term_l2, 
-        params={"action_name": "arm_action"}, 
-        weight=-5e-1
-    )
+    pen_action_magnitude = RewTerm(func=mdp.action_term_l2, params={"action_name": "arm_action"}, weight=-5e-1)
     # Penalty on action rate to avoid jerky motion
-    pen_action_rate = RewTerm(
-        func=mdp.action_term_rate_l2, 
-        params={"action_name": "arm_action"}, 
-        weight=-1e-1
-    )
+    pen_action_rate = RewTerm(func=mdp.action_term_rate_l2, params={"action_name": "arm_action"}, weight=-1e-1)
     # Penalty for exceeding joint limits on position and veloctiy
     pen_joint_limit_barrier = RewTerm(
         func=mdp.joint_limit_barrier,
@@ -816,10 +791,11 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    """Observation-hiding curricula for task stage and grasp state, ramping together."""
+    """Observation-hiding curriculum for task stage and grasp state."""
 
-    # Hide actor observation of current task stage (easy)
-    stage_hiding = CurrTerm(
+    # Hide actor observations of the task stage and the grasp flag in the same episodes: the flag is unknown on the real
+    # Franka, and the DRAG stage would reveal the grasp
+    observation_hiding = CurrTerm(
         func=mdp.ObservationHidingCurriculum,
         params={
             "command_name": "cloth_target",
@@ -827,21 +803,6 @@ class CurriculumCfg:
             "dwell_steps": 600,  # 25 iterations above the threshold before the ramp starts
             "resume_dwell_steps": 240,  # 10 iterations back above the threshold before a paused ramp continues
             "ramp_steps": 3600,  # 150 iterations at 24 steps/iteration
-            "ema_episodes": 2048,
-            "initial_progress": 0.1,  # stage hidden in 10 % of episodes from the start, never relied on
-            "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
-        },
-    )
-
-    # Hide actor grasp flag as this is unknown on real Franka (the DRAG stage would reveal the grasp)
-    grasp_hiding = CurrTerm(
-        func=mdp.ObservationHidingCurriculum,
-        params={
-            "command_name": "cloth_target",
-            "success_threshold": 0.99,
-            "dwell_steps": 600,  # 25 iterations
-            "resume_dwell_steps": 240,  # 10 iterations
-            "ramp_steps": 3600,  # 150 iterations
             "ema_episodes": 2048,
             "initial_progress": 0.1,  # hidden in 10 % of episodes from the start (from 0 %, success fell 0.06-0.09)
             "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
@@ -880,45 +841,38 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics = PhysicsCfg()
 
-        """
-        # Setup Visulaizer settings
-        self.sim.visualizer_cfgs = [
-            KitVisualizerCfg(
-                eye=(0.5 + 3.18, -3.18, 7.59),
-                lookat=(0.5, 0.0, -0.2),
-                headless=True,
-                max_visible_envs=16,
-                randomly_sample_visible_envs=False,  # show environment 0 - 15
-            ),
-            NewtonGLVisualizerCfg(
-                eye=(0.5 + 3.18, -3.18, 7.59),
-                lookat=(0.5, 0.0, -0.2),
-                focal_length=23.5,  # 23.5 mm matches Kit's focal length
-                headless=True,
-                max_visible_envs=16,
-                randomly_sample_visible_envs=False,
-            ),
-            ViserVisualizerCfg(
-                eye=(0.5 + 3.18, -3.18, 7.59),
-                lookat=(0.5, 0.0, -0.2),
-                focal_length=23.5,
-                port=8755,  # Change default port to avoid clash with other users on Comino
-            ),
-        ]
-        """
-        
-        
-        
+        # Disabled reference visualizer settings.
+        if False:
+            self.sim.visualizer_cfgs = [
+                KitVisualizerCfg(
+                    eye=(0.5 + 3.18, -3.18, 7.59),
+                    lookat=(0.5, 0.0, -0.2),
+                    headless=True,
+                    max_visible_envs=16,
+                    randomly_sample_visible_envs=False,  # show environment 0 - 15
+                ),
+                NewtonGLVisualizerCfg(
+                    eye=(0.5 + 3.18, -3.18, 7.59),
+                    lookat=(0.5, 0.0, -0.2),
+                    focal_length=23.5,  # 23.5 mm matches Kit's focal length
+                    headless=True,
+                    max_visible_envs=16,
+                    randomly_sample_visible_envs=False,
+                ),
+                ViserVisualizerCfg(
+                    eye=(0.5 + 3.18, -3.18, 7.59),
+                    lookat=(0.5, 0.0, -0.2),
+                    focal_length=23.5,
+                    port=8755,  # Change default port to avoid clash with other users on Comino
+                ),
+            ]
 
     def play_mode(self):
         """Play with full curriculum progress"""
         super().play_mode()
-        if self.curriculum is not None:
+        if self.curriculum is not None and self.curriculum.observation_hiding is not None:
             # Play with full curriculum progress
-            if self.curriculum.stage_hiding is not None:
-                self.curriculum.stage_hiding.params["initial_progress"] = 1.0
-            if self.curriculum.grasp_hiding is not None:
-                self.curriculum.grasp_hiding.params["initial_progress"] = 1.0
+            self.curriculum.observation_hiding.params["initial_progress"] = 1.0
 
         # Play and evaluation start from the task's default resets only, never from stored reset states
         if self.events.reset_from_bank is not None:
