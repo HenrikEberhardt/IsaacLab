@@ -7,8 +7,8 @@ Changed
 * Changed the ``IsaacContrib-Drag-Cloth-Franka`` PPO actor to learn one smoothly bounded action standard deviation per
   action dimension. Retrain cloth-drag policies; play older checkpoints from the commit they were trained with.
 * Added separate W&B metrics under ``Action/outside_nominal_*`` for raw policy samples exceeding magnitude 1.0 and
-  ``Action/safety_clip_*`` for samples clipped by the runner's action clip, and per action dimension (``dx``, ``dy``,
-  ``dz``, ``dyaw``, ``gripper``) the clipped share and the policy's mean and standard deviation.
+  ``Action/safety_clip_*`` for samples clipped by a runner action clip, if set, and per action dimension (``dx``,
+  ``dy``, ``dz``, ``dyaw``, ``gripper``) the share of those samples and the policy's mean and standard deviation.
 * Added an ``approach_precision`` reward to ``IsaacContrib-Drag-Cloth-Franka``: approach progress measured on
   ``tanh(distance / 2 cm)`` to the state machine's squeeze pose, the grasp node's x-y at 9.5 mm above the table, which
   pays nearly all of its reward in the last 3 cm before the grasp. :class:`ClothDistanceProgress` takes the new
@@ -51,6 +51,10 @@ Changed
   DRAG or GOAL, :func:`cloth_drag_drop_penalty`), and :attr:`ClothTargetCommand.previous_stage`, the stage before the
   last update, which it checks its ``stages`` against.
 * Added a bounds loss on the mean action to the ``IsaacContrib-Drag-Cloth-Franka`` PPO actor
-  (``mean_bound=1.0``, ``mean_bound_coef=0.01`` on ``BoundedGaussianDistributionCfg``). The runner clip hides any
-  excess from the environment and its rewards, so the loss is what keeps a saturated mean inside the clip range of
-  1.0; only the sampling noise tails are still clipped.
+  (``mean_bound=1.0``, ``mean_bound_coef=0.01`` on ``BoundedGaussianDistributionCfg``), which pulls a saturated mean
+  back toward the nominal range of 1.0.
+* Removed the runner action clip of ``IsaacContrib-Drag-Cloth-Franka`` (``clip_actions=None``). PPO learned from samples
+  beyond 1.0 that the environment never executed, which pushed the mean past the bound. The action penalties now see the
+  raw action. Play policies trained with the clip with ``agent.clip_actions=1.0``; retrain for the new behavior.
+* Changed the hiding curricula of ``IsaacContrib-Drag-Cloth-Franka`` to ramp together: both open at a success average of
+  0.75 from default resets after 25 iterations and ramp over 150 iterations. They ran one after the other from 0.8.

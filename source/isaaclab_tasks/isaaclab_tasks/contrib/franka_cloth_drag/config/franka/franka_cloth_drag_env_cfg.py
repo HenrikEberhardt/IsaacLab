@@ -805,15 +805,15 @@ class TerminationsCfg:
 
 @configclass
 class CurriculumCfg:
-    """Observation-hiding curricula for task stage and grasp state."""
+    """Observation-hiding curricula for task stage and grasp state, ramping together."""
 
-    # 1. Hide actor observation of current task stage (easy)
+    # Hide actor observation of current task stage (easy)
     stage_hiding = CurrTerm(
         func=mdp.ObservationHidingCurriculum,
         params={
             "command_name": "cloth_target",
-            "success_threshold": 0.70,  # success ratio; the cube task levels off at about 0.87-0.89
-            "dwell_steps": 2400,  # 100 iterations above the threshold before the ramp starts
+            "success_threshold": 0.75,  # success ratio
+            "dwell_steps": 600,  # 25 iterations above the threshold before the ramp starts
             "resume_dwell_steps": 240,  # 10 iterations back above the threshold before a paused ramp continues
             "ramp_steps": 3600,  # 150 iterations at 24 steps/iteration
             "ema_episodes": 2048,
@@ -822,17 +822,16 @@ class CurriculumCfg:
         },
     )
 
-    # 2. Hide actor grasp flag as this is unknown on real Franka (the DRAG stage would reveal the grasp)
+    # Hide actor grasp flag as this is unknown on real Franka (the DRAG stage would reveal the grasp)
     grasp_hiding = CurrTerm(
         func=mdp.ObservationHidingCurriculum,
         params={
             "command_name": "cloth_target",
-            "success_threshold": 0.70,
+            "success_threshold": 0.75,
             "dwell_steps": 600,  # 25 iterations
             "resume_dwell_steps": 240,  # 10 iterations
-            "ramp_steps": 3000,  # 125 iterations
+            "ramp_steps": 3600,  # 150 iterations
             "ema_episodes": 2048,
-            "after": "stage_hiding",
             "initial_progress": 0.1,  # hidden in 10 % of episodes from the start (from 0 %, success fell 0.06-0.09)
             "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
         },
@@ -870,7 +869,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.render_interval = self.decimation
         self.sim.physics = PhysicsCfg()
 
-        
+        """
         # Setup Visulaizer settings
         self.sim.visualizer_cfgs = [
             KitVisualizerCfg(
@@ -895,6 +894,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
                 port=8755,  # Change default port to avoid clash with other users on Comino
             ),
         ]
+        """
         
         
         

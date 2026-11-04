@@ -38,8 +38,9 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     logger = "wandb"
     wandb_project = "non-prehensile_cloth_task"
     obs_groups = {"actor": ["policy"], "critic": ["critic"]}
-    # Nominal action range; the actor's bounds loss keeps the mean inside it, so only noise tails are clipped.
-    clip_actions = 1.0
+    # No runner clip: PPO would learn from samples the environment never executed, which pushes the mean past the
+    # bound. The action penalties and the bounds loss keep actions near the nominal range, whose excess is only logged.
+    clip_actions = None
     action_clip_diagnostics = 1.0
     # Names of the delta EE action dimensions in the action diagnostics (the joint_delta preset falls back to indices)
     action_dim_names = ["dx", "dy", "dz", "dyaw", "gripper"]
@@ -48,8 +49,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         hidden_dims=[256, 128, 64],
         activation="elu",
         obs_normalization=True,
-        # The bounds loss keeps the mean inside the nominal range: the runner clip hides any excess from the
-        # environment and its rewards, so nothing else pulls a saturated mean back.
+        # The bounds loss pulls a saturated mean back toward the nominal range
         distribution_cfg=BoundedGaussianDistributionCfg(
             init_std=0.5, std_type="scalar", std_range=(0.05, 1.0), mean_bound=1.0, mean_bound_coef=0.01
         ),

@@ -35,18 +35,18 @@ NUM_NODES = 6
 CFG = SimpleNamespace(gripper_action_name="gripper_action", raised_nodes_event="reset_deformable")
 
 
-def test_action_regularization_and_safety_clip_configuration():
-    """Action costs should be fixed from reset one, with separate nominal and safety thresholds."""
+def test_action_regularization_and_clip_configuration():
+    """Action costs should be fixed from reset one; samples beyond the nominal range are logged, not clipped."""
     rewards = RewardsCfg()
     curriculum = CurriculumCfg()
     runner = FrankaClothDragPPORunnerCfg()
 
-    assert rewards.pen_action_magnitude.weight == -0.1
+    assert rewards.pen_action_magnitude.weight == -0.5
     assert rewards.pen_action_rate.weight == -0.1
     assert not hasattr(curriculum, "action_magnitude")
     assert not hasattr(curriculum, "action_rate")
     assert runner.action_clip_diagnostics == 1.0
-    assert runner.clip_actions == 1.0
+    assert runner.clip_actions is None
 
 
 class _EventManager:
