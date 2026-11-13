@@ -11,7 +11,6 @@ from . import agents
 # Register Gym environments.
 ##
 
-
 gym.register(
     id="IsaacContrib-Drag-Cloth-Franka",
     entry_point="isaaclab_tasks.contrib.franka_cloth_drag.franka_cloth_drag_env:FrankaClothDragEnv",

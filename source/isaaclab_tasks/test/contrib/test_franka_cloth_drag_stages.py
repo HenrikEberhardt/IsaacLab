@@ -21,6 +21,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_en
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.cloth_grasp import ClothGraspConstraint
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     ClothDistanceProgress,
+    GripperCloseProgress,
     cloth_drag_drop_penalty,
     cloth_drag_termination_penalty,
     gripper_closed_off_grasp_node,
@@ -34,6 +35,8 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import (
 
 NUM_NODES = 6
 CFG = SimpleNamespace(gripper_action_name="gripper_action", raised_nodes_event="reset_deformable")
+# finger openings of the open and close commands, and halfway between them [m]
+OPEN, HALFWAY, CLOSED = 0.03, 0.0175, 0.005
 
 
 def test_action_regularization_and_clip_configuration():
@@ -133,11 +136,19 @@ def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.
     constraint._triangles = torch.tensor(triangles, dtype=torch.long).reshape(-1, 3)
     constraint.active = torch.tensor([False])
     constraint.grasped = torch.zeros(1, points.shape[1], dtype=torch.bool)
-    term = SimpleNamespace(closed=torch.tensor([True]), constraint=constraint, is_grasping=constraint.active)
+    term = SimpleNamespace(
+        cfg=SimpleNamespace(open_command_expr={"finger": OPEN}, close_command_expr={"finger": CLOSED}),
+        closed=torch.tensor([True]),
+        constraint=constraint,
+        is_grasping=constraint.active,
+    )
     command = SimpleNamespace(
         cfg=cfg, stage=torch.tensor([1]), grasp_node_id=torch.tensor([grasp_node]), time_to_stage=-torch.ones(1, 4)
     )
     env = SimpleNamespace(
+        num_envs=1,
+        device="cpu",
+        step_dt=0.5,
         scene={"ee_frame": frame, "robot": robot, "deformable": cloth},
         action_manager=SimpleNamespace(get_term=lambda name: term),
         command_manager=SimpleNamespace(get_term=lambda name: command),
@@ -241,18 +252,108 @@ def test_closing_reward_without_raised_nodes_or_attachment_constraint():
     assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 1.0
 
 
+def _close_progress(env, **params):
+    """A closing progress term, and a function that samples it integrated over the step like the reward manager."""
+    params = {"stages": ["grasp"], **params}
+    term = GripperCloseProgress(SimpleNamespace(params=params), env)
+    return term, lambda: term(env, **params).item() * env.step_dt
+
+
+def _set_opening(env, opening):
+    env.scene["robot"].data.joint_pos.torch[:] = opening
+
+
+def test_close_progress_pays_one_close_however_often_the_fingers_toggle():
+    # policies farmed a per-second closing reward by repeatedly opening and closing the fingers over the node
+    env, _, _ = _grasp_reward_env([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]], opening=OPEN)
+    _, progress = _close_progress(env)
+    # the first sample only sets the reference
+    assert progress() == 0.0
+
+    paid = []
+    for opening in [HALFWAY, OPEN] * 5 + [HALFWAY, CLOSED, CLOSED]:
+        _set_opening(env, opening)
+        paid.append(progress())
+
+    assert abs(paid[0] - 0.5) < 1e-5
+    # five laps pay nothing, the full close pays one, and holding it pays nothing
+    assert abs(sum(paid[:10])) < 1e-5
+    assert abs(sum(paid) - 1.0) < 1e-5
+    assert paid[-1] == 0.0
+
+
+def test_close_progress_charges_reopening_away_from_the_grasp_node():
+    env, command, _ = _grasp_reward_env([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]], opening=OPEN)
+    nodes = env.scene["deformable"].data.nodal_pos_w.torch
+    term, progress = _close_progress(env)
+    progress()
+    _set_opening(env, CLOSED)
+    assert abs(progress() - 1.0) < 1e-5
+
+    # reopening outside the stage or with the grasp node out of the pads is free only until the term samples again
+    def leave_stage():
+        command.stage[:] = 0
+
+    def return_to_stage():
+        command.stage[:] = 1
+
+    def move_node_away():
+        nodes[:, :, 0] += 0.1
+
+    def move_node_back():
+        nodes[:, :, 0] -= 0.1
+
+    for leave, come_back in ((leave_stage, return_to_stage), (move_node_away, move_node_back)):
+        leave()
+        _set_opening(env, OPEN)
+        assert progress() == 0.0
+        come_back()
+        assert abs(progress() + 1.0) < 1e-5
+        _set_opening(env, CLOSED)
+        assert abs(progress() - 1.0) < 1e-5
+
+    # a new episode only sets the reference again
+    term.reset([0])
+    assert progress() == 0.0
+
+
+def test_close_progress_scales_with_the_grasped_nodes_up_to_the_full_count():
+    # three nodes between the pads with the grasp node among them, one outside
+    points = [[0.0, 0.0, 0.0], [0.003, 0.0, 0.0], [0.006, 0.0, 0.0], [0.04, 0.0, 0.0]]
+    env, _, _ = _grasp_reward_env(points, opening=OPEN)
+    nodes = env.scene["deformable"].data.nodal_pos_w.torch
+    _, progress = _close_progress(env, num_nodes_full=6)
+    _, capped_progress = _close_progress(env, num_nodes_full=3)
+    progress()
+    capped_progress()
+    _set_opening(env, CLOSED)
+    assert abs(progress() - 3 / 6) < 1e-5
+    assert abs(capped_progress() - 1.0) < 1e-5
+    # a node entering the grasp pays its share up to the cap, and leaving takes it back
+    nodes[0, 3, 0] = 0.009
+    assert abs(progress() - 1 / 6) < 1e-5
+    assert capped_progress() == 0.0
+    nodes[0, 3, 0] = 0.04
+    assert abs(progress() + 1 / 6) < 1e-5
+
+
 def test_configured_closing_rewards_pay_capture_and_penalize_misses():
     cfg = RewardsCfg()
-    closing_terms = [cfg.grasp_close_on_node, cfg.pen_close_off_node]
-    env, command, term = _grasp_reward_env([[0.020, 0.0, 0.0], [-0.005, 0.0, 0.008]], edges=[[0, 1]])
+    close, penalty = cfg.grasp_close_on_node, cfg.pen_close_off_node
+    # two nodes in the grasp, of the six that pay in full
+    env, command, term = _grasp_reward_env([[0.020, 0.0, 0.0], [-0.005, 0.0, 0.008]], edges=[[0, 1]], opening=OPEN)
+    close_term = close.func(SimpleNamespace(params=close.params), env)
 
     def closing_reward():
-        return sum(reward.weight * reward.func(env, **reward.params) for reward in closing_terms).item()
+        progress = close.weight * close_term(env, **close.params)
+        return (progress + penalty.weight * penalty.func(env, **penalty.params)).item()
 
     term.closed[:] = False
     assert closing_reward() == 0.0
     term.closed[:] = True
-    assert closing_reward() > 0.0
+    _set_opening(env, CLOSED)
+    # integrated over the step, the close pays its weight for the share of two nodes
+    assert abs(closing_reward() * env.step_dt - close.weight * 2 / 6) < 1e-5
     env.scene["deformable"].data.nodal_pos_w.torch += 0.1
     assert closing_reward() < 0.0
     command.stage[:] = 0

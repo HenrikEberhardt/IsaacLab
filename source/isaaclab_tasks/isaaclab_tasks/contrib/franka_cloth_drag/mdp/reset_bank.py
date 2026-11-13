@@ -19,7 +19,9 @@ import torch
 from isaaclab.managers import EventTermCfg, ManagerTermBase
 
 from ..reset_states import (
+    FrontierSamplerCfg,
     ResetBank,
+    ResetStateFrontierSampler,
     restore_physical,
     restore_task_state,
     task_fingerprint,
@@ -66,7 +68,8 @@ class ResetFromBank(ManagerTermBase):
     A value without an episode to average is left out. The reset also logs the share of each reset mode among the
     episodes that start now (``Reset/share_<mode>_raw``), with or without a bank. For every stored reset state, it also
     tracks an EMA of reaching the next stage and of completing the task, along with the number of finished episodes
-    observed from that state.
+    observed from that state. With ``use_frontier``, the rows inside every stored-stage buffer are instead sampled by
+    an SGS beta kernel over a linearly weighted history of their recent next-stage outcomes.
     """
 
     def __init__(self, cfg: EventTermCfg, env: ManagerBasedRLEnv):
@@ -77,6 +80,16 @@ class ResetFromBank(ManagerTermBase):
         bank_path = cfg.params.get("bank_path")
         if bank_path is not None:
             self.bank = ResetBank.load(_resolve_bank_path(bank_path), env.device)
+        self._use_frontier = cfg.params.get("use_frontier", False)
+        if not isinstance(self._use_frontier, bool):
+            raise TypeError("use_frontier must be a bool.")
+        frontier_cfg = cfg.params.get("frontier_cfg")
+        self._frontier_cfg = FrontierSamplerCfg() if frontier_cfg is None else frontier_cfg
+        if not isinstance(self._frontier_cfg, FrontierSamplerCfg):
+            raise TypeError("frontier_cfg must be a FrontierSamplerCfg.")
+        self._frontier_cfg.validate_values()
+        if self._use_frontier and self.bank is None:
+            raise ValueError("use_frontier requires a reset-state bank.")
         self._row_ema_episodes = cfg.params.get("row_ema_episodes", 8)
         if self._row_ema_episodes <= 0:
             raise ValueError(f"row_ema_episodes must be positive, got {self._row_ema_episodes}.")
@@ -155,6 +168,8 @@ class ResetFromBank(ManagerTermBase):
         success_range: tuple[float, float] = (0.85, 0.95),
         window_steps: int = 480,
         hold_steps: int = 0,
+        use_frontier: bool = False,
+        frontier_cfg: FrontierSamplerCfg | None = None,
         row_ema_episodes: int = 8,
         row_stats_export_interval_steps: int = 0,
     ) -> None:
@@ -175,6 +190,8 @@ class ResetFromBank(ManagerTermBase):
             success_range: Smoothed task success (low, high) between which a bucket gives up its share.
             window_steps: Number of environment steps the smoothed success rates span.
             hold_steps: Number of environment steps the adaptive shares keep their start values.
+            use_frontier: Whether stored rows are sampled by their recent next-stage success instead of uniformly.
+            frontier_cfg: Moving-window and beta-kernel settings used when ``use_frontier`` is true.
             row_ema_episodes: Number of finished episodes from a stored reset state that its success EMA effectively
                 spans.
             row_stats_export_interval_steps: Number of environment steps between atomic snapshots of all per-state
@@ -187,12 +204,21 @@ class ResetFromBank(ManagerTermBase):
         ids = self._resolve(env_ids)
         # the reset at the start of training ends no episode
         finished = self.rows[ids] if env.common_step_counter > 0 else None
+        outcomes = None if finished is None else self._episode_outcomes(env, ids, finished)
+        if outcomes is not None and self._frontier is not None:
+            stored = finished >= 0
+            self._frontier.record(finished[stored], outcomes[1][stored])
         drawn = ~self._forced[ids]
         rows = torch.where(drawn, -1, self._forced_rows[ids])
         self._forced[ids] = False
         if self.bank is not None and drawn.any() and self._shares[0] < 1.0:
-            rows[drawn] = sample_reset_rows(self.bank, self._shares, int(drawn.sum()))
-        self._log = {} if finished is None else self._source_log(env, ids, finished, rows)
+            if self._frontier is None:
+                rows[drawn] = sample_reset_rows(self.bank, self._shares, int(drawn.sum()))
+            else:
+                rows[drawn] = sample_reset_rows(
+                    self.bank, self._shares, int(drawn.sum()), self._frontier.sampling_weights()
+                )
+        self._log = {} if finished is None else self._source_log(env, finished, rows, *outcomes)
         self.rows[ids] = rows
         stored = rows >= 0
         self._pending[ids] = stored
@@ -211,27 +237,40 @@ class ResetFromBank(ManagerTermBase):
             self._env.extras.setdefault("log", {}).update(self._log)
             self._log = {}
 
+    def _episode_outcomes(
+        self, env: ManagerBasedRLEnv, env_ids: torch.Tensor, finished: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """Task and next-stage outcomes of the finished episodes."""
+        command = env.command_manager.get_term(self._command_name)
+        success = command.success[env_ids].float()
+        finished_source = self._source(finished)
+        # The buckets are named after their start stage. Column k is the stage after stage k, with task success after
+        # GOAL. Default resets start in APPROACH.
+        start_stage = (finished_source - 1).clamp(min=0).unsqueeze(1)
+        reached = (command.time_to_stage[env_ids, 1:] >= 0.0).float()
+        reached = torch.cat([reached, success.unsqueeze(1)], dim=1).gather(1, start_stage).squeeze(1)
+        return success, reached
+
     def _source_log(
-        self, env: ManagerBasedRLEnv, env_ids: torch.Tensor, finished: torch.Tensor, started: torch.Tensor
+        self,
+        env: ManagerBasedRLEnv,
+        finished: torch.Tensor,
+        started: torch.Tensor,
+        success: torch.Tensor,
+        reached: torch.Tensor,
     ) -> dict[str, float]:
         """Raw and smoothed success of the finished episodes per source, and share of each reset mode among the
         started ones.
 
         Args:
             env: The environment.
-            env_ids: The environments being reset, shape [N].
             finished: Bank rows the finished episodes started from, -1 for a default reset, shape [N].
             started: Bank rows the new episodes start from, -1 for a default reset, shape [N].
+            success: Whether the episodes completed the task, shape [N].
+            reached: Whether the episodes reached the stage after their start stage, shape [N].
         """
         names = ("default", *BUCKET_NAMES)
-        command = env.command_manager.get_term(self._command_name)
-        success = command.success[env_ids].float()
         finished_source, started_source = self._source(finished), self._source(started)
-        # the buckets are named after their stage, so a bucket's index is its start stage; default resets start in
-        # APPROACH. Column k of reached is the stage after stage k, the success after GOAL.
-        start_stage = (finished_source - 1).clamp(min=0).unsqueeze(1)
-        reached = (command.time_to_stage[env_ids, 1:] >= 0.0).float()
-        reached = torch.cat([reached, success.unsqueeze(1)], dim=1).gather(1, start_stage).squeeze(1)
         self._update_row_estimates(finished, reached, success)
         self._maybe_export_row_estimates(env.common_step_counter)
         counts = torch.bincount(finished_source, minlength=len(names))
@@ -245,9 +284,30 @@ class ResetFromBank(ManagerTermBase):
         log |= {
             f"Reset/share_{name}_raw": share for name, share in zip(names, values[3].tolist()) if name in RESET_MODES
         }
+        log |= self._row_log()
         if self._min_shares is not None:
             self._adapt_shares(env.common_step_counter, dict(zip(names, window[0])), dict(zip(names, window[1])))
         return log
+
+    def _row_log(self) -> dict[str, float]:
+        """Visit-frequency ratios and, when enabled, frontier diagnostics for every stored-stage buffer."""
+        if self.bank is None:
+            return {}
+        keys: list[str] = []
+        values: list[torch.Tensor] = []
+        for mode, rows in self._row_buckets.items():
+            if rows.numel() == 0:
+                continue
+            counts = self.row_episode_count[rows]
+            visit_masks = (counts == 0, counts == 1, counts == 2, counts == 3, counts >= 4)
+            for label, mask in zip(("0", "1", "2", "3", "4_plus"), visit_masks):
+                keys.append(f"Reset/state_visit_fraction_{label}_{mode}")
+                values.append(mask.float().mean())
+            if self._frontier is not None:
+                for name, value in self._frontier.metrics(rows).items():
+                    keys.append(f"Reset/{name}_{mode}")
+                    values.append(value)
+        return dict(zip(keys, torch.stack(values).cpu().tolist()))
 
     def _update_window(self, step: int, episodes: torch.Tensor) -> torch.Tensor:
         """Add the episodes that ended in this step to the moving window and drop the steps that left it.
@@ -296,6 +356,14 @@ class ResetFromBank(ManagerTermBase):
         """EMA of completing the task from each stored reset state, shape [N]."""
         self.row_episode_count: torch.Tensor = torch.zeros(num_rows, dtype=torch.long, device=self.device)
         """Number of finished episodes observed from every stored reset state, shape [N]."""
+        self._row_buckets: dict[str, torch.Tensor] = (
+            {} if self.bank is None else {mode: self.bank.bucket_rows(mode) for mode in RESET_MODES[1:]}
+        )
+        self._frontier = (
+            ResetStateFrontierSampler(num_rows, self.device, self._frontier_cfg)
+            if self._use_frontier and num_rows > 0
+            else None
+        )
 
     def _update_row_estimates(
         self, finished: torch.Tensor, reached_next: torch.Tensor, full_success: torch.Tensor
@@ -333,7 +401,7 @@ class ResetFromBank(ManagerTermBase):
             env_step // self._row_stats_export_interval_steps + 1
         ) * self._row_stats_export_interval_steps
         payload = {
-            "schema_version": 1,
+            "schema_version": 2,
             "env_step": int(env_step),
             "row_ema_episodes": self._row_ema_episodes,
             "bank_fingerprint": self.bank.meta.get("fingerprint", {}),
@@ -341,6 +409,7 @@ class ResetFromBank(ManagerTermBase):
             "next_stage_success": self.row_next_stage_success.detach().cpu(),
             "full_task_success": self.row_full_task_success.detach().cpu(),
             "episode_count": self.row_episode_count.detach().cpu(),
+            "frontier": self._frontier_snapshot(),
         }
         self._save_row_estimates(self._row_stats_dir / f"step_{env_step:08d}.pt", payload)
         self._save_row_estimates(self._row_stats_dir / "latest.pt", payload)
@@ -359,6 +428,25 @@ class ResetFromBank(ManagerTermBase):
         finally:
             if temporary is not None:
                 temporary.unlink(missing_ok=True)
+
+    def _frontier_snapshot(self) -> dict | None:
+        """Serializable frontier histories, estimates and per-stage sampling probabilities."""
+        if self._frontier is None:
+            return None
+        sampling_weight = self._frontier.sampling_weights()
+        sampling_probability = torch.zeros_like(sampling_weight)
+        for rows in self._row_buckets.values():
+            if rows.numel() > 0:
+                sampling_probability[rows] = self._frontier.probabilities(rows)
+        return {
+            "cfg": self._frontier_cfg.to_dict(),
+            "history": self._frontier.history.detach().cpu(),
+            "history_pointer": self._frontier.history_pointer.detach().cpu(),
+            "history_size": self._frontier.history_size.detach().cpu(),
+            "stage_success": self._frontier.success_rate.detach().cpu(),
+            "sampling_weight": sampling_weight.detach().cpu(),
+            "sampling_probability": sampling_probability.detach().cpu(),
+        }
 
     def _adapt_shares(self, step: int, counts: dict[str, float], successes: dict[str, float]) -> None:
         """Set the shares of the next resets from the smoothed task success of every mode, once the hold has ended.

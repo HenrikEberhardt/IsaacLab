@@ -19,8 +19,6 @@ from isaaclab_newton.physics import (
 )
 from isaaclab_newton.sim.schemas import MujocoRigidBodyCfg, NewtonArticulationCfg, NewtonDeformableBodyPropertiesCfg
 from isaaclab_newton.sim.spawners.materials import NewtonSurfaceDeformableBodyMaterialCfg
-from isaaclab_visualizers.kit import KitVisualizerCfg
-from isaaclab_visualizers.newton import NewtonGLVisualizerCfg
 from isaaclab_visualizers.viser import ViserVisualizerCfg
 
 import isaaclab.sim as sim_utils
@@ -49,6 +47,7 @@ from isaaclab_tasks.utils import PresetCfg
 
 from ... import mdp
 from ...coupler_cfg import ClothGraspCouplerProxyCfg
+from ...reset_states import FrontierSamplerCfg
 
 ##
 #################### Pre-defined configs ####################
@@ -211,7 +210,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # Cube spawns on central cloth node
+    # Cube
     cube: RigidObjectCfg = RigidObjectCfg(
         prim_path="{ENV_REGEX_NS}/Cube",
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.62, 0.0, 0.005 + 0.004 + 0.5 * 0.04)),
@@ -222,7 +221,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             mass_props=sim_utils.MassPropertiesCfg(mass=0.1),  # [kg]
             collision_props=sim_utils.CollisionPropertiesCfg(),
             physics_material=RigidBodyMaterialBaseCfg(
-                dynamic_friction=1.5,  # total friction: sqrt(soft_contact_mu * cube mu)
+                dynamic_friction=1.5,  # Total friction: sqrt(contact_proxy_mu * cube_mu)
             ),
         ),
     )
@@ -235,12 +234,12 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             size=(1.5, 1.0, 1.0),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             physics_material=RigidBodyMaterialBaseCfg(
-                dynamic_friction=0.20,
+                dynamic_friction=0.20, # Total friction: sqrt(contact_proxy_mu * table_mu)
             ),
         ),
     )
 
-    # Ground plane
+    # Ground
     ground: AssetBaseCfg = AssetBaseCfg(
         prim_path="/World/GroundPlane",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0.0, 0.0, -1.0]),
@@ -564,6 +563,7 @@ class ResetFromBankCfg(PresetCfg):
         params={
             "bank_path": "logs/reset_banks/bank_5000_v5.pt",
             "mode_probabilities": {"default": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
+            "use_frontier": False,
             "command_name": "cloth_target",
         },
     )
@@ -574,17 +574,39 @@ class ResetFromBankCfg(PresetCfg):
         mode="reset",
         params={
             "bank_path": "logs/reset_banks/bank_5000_v5.pt",
-            "mode_probabilities": {"default": 0.20, "grasp": 0.30, "drag": 0.10, "goal": 0.40},  # start ratios
+            "mode_probabilities": {"default": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},  # start ratios
             "min_probabilities": {"default": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},  # min ratios
-            "success_range": (0.85, 0.95),  # ratio barriers for adaptation
+            "success_range": (0.90, 0.95),  # ratio barriers for adaptation
             "window_steps": 480,  # moving average over 20 iterations at 24 steps/iteration
             "hold_steps": 300,  # 12.5 iterations: all first episodes, shortened by random start lengths, have ended
+            "use_frontier": True,
             "row_stats_export_interval_steps": 120,  # save per-state success every 5 iterations at 24 steps/iteration
             "command_name": "cloth_target",
         },
     )
 
-    default = adaptive
+    # Fixed stage ratios with an SGS competence frontier inside each stored-stage buffer
+    frontier = EventTerm(
+        func=mdp.ResetFromBank,
+        mode="reset",
+        params={
+            "bank_path": "logs/reset_banks/bank_5000_v5.pt",
+            "mode_probabilities": {"default": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
+            "use_frontier": True,
+            "frontier_cfg": FrontierSamplerCfg(
+                history_length=4,
+                weight_increment=1.0,
+                target_success_rate=0.5,
+                kappa=1.0,
+                temperature=1.5,
+                epsilon=1.0e-4,
+            ),
+            "row_stats_export_interval_steps": 120,
+            "command_name": "cloth_target",
+        },
+    )
+
+    default = off
 
 
 @configclass
@@ -672,11 +694,9 @@ class RewardsCfg:
         params={"stages": ["approach", "grasp"], "kernel_std": 0.02, "target_height": 0.0085},
         weight=2.0,
     )
-    # Reward for closing the gripper with target node between the pads increasing with total number of nodes grasped
+    # Signed progress on closing the gripper with target node between the pads, a full close of 6+ nodes pays the weight
     grasp_close_on_node = RewTerm(
-        func=mdp.gripper_closed_on_grasp_node,
-        params={"stages": ["grasp"], "num_nodes_full": 6, "first_grasp_only": True},
-        weight=4.0,
+        func=mdp.GripperCloseProgress, params={"stages": ["grasp"], "num_nodes_full": 6}, weight=3.0
     )
 
     # -------------- Drag --------------
@@ -820,7 +840,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     """Manager-based RL environment: Franka Panda dragging a cloth across the table."""
 
     # Scene settings
-    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=2048, env_spacing=2.2, replicate_physics=True)
+    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=4096, env_spacing=2.2, replicate_physics=True)
 
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
@@ -835,46 +855,24 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         # General settings
         self.decimation = 4
         self.episode_length_s = 10.0
-
-        # Simulation settings
         self.sim.dt = 1.0 / 120
         self.sim.render_interval = self.decimation
         self.sim.physics = PhysicsCfg()
 
-        # Disabled reference visualizer settings.
-        if False:
-            self.sim.visualizer_cfgs = [
-                KitVisualizerCfg(
-                    eye=(0.5 + 3.18, -3.18, 7.59),
-                    lookat=(0.5, 0.0, -0.2),
-                    headless=True,
-                    max_visible_envs=16,
-                    randomly_sample_visible_envs=False,  # show environment 0 - 15
-                ),
-                NewtonGLVisualizerCfg(
-                    eye=(0.5 + 3.18, -3.18, 7.59),
-                    lookat=(0.5, 0.0, -0.2),
-                    focal_length=23.5,  # 23.5 mm matches Kit's focal length
-                    headless=True,
-                    max_visible_envs=16,
-                    randomly_sample_visible_envs=False,
-                ),
-                ViserVisualizerCfg(
-                    eye=(0.5 + 3.18, -3.18, 7.59),
-                    lookat=(0.5, 0.0, -0.2),
-                    focal_length=23.5,
-                    port=8755,  # Change default port to avoid clash with other users on Comino
-                ),
-            ]
-
     def play_mode(self):
-        """Play with full curriculum progress"""
+        """Settings for running the policy in play mode"""
         super().play_mode()
+
+        # Visualization settings for vizer
+        self.sim.visualizer_cfgs = [
+            ViserVisualizerCfg(eye=(0.5 + 3.18, -3.18, 7.59), lookat=(0.5, 0.0, -0.2), focal_length=23.5, port=8755)
+        ]
+
+        # Set the curriculum to the end of the ramp
         if self.curriculum is not None and self.curriculum.observation_hiding is not None:
-            # Play with full curriculum progress
             self.curriculum.observation_hiding.params["initial_progress"] = 1.0
 
-        # Play and evaluation start from the task's default resets only, never from stored reset states
+        # Use the default resets only form the beginning of the task
         if self.events.reset_from_bank is not None:
             self.events.reset_from_bank.params["bank_path"] = None
             self.events.reset_from_bank.params["mode_probabilities"] = {"default": 1.0}

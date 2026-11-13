@@ -60,3 +60,8 @@ Changed
   iterations and ramps over 150 iterations. They ran one after the other from 0.8. Replace overrides of
   ``env.curriculum.stage_hiding`` and ``env.curriculum.grasp_hiding`` with ``env.curriculum.observation_hiding``. The
   term logs only ``progress`` and ``success_ema``.
+* Changed the ``grasp_close_on_node`` reward of ``IsaacContrib-Drag-Cloth-Franka`` to :class:`GripperCloseProgress`,
+  signed progress of the measured gripper closure on the grasp node. A full close of at least ``num_nodes_full=6`` nodes
+  pays its weight of 3.0, holding pays nothing, and reopening takes back what closing paid. The per-second
+  :func:`gripper_closed_on_grasp_node` paid every close before its lock attempt, so policies trained from default resets
+  learned to open and close the fingers over the node instead of locking it. Retrain cloth-drag policies.

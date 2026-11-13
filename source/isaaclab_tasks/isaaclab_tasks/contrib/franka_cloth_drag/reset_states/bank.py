@@ -289,18 +289,28 @@ def cascade_shares(
     return shares
 
 
-def sample_reset_rows(bank: ResetBank, shares: torch.Tensor, num: int) -> torch.Tensor:
-    """Draw the reset of ``num`` environments: a mode by its share, then a uniform state of that mode's bucket.
+def sample_reset_rows(
+    bank: ResetBank, shares: torch.Tensor, num: int, row_weights: torch.Tensor | None = None
+) -> torch.Tensor:
+    """Draw the reset of ``num`` environments: a mode by its share, then a state of that mode's bucket.
 
     Args:
         bank: The bank to draw from.
         shares: Shares of the modes in the order of :data:`RESET_MODES`, from :func:`check_mode_probabilities`.
         num: Number of environments.
+        row_weights: Optional non-negative weight of every bank row, shape [N]. Weights are normalized independently
+            inside each selected bucket. Without them, rows are drawn uniformly.
 
     Returns:
         Bank rows, -1 for the default reset, shape [num], on the bank's device.
     """
     device = bank.device
+    if row_weights is not None:
+        if row_weights.shape != (len(bank),):
+            raise ValueError(f"row_weights must have shape ({len(bank)},), got {tuple(row_weights.shape)}.")
+        if not torch.isfinite(row_weights).all() or (row_weights < 0.0).any():
+            raise ValueError("row_weights must be finite and non-negative.")
+        row_weights = row_weights.to(device)
     modes = torch.multinomial(shares.to(device), num, replacement=True)
     rows = torch.full((num,), -1, dtype=torch.long, device=device)
     for mode_id, mode in enumerate(RESET_MODES[1:], start=1):
@@ -308,7 +318,14 @@ def sample_reset_rows(bank: ResetBank, shares: torch.Tensor, num: int) -> torch.
         count = int(selected.sum())
         if count > 0:
             bucket = bank.bucket_rows(mode)
-            rows[selected] = bucket[torch.randint(len(bucket), (count,), device=device)]
+            if row_weights is None:
+                positions = torch.randint(len(bucket), (count,), device=device)
+            else:
+                weights = row_weights[bucket]
+                if weights.sum() <= 0.0:
+                    raise ValueError(f"row_weights sum to zero inside the '{mode}' bucket.")
+                positions = torch.multinomial(weights, count, replacement=True)
+            rows[selected] = bucket[positions]
     return rows
 
 

@@ -36,6 +36,7 @@ from .stages import (
     ee_grasp_node_distance,
     grasp_node_capturable,
     gripper_closing,
+    gripper_closure,
     nodes_in_grasp,
 )
 
@@ -681,6 +682,62 @@ class ClothDistanceProgress(ManagerTermBase):
         reward = torch.where(eligible & self._has_reference, progress, 0.0) / env.step_dt
         # inactive steps keep the reference, so re-entering the stages settles what changed meanwhile
         self._previous_distance.copy_(torch.where(eligible, distance, self._previous_distance))
+        self._has_reference |= eligible
+        return reward
+
+
+class GripperCloseProgress(ManagerTermBase):
+    """Signed progress of closing the gripper on the grasp node, in the active stages.
+
+    The tracked quantity is the measured closure (:func:`~.stages.gripper_closure`). With ``num_nodes_full`` it is
+    multiplied by ``min(n, num_nodes_full) / num_nodes_full`` for the ``n`` nodes the grasp would lock
+    (:func:`~.stages.nodes_in_grasp`): a larger pinch pays more, and the cap keeps pushing the cloth into a heap from
+    paying extra.
+
+    Only steps in the active stages on which closing captures the grasp node
+    (:func:`~.stages.grasp_node_capturable`) sample it. The first sample of an episode establishes a reference. Other
+    steps keep the reference, so the next sample pays or charges the change made meanwhile. The return telescopes over
+    the episode: a full close pays one, holding pays nothing, and reopening takes back what closing paid, also when the
+    fingers open away from the grasp node. Opening and closing the fingers repeatedly therefore cannot pay twice.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        """Initialize per-environment progress references."""
+        super().__init__(cfg, env)
+        self._previous_closure = torch.zeros(self.num_envs, device=self.device)
+        self._has_reference = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Invalidate closure references for the selected environments."""
+        self._has_reference[slice(None) if env_ids is None else env_ids] = False
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        stages: Sequence[str],
+        num_nodes_full: int | None = None,
+        command_name: str = "cloth_target",
+    ) -> torch.Tensor:
+        """Return the signed closure improvement per control second.
+
+        Args:
+            env: The environment.
+            stages: Names of the stages the term is active in.
+            num_nodes_full: Number of nodes in the grasp at which a full close pays one, or None for one at any count.
+            command_name: Name of the cloth target command.
+        """
+        if num_nodes_full is not None and num_nodes_full < 1:
+            raise ValueError("num_nodes_full must be at least one.")
+        command = _command(env, command_name)
+        closure = gripper_closure(env, command.cfg)
+        if num_nodes_full is not None:
+            closure = closure * (nodes_in_grasp(env, command.cfg).float() / num_nodes_full).clamp(max=1.0)
+        active = _stage_gate(torch.ones_like(closure), command.stage, stages, saturate=False) > 0.0
+        eligible = active & grasp_node_capturable(env, command.cfg, command.grasp_node_id)
+        progress = closure - self._previous_closure
+        reward = torch.where(eligible & self._has_reference, progress, 0.0) / env.step_dt
+        # other steps keep the reference, so the next eligible step settles what changed meanwhile
+        self._previous_closure.copy_(torch.where(eligible, closure, self._previous_closure))
         self._has_reference |= eligible
         return reward
 

@@ -10,4 +10,5 @@ See ``implementation_log/reset_states.md`` for the design.
 
 from .bank import BUCKET_NAMES, SCHEMA_VERSION, ResetBank, subsample_to_quotas
 from .capture import GRASP_STATE_KEYS, capture_reset_states, task_fingerprint
+from .frontier import FrontierSamplerCfg, ResetStateFrontierSampler
 from .restore import restore_physical, restore_task_state

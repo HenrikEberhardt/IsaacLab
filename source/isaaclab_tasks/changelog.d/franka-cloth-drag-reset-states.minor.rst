@@ -20,6 +20,10 @@ Added
 * Added an eight-episode EMA of next-stage and full-task success for every stored reset state for later frontier
   sampling. The adaptive reset preset periodically saves atomic per-state snapshots under the training run's
   ``reset_state_success`` directory.
+* Added the ``frontier`` reset preset (``env.events.reset_from_bank=frontier``). It keeps the fixed ``uniform`` stage
+  shares and samples independently inside the grasp, drag and goal buffers with an SGS beta kernel over a four-rollout,
+  linearly weighted next-stage-success history. It also logs per-buffer visit-frequency and frontier diagnostics and
+  includes the frontier history, estimates, weights and probabilities in the periodic per-state snapshots.
 
 Changed
 ^^^^^^^

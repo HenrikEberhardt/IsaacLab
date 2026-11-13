@@ -6,6 +6,7 @@
 __all__ = [
     "ClothDragStage",
     "ClothDistanceProgress",
+    "GripperCloseProgress",
     "ClothPointsInBaseFrame",
     "cloth_target_displacement_b",
     "cloth_drag_success",
@@ -126,6 +127,7 @@ from .observations import (
 from .reset_bank import ResetFromBank
 from .rewards import (
     ClothDistanceProgress,
+    GripperCloseProgress,
     action_term_l2,
     action_term_rate_l2,
     cloth_drag_drop_penalty,

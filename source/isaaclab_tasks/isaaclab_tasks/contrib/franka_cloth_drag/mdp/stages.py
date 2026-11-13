@@ -56,6 +56,14 @@ def finger_opening(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Te
     return robot.data.joint_pos.torch[:, finger_ids[0]]
 
 
+def gripper_closure(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Measured closure of the gripper, zero at its open command and one at its close command. Shape is (num_envs,)."""
+    action_cfg = env.action_manager.get_term(cfg.gripper_action_name).cfg
+    open_opening = action_cfg.open_command_expr[cfg.finger_joint_name]
+    close_opening = action_cfg.close_command_expr[cfg.finger_joint_name]
+    return ((open_opening - finger_opening(env, cfg)) / (open_opening - close_opening)).clamp(0.0, 1.0)
+
+
 def ee_cloth_distance(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg, height_offset: float = 0.0) -> torch.Tensor:
     """Distance of the EE frame origin to the nearest cloth node [m]. Shape is (num_envs,)."""
     cloth: DeformableObject = env.scene[cfg.object_name]
