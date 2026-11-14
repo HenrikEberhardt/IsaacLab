@@ -9,10 +9,11 @@ Script to generate a bank of reset states of ``IsaacContrib-Drag-Cloth-Franka`` 
 The state machine (:mod:`isaaclab_tasks.contrib.franka_cloth_drag.state_machine`) runs in all environments, started
 by the task's default resets and randomized per rollout (drag speed, drag height, grasp yaw offset, pre-grasp pose,
 arm action noise). Each successful rollout contributes one state per start stage, captured at a uniformly random time
-inside the stage's window: the start of the episode, the pre-grasp pose the state machine holds (open gripper), the
-fresh grasp before the drag, and the goal point at the edge of the goal zone. Every candidate is restored through the
-training reset path and held for a few steps; only valid states are kept. The bank holds exactly ``--num_states``
-states, split evenly over the four stages, and is saved to ``--output``. All other generation settings are those of
+inside the stage's window: the start of the episode or a step before the GRASP stage, the pre-grasp pose the state
+machine holds or moves into (open gripper), the fresh grasp before the drag, and the goal point at the edge of the goal
+zone. Every candidate is restored through the training reset path and held for a few steps; only valid states are
+kept. The bank holds exactly ``--stage_quotas`` states per stage, or ``--num_states`` states split evenly over the four
+stages, and is saved to ``--output``. All other generation settings are those of
 :class:`~isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation.ResetBankGenerationCfg`; the bank stores them
 in its meta. See ``franka_cloth_drag/implementation_log/reset_states.md``.
 
@@ -25,6 +26,10 @@ in its meta. See ``franka_cloth_drag/implementation_log/reset_states.md``.
 
     # Full bank.
     uv run python $GEN/generate_reset_bank.py --num_envs 256 --num_states 4000 --output logs/reset_banks/bank_4000_v7.pt
+
+    # Bank sized per stage: large approach bank, frontier-sized grasp, drag and goal banks.
+    uv run python $GEN/generate_reset_bank.py --num_envs 256 --stage_quotas approach=8000,grasp=1000,drag=100,goal=100 \
+        --output logs/reset_banks/bank_v8.pt
 
 """
 
@@ -39,6 +44,7 @@ from isaaclab.app import add_launcher_args, launch_simulation
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownDeltaEEActionCfg
+from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import ResetBankGenerationCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
     HOVER_MARGIN,
     YAW_ACTION_SCALE,
@@ -46,7 +52,6 @@ from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
     DragClothSm,
     keep_requested_visualizers,
 )
-from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import ResetBankGenerationCfg
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
 defaults = ResetBankGenerationCfg()
@@ -58,7 +63,13 @@ parser.add_argument(
     "--num_states",
     type=int,
     default=defaults.num_states,
-    help="Number of stored states, split evenly over the four stages.",
+    help="Number of stored states, split evenly over the four stages. Not used with --stage_quotas.",
+)
+parser.add_argument(
+    "--stage_quotas",
+    type=str,
+    default=None,
+    help="Number of stored states per stage, e.g. 'approach=8000,grasp=1000,drag=100,goal=100'.",
 )
 parser.add_argument(
     "--output",
@@ -86,7 +97,14 @@ wp.init()
 
 def main():
     # the generation settings (state machine randomization, capture windows, validation) use one shared config
-    generation_cfg = ResetBankGenerationCfg(num_states=args_cli.num_states, seed=args_cli.seed)
+    stage_quotas = None
+    if args_cli.stage_quotas is not None:
+        stage_quotas = {
+            name.strip(): int(count) for name, count in (item.split("=") for item in args_cli.stage_quotas.split(","))
+        }
+    generation_cfg = ResetBankGenerationCfg(
+        num_states=args_cli.num_states, stage_quotas=stage_quotas, seed=args_cli.seed
+    )
     output = args_cli.output or f"logs/reset_banks/reset_bank_{datetime.now():%Y-%m-%d_%H-%M-%S}.pt"
 
     # parse configuration via Hydra, so presets can be selected on the CLI

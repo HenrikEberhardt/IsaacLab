@@ -539,7 +539,7 @@ class CommandsCfg:
         grasp_min_nodes=2,  # GRASP -> DRAG: a grasp locking at least this many nodes to the EE, one of them raised
         goal_zone_margin=0.06,  # DRAG -> GOAL: center node closer than success_radius + this (0.10 m) to the target
         # Success per start stage (Metrics/cloth_target/task_success_<stage>_*), also used by the adaptive resets
-        success_window_steps=480,  # averaging window (24 x 20 iterations)
+        success_window_steps=480,  # averaging window (24 x 20 iterations), longer than an episode (300 steps)
     )
 
 
@@ -610,8 +610,8 @@ class UniformResetsCfg:
     """Bank resets using fixed configured ratios between start stages."""
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_4000_v7.pt",
-        start_stage_ratios={"approach": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
+        bank_path="logs/reset_banks/bank_v8.pt",  # approach 8000, grasp 1000, drag 100, goal 100 states
+        start_stage_ratios={"approach": 0.4125, "grasp": 0.4125, "drag": 0.075, "goal": 0.10},
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
     )
@@ -622,14 +622,18 @@ class AdaptiveResetsCfg:
     """Bank resets whose start-stage ratios adapt to training success."""
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_4000_v7.pt",
-        start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
-        min_stage_ratios={"approach": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},
-        # Ratio Changing Variables
-        ratio_shift_success_range=(0.90, 0.95),  # lower ratio at 0.9 and reach min at 0.95
-        ratio_hold_steps=300,  # no adaptation over first 15 iterations
+        bank_path="logs/reset_banks/bank_v8.pt",  # approach 8000, grasp 1000, drag 100, goal 100 states
+        start_stage_ratios={"approach": 0.4125, "grasp": 0.4125, "drag": 0.075, "goal": 0.10},  # as uniform_resets
+        # approach never gives up ratio, so it has no minimum; it reaches at most 1 - 0.20 = 0.80
+        min_stage_ratios={"grasp": 0.10, "drag": 0.05, "goal": 0.05},
+        # Ratio Changing Variables: a bank stage's mean per-state frontier success between these hands its ratio over
+        # to approach; bank grasps keep helping real arrivals until about 0.8
+        ratio_shift_success_range=(0.80, 0.92),
+        ratio_max_shift_per_step=0.0008,  # 0.02 per iteration: a full grasp handover takes ~16 iterations
+        ratio_hold_steps=300,  # no adaptation over first 12.5 iterations
         use_frontier_sampling=True,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
+        frontier_stages=("grasp", "drag", "goal"),  # the large approach bank is drawn uniformly
     )
 
 
@@ -827,7 +831,6 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self) -> None:
-        
         # Simulation settings
         self.decimation = 4
         self.episode_length_s = 10.0

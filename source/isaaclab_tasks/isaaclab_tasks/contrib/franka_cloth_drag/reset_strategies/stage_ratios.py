@@ -5,8 +5,8 @@
 
 """Ratios of the stages among the resets of the Franka cloth dragging task.
 
-Uniform resets draw with fixed ratios (:func:`sample_reset_rows`); adaptive resets move the ratios of solved stages
-to the stage before them (:func:`cascade_shares`).
+Uniform resets draw with fixed ratios (:func:`sample_reset_rows`); adaptive resets hand the ratios of solved stages over
+to the approach stage (:func:`handover_stage_ratios`), at a limited rate (:func:`limit_ratio_shift`).
 """
 
 from __future__ import annotations
@@ -77,19 +77,19 @@ def check_min_stage_ratios(
     return minimum
 
 
-def cascade_shares(
+def handover_stage_ratios(
     start: torch.Tensor, minimum: torch.Tensor, success: torch.Tensor, success_range: Sequence[float]
 ) -> torch.Tensor:
-    """Move the ratios of solved stages to the stage before them.
+    """Hand the ratios of solved bank stages over to the approach stage.
 
-    Resets of an earlier stage run through the later ones, so a stage hands its ratio to the stage before it in
-    :data:`~..mdp.stages.START_STAGE_NAMES`: goal to drag, drag to grasp, grasp to approach. A stage keeps all it holds,
-    its start ratio and what it received, up to the low end of ``success_range``, only its minimum from the high end,
-    and linearly between. The approach stage hands over nothing, so it never falls below its start ratio.
+    The grasp, drag and goal stages keep their start ratio up to the low end of ``success_range``, only their minimum
+    from the high end, and linearly between. The approach stage, the start of the task and the only source of real
+    arrivals at the cloth, takes the rest: it never gives up any ratio, so it never falls below its start ratio. With
+    every stage unsolved the ratios are the start ratios.
 
     Args:
         start: Start ratios in the order of :data:`~..mdp.stages.START_STAGE_NAMES`, shape [M].
-        minimum: Minimum ratios in the same order, shape [M].
+        minimum: Minimum ratios in the same order, shape [M]. The approach stage's is not used.
         success: Success of each stage in [0, 1] in the same order, shape [M]. The approach stage's is not used.
         success_range: Success (low, high) between which a stage hands over its ratio.
 
@@ -97,13 +97,30 @@ def cascade_shares(
         The ratios in the same order, shape [M].
     """
     low, high = success_range
-    given_up = ((success - low) / (high - low)).clamp(0.0, 1.0)
-    ratios = start.clone()
-    for stage_id in range(len(ratios) - 1, 0, -1):
-        released = (ratios[stage_id] - minimum[stage_id]) * given_up[stage_id]
-        ratios[stage_id] -= released
-        ratios[stage_id - 1] += released
+    deficit = ((high - success) / (high - low)).clamp(0.0, 1.0)
+    ratios = minimum + (start - minimum) * deficit
+    ratios[0] = 1.0 - ratios[1:].sum()
     return ratios
+
+
+def limit_ratio_shift(current: torch.Tensor, target: torch.Tensor, max_shift: float) -> torch.Tensor:
+    """Move the ratios towards the target by at most ``max_shift`` in any stage.
+
+    The whole difference is scaled, so the ratios keep their sum.
+
+    Args:
+        current: Current ratios, shape [M].
+        target: Target ratios, shape [M].
+        max_shift: Largest change of any stage's ratio, non-negative.
+
+    Returns:
+        The new ratios, shape [M].
+    """
+    difference = target - current
+    largest = difference.abs().max()
+    if largest <= max_shift:
+        return target.clone()
+    return current + difference * (max_shift / largest)
 
 
 def sample_reset_rows(

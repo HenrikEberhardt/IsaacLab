@@ -41,7 +41,15 @@ class ResetBankGenerationCfg:
 
     num_states: int = 4000
     """Number of stored states, split evenly over the start stages (:data:`~..mdp.stages.START_STAGE_NAMES`): the
-    task-start, pre-grasp, fresh-grasp and goal-zone states."""
+    approach, pre-grasp, fresh-grasp and goal-zone states. Not used with :attr:`stage_quotas`."""
+
+    stage_quotas: dict[str, int] | None = None
+    """Number of stored states per start stage name, e.g. ``{"approach": 8000, "grasp": 1000, "drag": 100, "goal":
+    100}``; every stage needs at least one. None splits :attr:`num_states` evenly."""
+
+    approach_start_share: float = 0.5
+    """Share of the rollouts whose approach state is the first step of the episode; the others store a state drawn
+    uniformly over the steps before the GRASP stage is first reached."""
 
     validation_steps: int = 30
     """Steps each candidate is held after its restore before it counts as valid."""
@@ -55,23 +63,24 @@ class ResetBankGenerationCfg:
     yaw_offset_range: tuple[float, float] = (-0.3, 0.3)
     """Range of the offset added to the grasp yaw [rad]."""
 
-    pregrasp_height_range: tuple[float, float] = (0.005, 0.03)
+    pregrasp_height_range: tuple[float, float] = (0.005, 0.025)
     """Range of the height of the pre-grasp pose (grasp states) above the grasped raised node [m]. With
-    :attr:`pregrasp_radius_range`, the pose stays within 3.4 cm of the node, inside the GRASP stage's approach radius
-    (4 cm) with margin for the tracking error."""
+    :attr:`pregrasp_radius_range`, the pose stays within 3.5 cm of the node, inside the GRASP stage's approach radius
+    (4 cm); states that the tracking error puts outside are not in the GRASP stage and are not captured."""
 
-    pregrasp_radius_range: tuple[float, float] = (0.005, 0.015)
+    pregrasp_radius_range: tuple[float, float] = (0.020, 0.025)
     """Largest planar offset of the pre-grasp pose from the raised node at the lowest and at the highest pre-grasp
     height [m]: it grows linearly with the height (a cone, approach from the top), and the offset is drawn biased to the
     centre (radius uniform, not area)."""
 
-    pregrasp_yaw_error_range: tuple[float, float] = (-0.26, 0.26)
-    """Range of the yaw of the pre-grasp pose relative to the grasp yaw [rad] (±15°)."""
+    pregrasp_yaw_error_range: tuple[float, float] = (-0.79, 0.79)
+    """Range of the yaw of the pre-grasp pose relative to the grasp yaw [rad] (±45°)."""
 
-    pregrasp_max_speed: float = 0.01
-    """Fastest end-effector speed of a captured pre-grasp state [m/s]."""
+    pregrasp_max_speed: float = 0.05
+    """Fastest end-effector speed of a captured pre-grasp state [m/s]; states are also captured on the way into the
+    pose."""
 
-    pregrasp_min_hold: float = 0.2
+    pregrasp_min_hold: float = 0.0
     """Time the state machine must have held the pre-grasp pose before a grasp state is captured [s]."""
 
     drag_window: float = 0.5
@@ -108,6 +117,13 @@ class ResetBankGenerationCfg:
     def __post_init__(self):
         if self.num_states < len(START_STAGE_NAMES):
             raise ValueError(f"num_states must be at least {len(START_STAGE_NAMES)}, one per stage.")
+        if self.stage_quotas is not None:
+            if set(self.stage_quotas) != set(START_STAGE_NAMES):
+                raise ValueError(f"stage_quotas needs exactly the stages {START_STAGE_NAMES}, got {self.stage_quotas}.")
+            if any(quota < 1 for quota in self.stage_quotas.values()):
+                raise ValueError(f"Every stage quota must be at least one, got {self.stage_quotas}.")
+        if not 0.0 <= self.approach_start_share <= 1.0:
+            raise ValueError(f"approach_start_share must lie in [0, 1], got {self.approach_start_share}.")
         if self.validation_steps <= 0:
             raise ValueError("validation_steps must be positive.")
         for name in (
@@ -125,6 +141,8 @@ class ResetBankGenerationCfg:
 
     def quotas(self) -> dict[str, int]:
         """Number of stored states per start stage."""
+        if self.stage_quotas is not None:
+            return {name: int(self.stage_quotas[name]) for name in START_STAGE_NAMES}
         base, extra = divmod(self.num_states, len(START_STAGE_NAMES))
         return {name: base + (i < extra) for i, name in enumerate(START_STAGE_NAMES)}
 
@@ -192,6 +210,9 @@ class ResetBankBuilder:
         self._rows = torch.arange(self.num_envs, device=self.device)
         self._generator = torch.Generator(device=self.device)
         self._generator.manual_seed(cfg.seed)
+        self._cpu_generator = torch.Generator().manual_seed(cfg.seed)
+        # whether the rollout of every environment stores its first step as its approach state
+        self._approach_at_start = torch.ones(self.num_envs, dtype=torch.bool, device=self.device)
         self.stats: Counter = Counter()
 
     def run(self) -> ResetBank:
@@ -216,6 +237,10 @@ class ResetBankBuilder:
             if candidates is None:
                 print(f"[INFO]: Round {round_id}: no successful rollout.")
                 continue
+            # every rollout gives a candidate of each stage: validate only as many as a stage still needs
+            found = candidates.stage_counts()
+            caps = {name: min(targets[name], found[name]) for name in START_STAGE_NAMES}
+            candidates = candidates.select(subsample_to_quotas(candidates, caps, self._cpu_generator).to(self.device))
             valid, reasons = self.validate(candidates)
             accepted.append(candidates.select(valid.nonzero(as_tuple=False).squeeze(-1)))
             self._record_validation(candidates, valid, reasons, acceptance)
@@ -363,9 +388,10 @@ class ResetBankBuilder:
 
         Every window also requires its task stage, so each state is stored in the stage it starts in.
 
-        * default (APPROACH): the first step of the episode;
-        * grasp (pre-grasp): the state machine holds its pre-grasp pose (for at least ``pregrasp_min_hold``), the arm
-          still, the gripper open and nothing locked;
+        * approach: the first step of the episode, or, for the rollouts drawn without ``approach_start_share``, any step
+          before the GRASP stage is first reached;
+        * grasp (pre-grasp): the state machine holds or moves into its pre-grasp pose (in it for at least
+          ``pregrasp_min_hold``), the arm at most ``pregrasp_max_speed`` fast, the gripper open and nothing locked;
         * drag: a raised node held with the squeeze complete for at most ``drag_window``, the goal point moved by at
           most ``drag_max_progress`` of its distance;
         * goal: a raised node held with the squeeze complete, the goal point within ``goal_distance_window`` of the
@@ -379,6 +405,7 @@ class ResetBankBuilder:
             ee_speed: End-effector speed over the last step [m/s], shape [N].
             since_squeeze: Time since the squeeze completed [s], infinite while not squeezed, shape [N].
         """
+        from ..mdp.stages import ClothDragStage
         from ..state_machine import DragSmState
 
         cfg = self.cfg
@@ -386,10 +413,12 @@ class ResetBankBuilder:
         unlocked = ~constraint.active & ~constraint.contacts_disabled
         holding_pose = (self.sm.sm_state == DragSmState.PREGRASP_HOLD) & (self.sm.sm_wait_time >= cfg.pregrasp_min_hold)
         pregrasp = holding_pose & (ee_speed <= cfg.pregrasp_max_speed) & ~self.gripper.closed & unlocked
+        # the stage is not monotonic (a failed try can leave the approach radius again): only before the first GRASP
+        before_grasp = self.command.time_to_stage[:, int(ClothDragStage.GRASP)] < 0.0
         low, high = cfg.goal_distance_window
         in_goal_window = (distance >= low) & (distance <= high) & (since_squeeze < math.inf)
         windows = [
-            step == 1,
+            torch.where(self._approach_at_start, step == 1, before_grasp),
             pregrasp,
             (since_squeeze <= cfg.drag_window) & (progress <= cfg.drag_max_progress),
             in_goal_window & ~self.command.holding,
@@ -410,6 +439,7 @@ class ResetBankBuilder:
         cfg, num = self.cfg, len(env_ids)
         if num == 0:
             return
+        self._approach_at_start[env_ids] = self._uniform((0.0, 1.0), num) < cfg.approach_start_share
         self.sm.set_params(
             env_ids,
             drag_height=self._uniform(cfg.drag_height_range, num),

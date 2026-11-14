@@ -36,11 +36,11 @@ from isaaclab.app import add_launcher_args, launch_simulation
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import START_STAGE_ALIASES, START_STAGE_NAMES
-from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import keep_requested_visualizers
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import (
     ResetBankGenerationCfg,
     ResetStateValidator,
 )
+from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import keep_requested_visualizers
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
 defaults = ResetBankGenerationCfg()
@@ -92,6 +92,7 @@ def main():
 
     with launch_simulation(env_cfg, args_cli):
         from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import UniformResetsCfg
+
         # load the bank through the training reset event, as the only reset event; it draws nothing by itself
         env_cfg.events = UniformResetsCfg()
         env_cfg.events.reset_from_bank.bank_path = args_cli.bank

@@ -28,12 +28,12 @@ class BoundedGaussianDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
 
 @configclass
 class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
-    """Cloth-drag policy with five-frame actor inputs and a privileged critic."""
+    """Non-Prehensile Cloth Drag Task"""
 
     seed = 42
     experiment_name = "cloth_drag_task"
     num_steps_per_env = 24
-    max_iterations = 750
+    max_iterations = 400
     save_interval = 50
     logger = "wandb"
     wandb_project = "non-prehensile_cloth_task"
@@ -44,7 +44,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     action_dim_names = ["dx", "dy", "dz", "dyaw", "gripper"]
 
     actor = RslRlMLPModelCfg(
-        hidden_dims=[512, 256, 128, 64],  # [256, 128, 64], #
+        hidden_dims=[512, 256, 128, 64],
         activation="elu",
         obs_normalization=True,
         # The bounds loss pulls a saturated mean back toward the nominal range
@@ -54,7 +54,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
     critic = RslRlMLPModelCfg(
-        hidden_dims=[512, 256, 128, 64],  # [256, 128, 64], #
+        hidden_dims=[512, 256, 128, 64],
         activation="elu",
         obs_normalization=True,
     )

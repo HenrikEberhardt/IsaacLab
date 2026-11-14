@@ -18,6 +18,7 @@ from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import combine_frame_transforms
 
 from .frames import cloth_center_pos_b, points_to_base, raised_node_ids
+from .grasp_diagnostics import GraspDiagnostics
 from .stages import (
     START_STAGE_NAMES,
     ClothDragStage,
@@ -26,7 +27,6 @@ from .stages import (
     goal_point_pos_b,
     goal_point_vel_b,
     grasp_node_ids,
-    gripper_holds_cloth,
     gripper_holds_raised_node,
 )
 
@@ -116,10 +116,12 @@ class ClothTargetCommand(CommandTerm):
     * ``center_speed_at_target``: planar speed of the goal point [m/s], averaged over the steps of the last
       :attr:`ClothTargetCommandCfg.speed_window` steps in which it was inside the success radius. Environments whose
       cloth was not inside in that window are left out; the metric is omitted when none was inside.
-    * ``time_in_wrong_grasp``: time the gripper held the cloth without a raised node among the locked nodes [s].
     * ``task_success_<stage>_raw``, ``stage_success_<stage>_raw`` and their ``_smoothed`` versions: the success of the
       finished episodes per stage they started in (:attr:`start_stage`), and the share that reached the stage after it,
       see :class:`StartStageSuccess`.
+
+    The grasp diagnostics of :class:`~.grasp_diagnostics.GraspDiagnostics` are logged under ``Grasp/*``, their own
+    section in the training logs.
 
     With :attr:`ClothTargetCommandCfg.goal_object_name` set, also:
 
@@ -162,6 +164,9 @@ class ClothTargetCommand(CommandTerm):
         self.start_stage_success = StartStageSuccess(cfg.success_window_steps)
         """Success of the finished episodes per start stage."""
 
+        self.grasp_diagnostics = GraspDiagnostics(env, cfg)
+        """Grasp events of the current episodes, logged under ``Grasp/*`` at their end."""
+
         self.success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         """Whether the goal was reached during the current episode. Shape is (num_envs,).
 
@@ -170,7 +175,6 @@ class ClothTargetCommand(CommandTerm):
 
         # Attributes for logging metrics at reset
         self.metrics["position_error_xy"] = torch.zeros(self.num_envs, device=self.device)
-        self.metrics["time_in_wrong_grasp"] = torch.zeros(self.num_envs, device=self.device)
         if cfg.goal_object_name is not None:
             self.metrics["object_center_offset"] = torch.zeros(self.num_envs, device=self.device)
 
@@ -300,6 +304,12 @@ class ClothTargetCommand(CommandTerm):
             success, reached = self.episode_outcomes(env_ids)
             if success.numel() > 0:
                 success_log = self.start_stage_success.record(step, self._start_stage[env_ids], success, reached)
+        grasp_log = self.grasp_diagnostics.reset(
+            env_ids, self._start_stage[env_ids], self._time_to_stage[env_ids, int(ClothDragStage.DRAG)]
+        )
+        if step > 0:
+            # own top-level prefix, not Metrics/<term>/: the environment recreated the log before the manager resets
+            self._env.extras.setdefault("log", {}).update(grasp_log)
         # read the speed window before the resample clears it
         at_target = self._at_target_hist[env_ids]
         num_at_target = at_target.sum(dim=1)
@@ -374,7 +384,6 @@ class ClothTargetCommand(CommandTerm):
         near = ee_grasp_node_distance(self._env, cfg, self.grasp_node_id) < cfg.approach_radius
         # locked nodes cannot slip: the grasp holds until the policy opens the gripper, so no hysteresis is needed
         pinched = gripper_holds_raised_node(self._env, cfg)
-        wrong_grasp = gripper_holds_cloth(self._env, cfg) & ~pinched
         goal_radius = cfg.success_radius + cfg.goal_zone_margin
         in_goal_zone = pinched & (cloth_goal_xy_distance(self._env, self.target_pos_b, cfg) < goal_radius)
         stage = torch.where(pinched, int(ClothDragStage.DRAG) + in_goal_zone.long(), near.long())
@@ -391,7 +400,7 @@ class ClothTargetCommand(CommandTerm):
         for s in ClothDragStage:
             first = (stage >= s) & (self._time_to_stage[:, int(s)] < 0.0)
             self._time_to_stage[:, int(s)] = torch.where(first, episode_time, self._time_to_stage[:, int(s)])
-        self.metrics["time_in_wrong_grasp"] += wrong_grasp.float() * dt
+        self.grasp_diagnostics.update(self.grasp_node_id)
 
     def _set_debug_vis_impl(self, debug_vis: bool):
         """Create the target marker on first use and show or hide it when :attr:`debug_vis` is toggled."""

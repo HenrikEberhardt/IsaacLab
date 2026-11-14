@@ -13,6 +13,8 @@ from isaaclab.managers import EventTermCfg
 from isaaclab.utils import configclass
 
 from .frontier import FrontierSamplerCfg
+
+
 @configclass
 class ResetFromBankCfg(EventTermCfg):
     """Configuration of :class:`~.reset_from_bank.ResetFromBank`: starts the episodes from stored reset states.
@@ -48,18 +50,31 @@ class ResetFromBankCfg(EventTermCfg):
     frontier_sampling_parameters: FrontierSamplerCfg = FrontierSamplerCfg()
     """Settings of the frontier sampling, used with :attr:`use_frontier_sampling`."""
 
+    frontier_stages: tuple[str, ...] = ("grasp", "drag", "goal")
+    """Stages whose states are drawn by the frontier sampling, used with :attr:`use_frontier_sampling`; the states of
+    the other stages are drawn uniformly. The approach stage is left out by default: its bank is large, so each state
+    is visited too rarely for a success estimate, and uniform draws keep its starts diverse."""
+
     state_success_export_interval_steps: int = 120
     """Number of environment steps between the snapshots of the per-state visit counts and frontier data under the
     run's ``reset_state_success`` directory (5 iterations at 24 steps/iteration). Zero disables the snapshots."""
 
     min_stage_ratios: dict[str, float] | None = None
     """Smallest ratio of the resets per stage, keyed like :attr:`start_stage_ratios`. Enables the adaptive ratios, with
-    :attr:`start_stage_ratios` as the start ratios: a solved stage hands its ratio to the stage before it. None keeps
-    the ratios fixed."""
+    :attr:`start_stage_ratios` as the start ratios: a solved grasp, drag or goal stage hands its ratio over to the
+    approach stage, see :func:`~.stage_ratios.handover_stage_ratios`. The approach stage never gives up ratio, so its
+    entry is not used. None keeps the ratios fixed."""
 
-    ratio_shift_success_range: tuple[float, float] = (0.90, 0.95)
-    """Smoothed task success (low, high) of a stage between which it hands over its ratio: all of it is kept below
-    ``low``, only the minimum from ``high``. Used with :attr:`min_stage_ratios`."""
+    ratio_shift_success_range: tuple[float, float] = (0.80, 0.92)
+    """Success (low, high) of a stage between which it hands over its ratio: all of it is kept below ``low``, only the
+    minimum from ``high``. The success of a stage in :attr:`frontier_stages` with frontier sampling is the mean of its
+    states' frontier success estimates (every state weighted equally, unvisited states count as failed); otherwise it
+    is the smoothed share of the episodes started in the stage that reach the next one (the task success for the goal
+    stage). Used with :attr:`min_stage_ratios`."""
+
+    ratio_max_shift_per_step: float = 0.0008
+    """Largest change of any stage's ratio per environment step (0.02 per iteration at 24 steps/iteration), so a
+    handover is spread over more than an episode's length. Used with :attr:`min_stage_ratios`."""
 
     ratio_hold_steps: int = 0
     """Number of environment steps the adaptive ratios keep their start values. Used with :attr:`min_stage_ratios`."""

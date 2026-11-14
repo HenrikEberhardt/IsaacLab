@@ -38,9 +38,10 @@ from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.frontier import (
     ResetStateFrontierSampler,
 )
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.stage_ratios import (
-    cascade_shares,
     check_min_stage_ratios,
     check_stage_ratios,
+    handover_stage_ratios,
+    limit_ratio_shift,
     sample_reset_rows,
 )
 
@@ -230,20 +231,39 @@ def test_reset_strategy_presets():
 @pytest.mark.parametrize(
     "success, expected",
     [
-        ([1.0, 0.5, 0.5, 0.5], [0.30, 0.45, 0.15, 0.10]),  # nothing solved; default's success does not count
-        ([0.0, 0.5, 0.5, 1.0], [0.30, 0.45, 0.20, 0.05]),  # goal solved: its share goes to drag
-        ([0.0, 0.5, 1.0, 1.0], [0.30, 0.60, 0.05, 0.05]),  # drag too: all it holds goes to grasp
-        ([0.0, 1.0, 1.0, 1.0], [0.85, 0.05, 0.05, 0.05]),  # all solved: only the minimums stay in the stages
-        ([0.0, 1.0, 0.5, 0.5], [0.70, 0.05, 0.15, 0.10]),  # only grasp solved: drag and goal keep theirs
-        ([0.0, 0.5, 0.5, 0.91], [0.30, 0.45, 0.175, 0.075]),  # goal halfway through the range: half of its surplus
+        # nothing solved: the start ratios; approach's own success does not count
+        ([1.0, 0.0, 0.0, 0.0], [0.30, 0.45, 0.15, 0.10]),
+        # all solved: the bank stages keep their minimums, approach takes the rest, 1 - 3 * 0.05
+        ([1.0, 1.0, 1.0, 1.0], [0.85, 0.05, 0.05, 0.05]),
+        # only grasp solved: its 0.40 above the minimum goes to approach, drag and goal keep theirs
+        ([0.0, 1.0, 0.0, 0.0], [0.70, 0.05, 0.15, 0.10]),
+        # goal halfway through the range (deficit 0.5): it keeps 0.05 + 0.05 * 0.5, approach gains 0.025
+        ([0.0, 0.0, 0.0, 0.86], [0.325, 0.45, 0.15, 0.075]),
     ],
 )
-def test_cascade_moves_solved_shares_to_the_stage_before(success, expected):
+def test_handover_stage_ratios_move_solved_shares_to_approach(success, expected):
     start = torch.tensor([0.30, 0.45, 0.15, 0.10])
-    minimum = torch.tensor([0.20, 0.05, 0.05, 0.05])
-    shares = cascade_shares(start, minimum, torch.tensor(success), (0.85, 0.97))
+    minimum = torch.tensor([0.0, 0.05, 0.05, 0.05])
+    shares = handover_stage_ratios(start, minimum, torch.tensor(success), (0.80, 0.92))
     assert shares.tolist() == pytest.approx(expected, abs=1e-6)
     assert shares.sum().item() == pytest.approx(1.0)
+
+
+def test_handover_never_takes_ratio_from_approach():
+    start = torch.tensor([0.30, 0.45, 0.15, 0.10])
+    minimum = torch.tensor([0.0, 0.05, 0.05, 0.05])
+    for success in torch.rand(200, 4, generator=torch.Generator().manual_seed(0)):
+        shares = handover_stage_ratios(start, minimum, success, (0.80, 0.92))
+        assert shares[0] >= start[0] - 1e-6
+        assert (shares[1:] >= minimum[1:] - 1e-6).all() and (shares[1:] <= start[1:] + 1e-6).all()
+
+
+def test_ratio_shift_is_limited_and_keeps_the_sum():
+    current, target = torch.tensor([0.30, 0.45, 0.15, 0.10]), torch.tensor([0.70, 0.05, 0.15, 0.10])
+    # the largest change (0.40) is scaled to 0.10, the others in proportion
+    assert limit_ratio_shift(current, target, 0.10).tolist() == pytest.approx([0.40, 0.35, 0.15, 0.10])
+    assert limit_ratio_shift(current, target, 0.40).tolist() == pytest.approx(target.tolist())
+    assert limit_ratio_shift(current, target, 0.10).sum().item() == pytest.approx(1.0)
 
 
 def test_adaptive_share_settings_are_checked():
@@ -496,6 +516,30 @@ def test_frontier_tracks_next_stage_outcomes_and_logs_visits(monkeypatch, tmp_pa
     assert snapshot["frontier"]["sampling_probability"].tolist() == pytest.approx([0.5, 0.5, 1.0, 1.0])
 
 
+def test_stages_outside_frontier_stages_draw_uniformly(monkeypatch, tmp_path):
+    bank = _bank([0, 0, 1, 1])
+    bank.save(tmp_path / "bank.pt")
+    term, env = _reset_term(
+        monkeypatch,
+        bank,
+        torch.zeros(4),
+        bank_path=str(tmp_path / "bank.pt"),
+        use_frontier_sampling=True,
+        frontier_stages=("grasp",),
+    )
+    # one approach and one grasp state solved, the other two failed: different frontier weights in both stages
+    term._frontier.record(torch.arange(4), torch.tensor([True, False, True, False]))
+    frontier = term._frontier.sampling_weights()
+    weights = term._row_weights()
+    assert weights[:2].tolist() == [1.0, 1.0]
+    assert weights[2:].tolist() == frontier[2:].tolist()
+    log = _reset(term, env, torch.arange(4), step=1)
+    assert "Reset/frontier_success_mean_grasp" in log
+    assert not any(key.startswith("Reset/frontier_") and key.endswith("_approach") for key in log)
+    with pytest.raises(ValueError, match="Unknown frontier stages"):
+        _reset_term(monkeypatch, None, torch.zeros(1), frontier_stages=("reach",))
+
+
 def test_reset_logs_per_stage_visit_frequency_ratios(monkeypatch):
     term, _ = _reset_term(monkeypatch, _bank([1] * 5 + [2] * 5 + [3] * 5), torch.zeros(1))
     term.state_visit_count[:] = torch.tensor([0, 1, 2, 3, 4] * 3)
@@ -533,7 +577,8 @@ def test_reset_exports_state_statistics_periodically(monkeypatch, tmp_path):
     assert snapshot["frontier"] is None
 
 
-def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path):
+@pytest.mark.parametrize("max_shift, handed_over", [(1.0, [0.35, 0.45, 0.15, 0.05]), (0.01, [0.31, 0.45, 0.15, 0.09])])
+def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path, max_shift, handed_over):
     success = torch.ones(4)
     bank = _bank([0, 1, 2, 3])
     bank.save(tmp_path / "bank.pt")
@@ -543,8 +588,9 @@ def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path):
         success,
         bank_path=str(tmp_path / "bank.pt"),
         start_stage_ratios={"approach": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
-        min_stage_ratios={"approach": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},
+        min_stage_ratios={"grasp": 0.05, "drag": 0.05, "goal": 0.05},
         ratio_shift_success_range=(0.85, 0.97),
+        ratio_max_shift_per_step=max_shift,
         window_steps=3,
         ratio_hold_steps=3,
     )
@@ -562,24 +608,52 @@ def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path):
         term.force_rows(goal_envs, torch.full((3,), 3))
         return _reset(term, env, all_envs, step=step), drawn[-1]
 
-    start, handed_over = [0.30, 0.45, 0.15, 0.10], [0.30, 0.45, 0.20, 0.05]
+    # the solved goal stage hands its 0.05 above the minimum to approach; with the rate limit at most 0.01 per step
+    start, target = [0.30, 0.45, 0.15, 0.10], [0.35, 0.45, 0.15, 0.05]
     goal_key = "Metrics/cloth_target/task_success_goal_smoothed"
     assert goal_batch(step=0)[1] == pytest.approx(start)
     # the hold keeps the start shares, although the goal starts succeed from the first episodes
     log, shares = goal_batch(step=1)
     assert log[goal_key] == 1.0 and shares == pytest.approx(start)
     assert goal_batch(step=2)[1] == pytest.approx(start)
-    # after the hold, the solved goal stage hands its share to drag; the draw reads the success up to the last reset
-    assert goal_batch(step=3)[1] == pytest.approx(handed_over)
-    # a stage without episodes in the window stays solved
+    # after the hold, the solved goal stage hands its share over; the draw reads the success up to the last reset
+    log, shares = goal_batch(step=3)
+    assert shares == pytest.approx(handed_over)
+    # a stage without episodes in the window stays solved, and the limited shift reaches the target over the steps
     for step in range(4, 8):
         log = _reset(term, env, torch.tensor([0]), step=step)
     assert goal_key not in log
-    assert drawn[-1] == pytest.approx(handed_over)
+    assert log["Reset/handover_success_goal"] == 1.0
+    assert drawn[-1] == pytest.approx(target if max_shift == 1.0 else [0.35, 0.45, 0.15, 0.05])
     # failures take it back
     success.zero_()
     goal_batch(step=8)
-    assert goal_batch(step=9)[1] == pytest.approx(start)
+    for step in range(9, 15):
+        shares = goal_batch(step=step)[1]
+    assert shares == pytest.approx(start)
+
+
+def test_handover_reads_the_per_state_frontier_success(monkeypatch, tmp_path):
+    # two grasp states (rows 1, 2) and two drag states (rows 3, 4); only grasp is a frontier stage
+    bank = _bank([0, 1, 1, 2, 2])
+    bank.save(tmp_path / "bank.pt")
+    term, _ = _reset_term(
+        monkeypatch,
+        bank,
+        torch.zeros(5),
+        bank_path=str(tmp_path / "bank.pt"),
+        start_stage_ratios={"approach": 0.40, "grasp": 0.40, "drag": 0.20},
+        min_stage_ratios={"grasp": 0.10, "drag": 0.05},
+        use_frontier_sampling=True,
+        frontier_stages=("grasp",),
+    )
+    # grasp states: one solved, one failed, so the per-state mean is 0.5 whatever the episode window says
+    term._frontier.record(torch.tensor([1, 2]), torch.tensor([True, False]))
+    window = torch.zeros(3, 4, dtype=torch.float64)
+    window[0, 1:3], window[2, 1:3] = 10.0, torch.tensor([10.0, 3.0])  # grasp window 1.0, drag window 0.3
+    term._adapt_ratios(0, window)
+    assert term._stage_success[1].item() == pytest.approx(0.5)
+    assert term._stage_success[2].item() == pytest.approx(0.3)
 
 
 def test_raised_nodes_come_from_the_bank_term_without_the_cloth_reset_event():
@@ -622,6 +696,13 @@ def test_quotas_split_evenly_over_all_stages():
     assert ResetBankGenerationCfg(num_states=14).quotas() == {"approach": 4, "grasp": 4, "drag": 3, "goal": 3}
     with pytest.raises(ValueError):
         ResetBankGenerationCfg(num_states=3)
+    # per-stage quotas replace the even split
+    quotas = {"approach": 8000, "grasp": 1000, "drag": 100, "goal": 100}
+    assert ResetBankGenerationCfg(stage_quotas=quotas).quotas() == quotas
+    with pytest.raises(ValueError, match="exactly the stages"):
+        ResetBankGenerationCfg(stage_quotas={"approach": 10, "grasp": 10})
+    with pytest.raises(ValueError, match="at least one"):
+        ResetBankGenerationCfg(stage_quotas=quotas | {"drag": 0})
 
 
 def test_capture_windows():
@@ -631,7 +712,8 @@ def test_capture_windows():
     # envs 11-14: as envs 1, 0, 5 and 8, but in another task stage than their window's
     inf = math.inf
     collector = ResetBankBuilder.__new__(ResetBankBuilder)
-    collector.cfg = ResetBankGenerationCfg()
+    collector.cfg = ResetBankGenerationCfg(pregrasp_min_hold=0.2, pregrasp_max_speed=0.01)
+    collector._approach_at_start = torch.ones(15, dtype=torch.bool)
     hold, other = 8, 4  # DragSmState.PREGRASP_HOLD, DRAG_CLOTH
     collector.sm = SimpleNamespace(
         sm_state=torch.tensor([hold, 0, hold, hold, hold] + [other] * 6 + [0, hold, other, other]),
@@ -642,9 +724,10 @@ def test_capture_windows():
         closed=torch.tensor([False, False, False, False, True] + [True] * 6 + [False, False, True, True]),
         constraint=SimpleNamespace(active=locked, contacts_disabled=locked),
     )
+    stage = torch.tensor([1, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3] + [1, 0, 3, 2])
+    time_to_stage = torch.where(torch.arange(4) <= stage.unsqueeze(1), 0.5, -1.0)
     collector.command = SimpleNamespace(
-        stage=torch.tensor([1, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3] + [1, 0, 3, 2]),
-        holding=torch.tensor([False] * 10 + [True] + [False] * 4),
+        stage=stage, time_to_stage=time_to_stage, holding=torch.tensor([False] * 10 + [True] + [False] * 4)
     )
     ongoing = torch.ones(15, dtype=torch.bool)
     step = torch.tensor([5, 1] + [5] * 9 + [1, 5, 5, 5])
@@ -662,6 +745,18 @@ def test_capture_windows():
     # a step of a reset never captures
     windows = collector._windows(torch.zeros(15, dtype=torch.bool), step, progress, distance, ee_speed, since_squeeze)
     assert not any(window.any() for window in windows)
+    # rollouts drawn for a mid-approach state: any APPROACH step before the GRASP stage was first reached (env 1 at
+    # step 1, env 12 at step 5); env 12 back in APPROACH after a GRASP stage does not count
+    collector._approach_at_start[:] = False
+    approach = collector._windows(ongoing, step, progress, distance, ee_speed, since_squeeze)[0]
+    assert approach.nonzero().squeeze(-1).tolist() == [1, 12]
+    time_to_stage[12, int(ClothDragStage.GRASP)] = 0.2
+    approach = collector._windows(ongoing, step, progress, distance, ee_speed, since_squeeze)[0]
+    assert approach.nonzero().squeeze(-1).tolist() == [1]
+    # the new defaults also capture grasp states on the way into the pose: env 2 (briefly held) and env 3 (moving)
+    collector.cfg = ResetBankGenerationCfg()
+    grasp = collector._windows(ongoing, step, progress, distance, ee_speed, since_squeeze)[1]
+    assert grasp.nonzero().squeeze(-1).tolist() == [0, 2, 3]
 
 
 def test_pregrasp_offsets_fill_a_cone_biased_to_the_centre():
@@ -677,5 +772,5 @@ def test_pregrasp_offsets_fill_a_cone_biased_to_the_centre():
     assert (radius <= r_max + 1e-7).all()
     # uniform radius (mean share 0.5), not uniform area (mean share 2/3): more states close above the node
     assert (radius / r_max).mean().item() == pytest.approx(0.5, abs=0.03)
-    # every pre-grasp pose lies within the GRASP stage's approach radius (0.04 m), with margin for the tracking error
-    assert offsets.norm(dim=1).max().item() < 0.035
+    # every pre-grasp pose lies within the GRASP stage's approach radius (0.04 m), with 4 mm for the tracking error
+    assert offsets.norm(dim=1).max().item() < 0.036

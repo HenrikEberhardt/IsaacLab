@@ -20,7 +20,13 @@ from ..mdp.stages import START_STAGE_NAMES
 from .bank import ResetBank, save_atomic, task_fingerprint
 from .frontier import ResetStateFrontierSampler
 from .restore import restore_physical, restore_task_state
-from .stage_ratios import cascade_shares, check_min_stage_ratios, check_stage_ratios, sample_reset_rows
+from .stage_ratios import (
+    check_min_stage_ratios,
+    check_stage_ratios,
+    handover_stage_ratios,
+    limit_ratio_shift,
+    sample_reset_rows,
+)
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -38,13 +44,16 @@ class ResetFromBank(ManagerTermBase):
     default reset event runs before it.
 
     With ``min_stage_ratios``, the ratios adapt to the success of the stages: ``start_stage_ratios`` are the ratios at
-    the start of training, and a solved stage hands its ratio to the stage before it, down to its minimum (see
-    :func:`~.stage_ratios.cascade_shares`). The success of a stage is the smoothed task success of the episodes that
-    started in it, which the cloth target command logs (:class:`~..mdp.commands.StartStageSuccess`). The ratios keep
-    their start values for the first ``ratio_hold_steps`` environment steps.
+    the start of training, and a solved grasp, drag or goal stage hands its ratio over to the approach stage, down to
+    its minimum (see :func:`~.stage_ratios.handover_stage_ratios`). The success of a stage of ``frontier_stages`` with
+    frontier sampling is the mean of its states' frontier estimates; otherwise it is the smoothed stage success of the
+    episodes that started in it (the share that reached the next stage), which the cloth target command logs
+    (:class:`~..mdp.commands.StartStageSuccess`). The ratios keep their start values for the first
+    ``ratio_hold_steps`` environment steps and change by at most ``ratio_max_shift_per_step`` per step; the success
+    each stage is handed over by is logged as ``Reset/handover_success_<stage>``.
 
-    With ``use_frontier_sampling``, the states of a stage are not drawn uniformly but by an SGS beta kernel over a
-    linearly weighted history of their recent next-stage outcomes.
+    With ``use_frontier_sampling``, the states of the ``frontier_stages`` are not drawn uniformly but by an SGS beta
+    kernel over a linearly weighted history of their recent next-stage outcomes.
 
     The term restores the physical state when called, and the task state that the action and command resets clear in
     its :meth:`reset`, which the event manager runs after those resets (see :mod:`~.restore`). The stored raised nodes
@@ -81,6 +90,11 @@ class ResetFromBank(ManagerTermBase):
             )
         if cfg.ratio_hold_steps < 0:
             raise ValueError(f"ratio_hold_steps must be non-negative, got {cfg.ratio_hold_steps}.")
+        if cfg.ratio_max_shift_per_step <= 0.0:
+            raise ValueError(f"ratio_max_shift_per_step must be positive, got {cfg.ratio_max_shift_per_step}.")
+        unknown = set(cfg.frontier_stages) - set(START_STAGE_NAMES)
+        if unknown:
+            raise ValueError(f"Unknown frontier stages {sorted(unknown)}, expected names from {START_STAGE_NAMES}.")
         log_dir = getattr(getattr(env, "cfg", None), "log_dir", None)
         self._state_stats_dir = (
             Path(log_dir) / "reset_state_success"
@@ -92,10 +106,12 @@ class ResetFromBank(ManagerTermBase):
         self._fingerprint_checked = cfg.bank_path is None
         # ratios of the stages among the resets; None draws nothing (only forced rows are restored)
         self._ratios = None if cfg.start_stage_ratios is None else check_stage_ratios(cfg.start_stage_ratios, self.bank)
-        # adaptive ratios: start ratios, minimum ratios (None for fixed ratios) and smoothed task success of the stages
+        # adaptive ratios: start ratios, minimum ratios (None for fixed ratios), the success each stage is handed over
+        # by and the step of the last ratio update (for the rate limit)
         self._start_ratios = self._ratios
         self._min_ratios: torch.Tensor | None = None
-        self._task_success = torch.zeros(len(START_STAGE_NAMES))
+        self._stage_success = torch.zeros(len(START_STAGE_NAMES))
+        self._last_ratio_step: int | None = None
         if cfg.min_stage_ratios is not None:
             if self._start_ratios is None:
                 raise ValueError("min_stage_ratios needs start_stage_ratios as the start ratios.")
@@ -196,15 +212,13 @@ class ResetFromBank(ManagerTermBase):
             if self._frontier is None:
                 rows[drawn] = sample_reset_rows(self.bank, self._ratios, int(drawn.sum()))
             else:
-                rows[drawn] = sample_reset_rows(
-                    self.bank, self._ratios, int(drawn.sum()), self._frontier.sampling_weights()
-                )
+                rows[drawn] = sample_reset_rows(self.bank, self._ratios, int(drawn.sum()), self._row_weights())
         self.rows[env_ids] = rows
         stored = rows >= 0
         self._pending[env_ids] = stored
         if stored.any():
             restore_physical(env, self.bank, rows[stored], env_ids[stored])
-        self._log = self._share_log(rows) | self._state_log() if ended else {}
+        self._log = self._share_log(rows) | self._state_log() | self._handover_log() if ended else {}
 
     def _share_log(self, rows: torch.Tensor) -> dict[str, float]:
         """Share of each stage among the episodes that start from the given bank rows."""
@@ -226,7 +240,7 @@ class ResetFromBank(ManagerTermBase):
             for label, mask in zip(("0", "1", "2", "3", "4_plus"), visit_masks):
                 keys.append(f"Reset/state_visit_fraction_{label}_{stage}")
                 values.append(mask.float().mean())
-            if self._frontier is not None:
+            if self._frontier is not None and stage in self.cfg.frontier_stages:
                 for name, value in self._frontier.metrics(rows).items():
                     keys.append(f"Reset/{name}_{stage}")
                     values.append(value)
@@ -295,24 +309,49 @@ class ResetFromBank(ManagerTermBase):
         }
 
     def _adapt_ratios(self, step: int, window_totals: torch.Tensor) -> None:
-        """Set the ratios of the resets from the smoothed task success of every stage, once the hold has ended.
+        """Move the ratios of the resets towards the handover of the solved stages, once the hold has ended.
 
-        A stage without an episode in the window keeps its last value, so a stage that handed over all its ratio stays
-        solved.
+        The success of a stage of ``frontier_stages`` with frontier sampling is the mean of its states' frontier
+        estimates, which weights every state equally and is not swung by a batch of late timeouts. Every other stage
+        uses the smoothed stage success over the command's window; a stage without an episode in the window keeps its
+        last value, so a stage that handed over all its ratio stays solved.
 
         Args:
             step: The environment step.
-            window_totals: Number of episodes and task successes per start stage over the command's window (rows 0 and
-                1), up to the last reset, shape [3, 4].
+            window_totals: Number of episodes, task successes and stage successes per start stage over the command's
+                window (rows 0 to 2), up to the last reset, shape [3, 4].
         """
-        counts, successes = window_totals[0].tolist(), window_totals[1].tolist()
-        for stage_id in range(len(START_STAGE_NAMES)):
-            if counts[stage_id] > 0:
-                self._task_success[stage_id] = successes[stage_id] / counts[stage_id]
-        if step >= self.cfg.ratio_hold_steps:
-            self._ratios = cascade_shares(
-                self._start_ratios, self._min_ratios, self._task_success, self.cfg.ratio_shift_success_range
-            )
+        counts, successes = window_totals[0].tolist(), window_totals[2].tolist()
+        for stage_id, stage in enumerate(START_STAGE_NAMES):
+            if self._frontier is not None and stage in self.cfg.frontier_stages:
+                rows = self._stage_rows[stage]
+                if rows.numel() > 0:
+                    self._stage_success[stage_id] = self._frontier.success_rate[rows].mean().item()
+            elif counts[stage_id] > 0:
+                self._stage_success[stage_id] = successes[stage_id] / counts[stage_id]
+        if step < self.cfg.ratio_hold_steps:
+            return
+        target = handover_stage_ratios(
+            self._start_ratios, self._min_ratios, self._stage_success, self.cfg.ratio_shift_success_range
+        )
+        elapsed = 1 if self._last_ratio_step is None else max(step - self._last_ratio_step, 0)
+        self._ratios = limit_ratio_shift(self._ratios, target, self.cfg.ratio_max_shift_per_step * elapsed)
+        self._last_ratio_step = step
+
+    def _handover_log(self) -> dict[str, float]:
+        """Success each bank stage is handed over by, see :meth:`_adapt_ratios`."""
+        if self._min_ratios is None:
+            return {}
+        values = self._stage_success.tolist()
+        return {f"Reset/handover_success_{name}": values[i] for i, name in enumerate(START_STAGE_NAMES) if i > 0}
+
+    def _row_weights(self) -> torch.Tensor:
+        """Frontier weights of the stored states of the ``frontier_stages``, 1 for the states of the other stages."""
+        weights = self._frontier.sampling_weights()
+        for stage, rows in self._stage_rows.items():
+            if stage not in self.cfg.frontier_stages:
+                weights[rows] = 1.0
+        return weights
 
     def _source(self, rows: torch.Tensor) -> torch.Tensor:
         """Stage each bank row starts in, an index into :data:`~..mdp.stages.START_STAGE_NAMES`; 0 for -1."""
