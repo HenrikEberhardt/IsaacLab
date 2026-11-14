@@ -10,8 +10,8 @@ The workstation is a shared 4x RTX 3090 machine. Other users run long jobs, so G
 ## 1. Check and pick a GPU
 
 ```bash
-bash /hdd1/home/heberhardt/IsaacLab/.claude/skills/gpu-preflight/scripts/pick_gpu.sh            # one GPU
-bash /hdd1/home/heberhardt/IsaacLab/.claude/skills/gpu-preflight/scripts/pick_gpu.sh --need 2   # multi-GPU runs
+bash /hdd1/home/heberhardt/IsaacLab/.claude/skills/personal_gpu-preflight/scripts/pick_gpu.sh            # one GPU
+bash /hdd1/home/heberhardt/IsaacLab/.claude/skills/personal_gpu-preflight/scripts/pick_gpu.sh --need 2   # multi-GPU runs
 ```
 
 The script prints a GPU table (memory, utilization, process owners), CPU load, RAM, disk, and ends with:
@@ -42,10 +42,10 @@ CUDA_VISIBLE_DEVICES=<idx> uv run isaaclab zero_agent --task <Task> --headless
 ```bash
 SESSION=train-<short-task-name>-$(date +%H%M)
 tmux new-session -d -s "$SESSION" -c /hdd1/home/heberhardt/IsaacLab \
-  "CUDA_VISIBLE_DEVICES=<idx> uv run isaaclab train --task <Task> --headless <args> 2>&1 | tee /tmp/$SESSION.log; exec bash"
+  "CUDA_VISIBLE_DEVICES=<idx> uv run isaaclab train --task <Task> <args> 2>&1 | tee /tmp/$SESSION.log; exec bash"
 ```
 
-`exec bash` keeps the session open after training ends so the user can read the final output. Long `play` or evaluation runs follow the same pattern.
+`isaaclab train` has no `--headless` flag (it rejects it) and runs headless anyway. `exec bash` keeps the session open after training ends so the user can read the final output. Long `play` or evaluation runs follow the same pattern.
 
 After launching, tell the user:
 
