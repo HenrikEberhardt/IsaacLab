@@ -24,6 +24,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     GripperCloseProgress,
     cloth_drag_drop_penalty,
     cloth_drag_termination_penalty,
+    cloth_held,
     gripper_closed_off_grasp_node,
     gripper_closed_on_grasp_node,
 )
@@ -400,6 +401,18 @@ def test_drop_penalty_counts_each_drop_once_over_the_step_in_the_stage_it_happen
     env = SimpleNamespace(step_dt=0.5, command_manager=SimpleNamespace(get_term=lambda name: command))
     assert (cloth_drag_drop_penalty(env, ["drag", "goal"]) * env.step_dt).tolist() == [1.0, 1.0, 0.0]
     assert (cloth_drag_drop_penalty(env, ["drag"]) * env.step_dt).tolist() == [1.0, 0.0, 0.0]
+
+
+def test_hold_reward_pays_only_while_holding_and_stays_below_the_drag_rewards():
+    # APPROACH, GRASP, DRAG, GOAL: only the holding stages pay, and nothing saturates into later stages
+    command = SimpleNamespace(stage=torch.tensor([0, 1, 2, 3]))
+    env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda name: command))
+    assert cloth_held(env, ["drag", "goal"]).tolist() == [0.0, 0.0, 1.0, 1.0]
+    assert cloth_held(env, ["drag"]).tolist() == [0.0, 0.0, 1.0, 0.0]
+    # a whole 10 s episode of holding still must earn less than one drag of 0.2 m (3 x 2) plus the goal precision (2)
+    cfg = RewardsCfg()
+    assert cfg.drag_hold.params["stages"] == ["drag", "goal"]
+    assert cfg.drag_hold.weight * 10.0 < cfg.drag_progress.weight * 0.2 / 0.1 + cfg.goal_precision.weight
 
 
 class _Scene(dict):

@@ -763,6 +763,22 @@ def cloth_drag_termination_penalty(env: ManagerBasedRLEnv, term_keys: Sequence[s
     return terminated.float() / env.step_dt
 
 
+def cloth_held(env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target") -> torch.Tensor:
+    """Return one in the active stages, zero otherwise. It never saturates.
+
+    Gated on DRAG and GOAL, which exist only while the gripper holds a raised node locked, this pays per second of
+    holding, so forming the lock pays and releasing it stops the payment. Keep its weight times the episode length below
+    the drag and goal progress rewards, so holding still never beats dragging.
+
+    Args:
+        env: The environment.
+        stages: Names of the stages the term pays in.
+        command_name: Name of the cloth target command.
+    """
+    command = _command(env, command_name)
+    return _stage_gate(torch.ones_like(command.stage, dtype=torch.float), command.stage, stages, saturate=False)
+
+
 def cloth_drag_drop_penalty(
     env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target"
 ) -> torch.Tensor:

@@ -10,9 +10,9 @@ moving average and, once the average has stayed at least ``success_threshold`` f
 linearly with the environment steps from ``initial_progress`` to one over ``ramp_steps``. Below the threshold the
 progress holds; it never goes back. After such a pause, the average must stay above the threshold for
 ``resume_dwell_steps`` (by default ``dwell_steps``) before the progress grows again. With ``after``, a block waits
-until the named block is complete, so the blocks run one after another. With ``reset_term``, only the episodes that
-started from the task's default reset count; episodes started from stored reset states
-(:class:`~.reset_bank.ResetFromBank`) begin mid-task and succeed more easily.
+until the named block is complete, so the blocks run one after another. Only the episodes that started at the
+beginning of the task count (:attr:`~.commands.ClothTargetCommand.start_stage` APPROACH); episodes started from stored
+reset states of later stages (uniform and adaptive resets) begin mid-task and succeed more easily.
 
 The curriculum manager calls the terms at the start of every reset, with the environments being reset. The state is
 not stored in policy checkpoints: a resumed run starts again from ``initial_progress``.
@@ -26,6 +26,8 @@ from typing import TYPE_CHECKING
 import torch
 
 from isaaclab.managers import ManagerTermBase
+
+from .stages import ClothDragStage
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -63,15 +65,14 @@ class _SuccessGatedRamp(ManagerTermBase):
         dwell_steps: int,
         after: str | None,
         resume_dwell_steps: int | None = None,
-        reset_term: str | None = None,
     ) -> None:
         """Fold the finished episodes into the success average and advance the progress.
 
         Args:
             env: The environment.
             env_ids: The environments being reset.
-            command_name: Name of the :class:`~.commands.ClothTargetCommand`, whose ``success`` still holds the finished
-                episode's success: the command reset clears it later in the same reset.
+            command_name: Name of the :class:`~.commands.ClothTargetCommand`, whose ``success`` and ``start_stage``
+                still hold the finished episode's: the command reset clears them later in the same reset.
             success_threshold: Success average from which the progress grows.
             ramp_steps: Environment steps (policy steps per environment) above the threshold from zero to full
                 progress. With 24 steps per iteration, 7200 steps are 300 iterations.
@@ -82,16 +83,16 @@ class _SuccessGatedRamp(ManagerTermBase):
                 block (``None`` in the curriculum cfg) counts as complete.
             resume_dwell_steps: Environment steps the average must stay above the threshold before the progress grows
                 again after a pause, once the gate has opened before. None => ``dwell_steps``.
-            reset_term: Name of the :class:`~.reset_bank.ResetFromBank` reset event; only the finished episodes that
-                started from the default reset count. None, or no such event, counts every episode.
         """
         if ramp_steps <= 0:
             raise ValueError("ramp_steps must be positive.")
         step = env.common_step_counter
         # the reset at the start of training ends no episode
         if step > 0:
-            env_ids = _default_start_ids(env, env_ids, reset_term)
-            success = env.command_manager.get_term(command_name).success[env_ids]
+            command = env.command_manager.get_term(command_name)
+            # only the episodes that started at the beginning of the task
+            ids = torch.arange(env.num_envs, device=command.start_stage.device)[env_ids]
+            success = command.success[ids[command.start_stage[ids] == int(ClothDragStage.APPROACH)]]
             if success.numel() > 0:
                 alpha = success.numel() / (success.numel() + ema_episodes)
                 self.success_ema += alpha * (success.float().mean().item() - self.success_ema)
@@ -106,21 +107,6 @@ class _SuccessGatedRamp(ManagerTermBase):
         if self.gate_open:
             self.progress = min(1.0, self.progress + (step - self._last_step) / ramp_steps)
         self._last_step = step
-
-
-def _default_start_ids(
-    env: ManagerBasedRLEnv, env_ids: Sequence[int] | slice, reset_term: str | None
-) -> Sequence[int] | slice | torch.Tensor:
-    """The environments among ``env_ids`` whose finished episode started from the task's default reset.
-
-    The curriculum runs before the reset events, so the reset event ``reset_term`` still holds the rows the finished
-    episodes started from (-1 for a default reset). Without ``reset_term`` or such an event, all of ``env_ids``.
-    """
-    if reset_term is None or reset_term not in env.event_manager.active_terms.get("reset", []):
-        return env_ids
-    rows = env.event_manager.get_term_cfg(reset_term).func.rows
-    ids = torch.arange(len(rows), device=rows.device)[env_ids]
-    return ids[rows[ids] < 0]
 
 
 def _block_complete(env: ManagerBasedRLEnv, name: str | None) -> bool:
@@ -166,7 +152,6 @@ class ActionRateCurriculum(_SuccessGatedRamp):
         after: str | None = None,
         initial_progress: float = 0.0,
         resume_dwell_steps: int | None = None,
-        reset_term: str | None = None,
     ) -> dict[str, float]:
         """Advance the progress and set the reward weight.
 
@@ -183,7 +168,6 @@ class ActionRateCurriculum(_SuccessGatedRamp):
             after: See :meth:`_SuccessGatedRamp._update`.
             initial_progress: Progress at the start of training, read once at initialization.
             resume_dwell_steps: See :meth:`_SuccessGatedRamp._update`.
-            reset_term: See :meth:`_SuccessGatedRamp._update`.
 
         Returns:
             The state to log: success average, gate, progress and weight.
@@ -198,7 +182,6 @@ class ActionRateCurriculum(_SuccessGatedRamp):
             dwell_steps,
             after,
             resume_dwell_steps,
-            reset_term,
         )
         weight = self._start_weight * (final_weight / self._start_weight) ** self.progress
         self._reward_cfg.weight = weight
@@ -244,7 +227,6 @@ class ObservationHidingCurriculum(_SuccessGatedRamp):
         after: str | None = None,
         initial_progress: float = 0.0,
         resume_dwell_steps: int | None = None,
-        reset_term: str | None = None,
     ) -> dict[str, float]:
         """Advance the progress and draw the mask of the episodes that start now.
 
@@ -259,7 +241,6 @@ class ObservationHidingCurriculum(_SuccessGatedRamp):
             after: See :meth:`_SuccessGatedRamp._update`.
             initial_progress: Progress at the start of training, read once at initialization.
             resume_dwell_steps: See :meth:`_SuccessGatedRamp._update`.
-            reset_term: See :meth:`_SuccessGatedRamp._update`.
 
         Returns:
             The state to log: progress and success average.
@@ -274,7 +255,6 @@ class ObservationHidingCurriculum(_SuccessGatedRamp):
             dwell_steps,
             after,
             resume_dwell_steps,
-            reset_term,
         )
         num_reset = self.hidden[env_ids].shape[0]
         draw = torch.rand(num_reset, generator=self._generator, device=self.hidden.device)

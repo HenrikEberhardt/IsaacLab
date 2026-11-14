@@ -7,6 +7,7 @@
 
 from __future__ import annotations
 
+from collections import deque
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -18,6 +19,7 @@ from isaaclab.utils.math import combine_frame_transforms
 
 from .frames import cloth_center_pos_b, points_to_base, raised_node_ids
 from .stages import (
+    START_STAGE_NAMES,
     ClothDragStage,
     cloth_goal_xy_distance,
     ee_grasp_node_distance,
@@ -34,6 +36,66 @@ if TYPE_CHECKING:
     from isaaclab.sensors import FrameTransformer
 
     from .commands_cfg import ClothTargetCommandCfg
+
+
+class StartStageSuccess:
+    """Success of the finished episodes per stage they started in, raw and over a moving window of environment steps.
+
+    Episodes that start in a later stage succeed more easily, so the success of the episodes that started at the
+    beginning of the task (``task_success_approach_*``) is the one that compares reset strategies.
+    """
+
+    def __init__(self, window_steps: int):
+        """Set up an empty window.
+
+        Args:
+            window_steps: Number of environment steps the smoothed rates span.
+        """
+        if window_steps <= 0:
+            raise ValueError(f"success_window_steps must be positive, got {window_steps}.")
+        self.window_steps = window_steps
+        # per step of the moving window, the episodes, task and stage successes of every start stage, and their sum
+        self._window: deque[tuple[int, torch.Tensor]] = deque()
+        self.window_totals = torch.zeros(3, len(START_STAGE_NAMES), dtype=torch.float64)
+        """Number of episodes, task successes and stage successes per start stage over the window, shape [3, 4]."""
+
+    def record(
+        self, step: int, start_stage: torch.Tensor, success: torch.Tensor, reached: torch.Tensor
+    ) -> dict[str, float]:
+        """Add the episodes that ended in this environment step and return their log.
+
+        A start stage without an episode to average is left out: a placeholder would distort the logger's mean.
+
+        Args:
+            step: The environment step.
+            start_stage: Stage the episodes started in, shape [N].
+            success: Whether the episodes completed the task, shape [N].
+            reached: Whether the episodes reached the stage after their start stage (the success for GOAL), shape [N].
+
+        Returns:
+            ``task_success_<stage>_raw``, ``stage_success_<stage>_raw`` and the same with ``_smoothed`` over the
+            window.
+        """
+        num = len(START_STAGE_NAMES)
+        counts = torch.bincount(start_stage, minlength=num).float()
+        task_sums = torch.bincount(start_stage, weights=success.float(), minlength=num)
+        stage_sums = torch.bincount(start_stage, weights=reached.float(), minlength=num)
+        # one transfer to the host for all values
+        episodes = torch.stack([counts, task_sums, stage_sums]).double().cpu()
+        self._window.append((step, episodes))
+        self.window_totals += episodes
+        while self._window[0][0] <= step - self.window_steps:
+            self.window_totals -= self._window.popleft()[1]
+        return self._rates("raw", *episodes.tolist()) | self._rates("smoothed", *self.window_totals.tolist())
+
+    @staticmethod
+    def _rates(suffix: str, counts: list[float], task_sums: list[float], stage_sums: list[float]) -> dict[str, float]:
+        log = {}
+        for name, num, task, stage in zip(START_STAGE_NAMES, counts, task_sums, stage_sums):
+            if num > 0:
+                log[f"task_success_{name}_{suffix}"] = task / num
+                log[f"stage_success_{name}_{suffix}"] = stage / num
+        return log
 
 
 class ClothTargetCommand(CommandTerm):
@@ -55,6 +117,9 @@ class ClothTargetCommand(CommandTerm):
       :attr:`ClothTargetCommandCfg.speed_window` steps in which it was inside the success radius. Environments whose
       cloth was not inside in that window are left out; the metric is omitted when none was inside.
     * ``time_in_wrong_grasp``: time the gripper held the cloth without a raised node among the locked nodes [s].
+    * ``task_success_<stage>_raw``, ``stage_success_<stage>_raw`` and their ``_smoothed`` versions: the success of the
+      finished episodes per stage they started in (:attr:`start_stage`), and the share that reached the stage after it,
+      see :class:`StartStageSuccess`.
 
     With :attr:`ClothTargetCommandCfg.goal_object_name` set, also:
 
@@ -91,6 +156,11 @@ class ClothTargetCommand(CommandTerm):
         self._dropped = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         # episode time at which each stage was first reached [s]; negative while not reached
         self._time_to_stage = torch.full((self.num_envs, len(ClothDragStage)), -1.0, device=self.device)
+
+        # stage every episode started in: APPROACH, or the stage of a restored reset state
+        self._start_stage = torch.full_like(self._stage, int(ClothDragStage.APPROACH))
+        self.start_stage_success = StartStageSuccess(cfg.success_window_steps)
+        """Success of the finished episodes per start stage."""
 
         self.success = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         """Whether the goal was reached during the current episode. Shape is (num_envs,).
@@ -165,6 +235,12 @@ class ClothTargetCommand(CommandTerm):
         return self._time_to_stage
 
     @property
+    def start_stage(self) -> torch.Tensor:
+        """:class:`~.stages.ClothDragStage` index the current episode started in: APPROACH, or the stage of a restored
+        reset state. Until this command's reset, the stage the finished episode started in. Shape is (num_envs,)."""
+        return self._start_stage
+
+    @property
     def holding(self) -> torch.Tensor:
         """Whether the cloth's central node has stayed within :attr:`ClothTargetCommandCfg.success_radius` of the
         target for :attr:`ClothTargetCommandCfg.hold_time` in a row while the gripper holds the cloth by a raised node,
@@ -199,15 +275,37 @@ class ClothTargetCommand(CommandTerm):
         self.metrics["position_error_xy"] = distance
         self.success |= self.holding
 
+    def episode_outcomes(self, env_ids: Sequence[int] | slice) -> tuple[torch.Tensor, torch.Tensor]:
+        """Outcome of the episodes of the given environments, before this command's reset clears it.
+
+        Args:
+            env_ids: The environments.
+
+        Returns:
+            Whether each episode completed the task, and whether it reached the stage after its start stage (the
+            success for GOAL starts), each of shape [N].
+        """
+        success = self.success[env_ids]
+        # column k is the stage after stage k, with the task success after GOAL
+        reached = torch.cat([self._time_to_stage[env_ids, 1:] >= 0.0, success.unsqueeze(1)], dim=1)
+        return success, reached.gather(1, self._start_stage[env_ids].unsqueeze(1)).squeeze(1)
+
     def reset(self, env_ids: Sequence[int] | None = None) -> dict[str, float]:
         if env_ids is None:
             env_ids = slice(None)
+        # the success per start stage of the finished episodes; the reset at the start of training ends none
+        step = getattr(self._env, "common_step_counter", 0)
+        success_log = {}
+        if step > 0:
+            success, reached = self.episode_outcomes(env_ids)
+            if success.numel() > 0:
+                success_log = self.start_stage_success.record(step, self._start_stage[env_ids], success, reached)
         # read the speed window before the resample clears it
         at_target = self._at_target_hist[env_ids]
         num_at_target = at_target.sum(dim=1)
         speed_sum = (self._speed_hist[env_ids] * at_target).sum(dim=1)
 
-        extras = super().reset(env_ids)
+        extras = super().reset(env_ids) | success_log
         # a NaN or placeholder would distort the mean over all resets in the logger, so leave the key out instead
         entered = num_at_target > 0
         if entered.any():
@@ -220,13 +318,15 @@ class ClothTargetCommand(CommandTerm):
         self._time_in_stage[env_ids] = 0.0
         self._dropped[env_ids] = False
         self._time_to_stage[env_ids] = -1.0
+        self._start_stage[env_ids] = int(ClothDragStage.APPROACH)
         return extras
 
     def set_restored(self, env_ids: torch.Tensor, target_pos_b: torch.Tensor, stage: torch.Tensor) -> None:
         """Continue a stored reset state in the given environments, after their reset.
 
-        Sets the stored target and the stored stage. The stage holds until the first update recomputes it from the
-        restored state, e.g. for the first observation after :meth:`~isaaclab.envs.ManagerBasedEnv.reset`.
+        Sets the stored target and the stored stage, which is also the episode's :attr:`start_stage`. The stage holds
+        until the first update recomputes it from the restored state, e.g. for the first observation after
+        :meth:`~isaaclab.envs.ManagerBasedEnv.reset`.
 
         Args:
             env_ids: The environments, shape [N].
@@ -235,6 +335,7 @@ class ClothTargetCommand(CommandTerm):
         """
         self.target_pos_b[env_ids] = target_pos_b
         self._stage[env_ids] = stage
+        self._start_stage[env_ids] = stage.long()
         self._grasp_node_stale[env_ids] = True
 
     """

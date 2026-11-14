@@ -4,23 +4,24 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Script to view the reset states of the non-prehensile cloth task.
+Script to inspect the reset states of a bank of ``IsaacContrib-Drag-Cloth-Franka``.
 
-Loads a bank of ``nonprehensile_cloth_collect_resets.py`` through the task's reset event
-(:class:`isaaclab_tasks.contrib.franka_cloth_drag.mdp.ResetFromBank`, with its fingerprint check), restores its states
-chunk by chunk into the environments of ``IsaacContrib-Drag-Cloth-Franka``, holds each for ``--hold_steps`` steps (arm
-still, gripper as stored), and prints the labels and the outcome of the validation checks of every state. The
-visualizer's Reset Episode button skips to the next stored states.
+Loads a bank of ``generate_reset_bank.py`` through the task's reset event
+(:class:`~isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.ResetFromBank`, with its fingerprint check), as the
+only reset event like the uniform and adaptive reset strategies, restores its states chunk by chunk into the
+environments of ``IsaacContrib-Drag-Cloth-Franka``, holds each for ``--hold_steps`` steps (arm still, gripper as
+stored), and prints the start stage and the outcome of the validation checks of every state. The visualizer's Reset
+Episode button skips to the next stored states.
 
 .. code-block:: bash
 
+    GEN=source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag/reset_bank_generation/scripts
+
     # Viser web viewer on port 8750 (default); open http://localhost:8750.
-    uv run python scripts/environments/state_machine/nonprehensile_cloth_reset_sm.py \
-        --bank logs/reset_banks/debug.pt --num_envs 4
+    uv run python $GEN/inspect_reset_bank.py --bank logs/reset_banks/debug.pt --num_envs 4
 
     # Only the drag states, once.
-    uv run python scripts/environments/state_machine/nonprehensile_cloth_reset_sm.py \
-        --bank logs/reset_banks/debug.pt --bucket drag --num_cycles 1
+    uv run python $GEN/inspect_reset_bank.py --bank logs/reset_banks/debug.pt --stage drag --num_cycles 1
 
 """
 
@@ -34,19 +35,26 @@ import warp as wp
 from isaaclab.app import add_launcher_args, launch_simulation
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.contrib.franka_cloth_drag.reset_states import BUCKET_NAMES
-from isaaclab_tasks.contrib.franka_cloth_drag.reset_states.collect import CollectCfg
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import START_STAGE_ALIASES, START_STAGE_NAMES
 from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import keep_requested_visualizers
+from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import (
+    ResetBankGenerationCfg,
+    ResetStateValidator,
+)
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
-defaults = CollectCfg()
+defaults = ResetBankGenerationCfg()
 # add argparse arguments
-parser = argparse.ArgumentParser(description="View the reset states of the non-prehensile cloth task.")
+parser = argparse.ArgumentParser(description="Inspect the reset states of a bank of the cloth dragging task.")
 parser.add_argument("--bank", type=str, required=True, help="Path of the bank (.pt).")
 parser.add_argument("--num_envs", type=int, default=4, help="Number of environments to simulate.")
 parser.add_argument("--task", type=str, default="IsaacContrib-Drag-Cloth-Franka", help="The task to run.")
 parser.add_argument(
-    "--bucket", type=str, default="all", choices=["all", *BUCKET_NAMES], help="Bucket of the states to view."
+    "--stage",
+    type=str,
+    default="all",
+    choices=["all", *START_STAGE_NAMES, *START_STAGE_ALIASES],
+    help="Start stage of the states to inspect; 'default' is a legacy alias for 'approach'.",
 )
 parser.add_argument("--hold_steps", type=int, default=90, help="Steps each state is held.")
 parser.add_argument("--num_cycles", type=int, default=None, help="Passes over the states. Defaults to endless.")
@@ -83,30 +91,23 @@ def main():
     keep_requested_visualizers(env_cfg, args_cli.visualizer)
 
     with launch_simulation(env_cfg, args_cli):
-        from isaaclab.managers import EventTermCfg
-
-        from isaaclab_tasks.contrib.franka_cloth_drag.mdp import ResetFromBank
-        from isaaclab_tasks.contrib.franka_cloth_drag.reset_states.collect import ResetValidator
-
-        # load the bank through the training reset event, after the other reset events
-        env_cfg.events.reset_from_bank = EventTermCfg(
-            func=ResetFromBank,
-            mode="reset",
-            params={"bank_path": args_cli.bank, "allow_settings_mismatch": args_cli.allow_settings_mismatch},
-        )
+        from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import UniformResetsCfg
+        # load the bank through the training reset event, as the only reset event; it draws nothing by itself
+        env_cfg.events = UniformResetsCfg()
+        env_cfg.events.reset_from_bank.bank_path = args_cli.bank
+        env_cfg.events.reset_from_bank.start_stage_ratios = None
+        env_cfg.events.reset_from_bank.allow_settings_mismatch = args_cli.allow_settings_mismatch
         env = gym.make(args_cli.task, cfg=env_cfg)
         unwrapped = env.unwrapped
         device = unwrapped.device
         bank_term = unwrapped.event_manager.get_term_cfg("reset_from_bank").func
         bank = bank_term.bank
-        validator = ResetValidator(unwrapped, args_cli.max_node_speed, args_cli.max_cube_tilt_deg)
-        if args_cli.bucket == "all":
+        validator = ResetStateValidator(unwrapped, args_cli.max_node_speed, args_cli.max_cube_tilt_deg)
+        if args_cli.stage == "all":
             rows = torch.arange(len(bank), device=device)
         else:
-            rows = bank.bucket_rows(args_cli.bucket)
-        labels = bank.data["labels"]
-        counts = bank.meta.get("bucket_counts")
-        print(f"[INFO]: Viewing {len(rows)} of {len(bank)} states {counts} from {args_cli.bank}.")
+            rows = bank.stage_rows(args_cli.stage)
+        print(f"[INFO]: Inspecting {len(rows)} of {len(bank)} states {bank.stage_counts()} from {args_cli.bank}.")
 
         cycle = 0
         while args_cli.num_cycles is None or cycle < args_cli.num_cycles:
@@ -134,11 +135,7 @@ def main():
                 for env_id, row in enumerate(chunk.tolist()):
                     code = int(reasons[env_id])
                     reason = "valid" if valid[env_id] else validator.reasons[code - 1] if code > 0 else "ended"
-                    print(
-                        f"[INFO]: env {env_id}: row {row} ({BUCKET_NAMES[int(labels['bucket'][row])]}), rollout"
-                        f" {int(labels['context_id'][row])}, progress {labels['progress'][row].item():.2f},"
-                        f" t = {labels['episode_time'][row].item():.2f} s: {reason}."
-                    )
+                    print(f"[INFO]: env {env_id}: row {row} ({START_STAGE_NAMES[int(bank.stage[row])]}): {reason}.")
             cycle += 1
 
         # close the environment

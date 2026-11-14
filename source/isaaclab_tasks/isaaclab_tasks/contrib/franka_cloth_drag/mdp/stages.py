@@ -41,6 +41,25 @@ class ClothDragStage(IntEnum):
     """The gripper holds the cloth by a raised node and its central node is near the target."""
 
 
+START_STAGE_NAMES = ("approach", "grasp", "drag", "goal")
+"""Names of the stages an episode can start in, in :class:`ClothDragStage` order."""
+
+START_STAGE_ALIASES = {"default": "approach"}
+"""Legacy input names mapped to their canonical start-stage names."""
+
+
+def canonical_start_stage_name(name: str) -> str:
+    """Return the canonical start-stage name, accepting legacy input aliases.
+
+    Args:
+        name: Start-stage name. ``default`` is accepted as a compatibility alias for ``approach``.
+
+    Returns:
+        The canonical name. Unknown names are returned unchanged for the caller to validate.
+    """
+    return START_STAGE_ALIASES.get(name, name)
+
+
 def gripper_closing(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
     """Whether the binary gripper action commands closing. Shape is (num_envs,)."""
     term = env.action_manager.get_term(cfg.gripper_action_name)
@@ -78,20 +97,17 @@ def grasp_node_ids(
     center_b: torch.Tensor,
     target_b: torch.Tensor,
     candidate_ids: torch.Tensor | None,
-    choice: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Return the cloth node to grasp: the candidate closest to the segment from the central node to the target.
 
-    With ``choice``, the chosen candidate of every environment instead. Without candidates (no raised nodes), the node
-    closest to the point :data:`FALLBACK_GRASP_OFFSET` from the central node towards the target; the squeeze creases
-    the flat cloth there.
+    Without candidates (no raised nodes), the node closest to the point :data:`FALLBACK_GRASP_OFFSET` from the central
+    node towards the target; the squeeze creases the flat cloth there.
 
     Args:
         nodes_b: Cloth node positions in the robot base frame [m], shape [N, P, 3].
         center_b: Position of the cloth's central node in the robot base frame [m], shape [N, 3].
         target_b: Target of the central node in the robot base frame [m], shape [N, 3].
         candidate_ids: Ids of the candidate nodes, shape [N, K], or None.
-        choice: Index of the candidate to grasp in every environment, taken modulo K, shape [N], or None.
 
     Returns:
         The node ids, shape [N].
@@ -101,8 +117,6 @@ def grasp_node_ids(
     if candidate_ids is None or candidate_ids.shape[1] == 0:
         point = center_b[:, :2] + FALLBACK_GRASP_OFFSET * torch.nn.functional.normalize(to_target, dim=-1)
         return (nodes_b[..., :2] - point.unsqueeze(1)).norm(dim=-1).argmin(dim=1)
-    if choice is not None:
-        return candidate_ids[rows, choice % candidate_ids.shape[1]]
     rel = nodes_b[rows.unsqueeze(1), candidate_ids, :2] - center_b[:, None, :2]
     t = (rel * to_target.unsqueeze(1)).sum(dim=-1) / to_target.square().sum(dim=-1, keepdim=True).clamp(min=1e-12)
     distance = (rel - t.clamp(0.0, 1.0).unsqueeze(-1) * to_target.unsqueeze(1)).norm(dim=-1)

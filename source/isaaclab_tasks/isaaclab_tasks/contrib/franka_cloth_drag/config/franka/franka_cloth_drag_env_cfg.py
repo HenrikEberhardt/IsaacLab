@@ -45,9 +45,8 @@ from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyMappingCfg
 
 from isaaclab_tasks.utils import PresetCfg
 
-from ... import mdp
+from ... import mdp, reset_strategies
 from ...coupler_cfg import ClothGraspCouplerProxyCfg
-from ...reset_states import FrontierSamplerCfg
 
 ##
 #################### Pre-defined configs ####################
@@ -234,7 +233,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             size=(1.5, 1.0, 1.0),
             collision_props=sim_utils.CollisionPropertiesCfg(),
             physics_material=RigidBodyMaterialBaseCfg(
-                dynamic_friction=0.20, # Total friction: sqrt(contact_proxy_mu * table_mu)
+                dynamic_friction=0.20,  # Total friction: sqrt(contact_proxy_mu * table_mu)
             ),
         ),
     )
@@ -539,86 +538,34 @@ class CommandsCfg:
         approach_radius=0.04,  # APPROACH -> GRASP: EE frame closer than [m] to a raised node (any node if none)
         grasp_min_nodes=2,  # GRASP -> DRAG: a grasp locking at least this many nodes to the EE, one of them raised
         goal_zone_margin=0.06,  # DRAG -> GOAL: center node closer than success_radius + this (0.10 m) to the target
+        # Success per start stage (Metrics/cloth_target/task_success_<stage>_*), also used by the adaptive resets
+        success_window_steps=480,  # averaging window (24 x 20 iterations)
     )
 
 
-# ------------------- Event Terms -------------------
+# ------------------- Event Manager -------------------
+FRONTIER_SAMPLER_CFG = reset_strategies.FrontierSamplerCfg(
+    # Weighted Moving Average Success Estimate
+    window_size=4,
+    weight_increment=1.0,
+    # Beta Sampling Variables
+    target_success_estimate=0.5,
+    kappa=1.0,
+    temperature=2.0,
+    epsilon=1.0e-4,
+)
 
 
 @configclass
-class ResetFromBankCfg(PresetCfg):
-    """Preset for selecting the reset strategie"""
+class DefaultResetsCfg:
+    """Fresh randomized resets that start at the beginning of the task."""
 
-    # Default resets form the beginning of the task only
-    off = EventTerm(
-        func=mdp.ResetFromBank,
-        mode="reset",
-        params={"bank_path": None, "mode_probabilities": {"default": 1.0}, "command_name": "cloth_target"},
-    )
-
-    # Resets to stage at all 4 stages safed in the reset buffers
-    uniform = EventTerm(
-        func=mdp.ResetFromBank,
-        mode="reset",
-        params={
-            "bank_path": "logs/reset_banks/bank_5000_v5.pt",
-            "mode_probabilities": {"default": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
-            "use_frontier": False,
-            "command_name": "cloth_target",
-        },
-    )
-
-    # Adaptive buffer ratios depending on the smoothed task success for each stage
-    adaptive = EventTerm(
-        func=mdp.ResetFromBank,
-        mode="reset",
-        params={
-            "bank_path": "logs/reset_banks/bank_5000_v5.pt",
-            "mode_probabilities": {"default": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},  # start ratios
-            "min_probabilities": {"default": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},  # min ratios
-            "success_range": (0.90, 0.95),  # ratio barriers for adaptation
-            "window_steps": 480,  # moving average over 20 iterations at 24 steps/iteration
-            "hold_steps": 300,  # 12.5 iterations: all first episodes, shortened by random start lengths, have ended
-            "use_frontier": True,
-            "row_stats_export_interval_steps": 120,  # save per-state success every 5 iterations at 24 steps/iteration
-            "command_name": "cloth_target",
-        },
-    )
-
-    # Fixed stage ratios with an SGS competence frontier inside each stored-stage buffer
-    frontier = EventTerm(
-        func=mdp.ResetFromBank,
-        mode="reset",
-        params={
-            "bank_path": "logs/reset_banks/bank_5000_v5.pt",
-            "mode_probabilities": {"default": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
-            "use_frontier": True,
-            "frontier_cfg": FrontierSamplerCfg(
-                history_length=4,
-                weight_increment=1.0,
-                target_success_rate=0.5,
-                kappa=1.0,
-                temperature=1.5,
-                epsilon=1.0e-4,
-            ),
-            "row_stats_export_interval_steps": 120,
-            "command_name": "cloth_target",
-        },
-    )
-
-    default = off
-
-
-@configclass
-class EventCfg:
-    """Configuration for events."""
-
-    # Robot resets
+    # Robot Reset
     reset_robot_joints = EventTerm(
         func=mdp.reset_franka_top_down,
         mode="reset",
         params={
-            "joint_offset_ranges": {  # linear ee pos offset through joint variations
+            "joint_offset_ranges": {  # ensure head facing down
                 "panda_joint1": (-0.25, 0.25),
                 "panda_joint2": (-0.15, 0.15),
                 "panda_joint4": (-0.15, 0.15),
@@ -628,7 +575,7 @@ class EventCfg:
         },
     )
 
-    # Cloth resets
+    # Cloth Reset
     reset_deformable = EventTerm(
         func=mdp.ResetClothWithRaisedNodes,
         mode="reset",
@@ -645,12 +592,11 @@ class EventCfg:
         },
     )
 
-    # Cube reset (position offset from central cloth node)
+    # Cube Reset (offset from central cloth node)
     reset_cube = EventTerm(
         func=mdp.reset_object_on_cloth_center,
         mode="reset",
         params={
-            # Cube position and orientation (position offset from cloth center node)
             "position_range": {"x": (-0.01, 0.01), "y": (-0.01, 0.01), "z": (0.004, 0.004)},
             "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),
             "object_cfg": SceneEntityCfg("cube"),
@@ -658,17 +604,44 @@ class EventCfg:
         },
     )
 
-    # Reset states from the offline bank (implementation_log/reset_states.md), after the resets above: it overwrites
-    # them. "env.events.reset_from_bank=uniform" selects the bank; also logs the success per reset source
-    reset_from_bank: ResetFromBankCfg = ResetFromBankCfg()
 
-    # EE frame sensor refresh after the resets (Newton updates it only in a physics step, so the first observation
-    # and grasp check would see the previous episode's pose); runs after every reset event, whatever its position
-    refresh_frame_sensors = EventTerm(
-        func=mdp.RefreshFrameSensors,
-        mode="reset",
-        params={"sensor_names": ["ee_frame"]},
+@configclass
+class UniformResetsCfg:
+    """Bank resets using fixed configured ratios between start stages."""
+
+    reset_from_bank = reset_strategies.ResetFromBankCfg(
+        bank_path="logs/reset_banks/bank_4000_v7.pt",
+        start_stage_ratios={"approach": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
+        use_frontier_sampling=False,
+        frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
     )
+
+
+@configclass
+class AdaptiveResetsCfg:
+    """Bank resets whose start-stage ratios adapt to training success."""
+
+    reset_from_bank = reset_strategies.ResetFromBankCfg(
+        bank_path="logs/reset_banks/bank_4000_v7.pt",
+        start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
+        min_stage_ratios={"approach": 0.20, "grasp": 0.05, "drag": 0.05, "goal": 0.05},
+        # Ratio Changing Variables
+        ratio_shift_success_range=(0.90, 0.95),  # lower ratio at 0.9 and reach min at 0.95
+        ratio_hold_steps=300,  # no adaptation over first 15 iterations
+        use_frontier_sampling=True,
+        frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
+    )
+
+
+@configclass
+class ResetStrategiesCfg(PresetCfg):
+    """Reset-strategy presets: default, uniform or adaptive"""
+
+    default_resets: DefaultResetsCfg = DefaultResetsCfg()
+    uniform_resets: UniformResetsCfg = UniformResetsCfg()
+    adaptive_resets: AdaptiveResetsCfg = AdaptiveResetsCfg()
+
+    default = default_resets
 
 
 @configclass
@@ -708,8 +681,11 @@ class RewardsCfg:
     pen_ee_height_drag = RewTerm(
         func=mdp.ee_height_above, params={"max_height": 0.04, "stages": ["drag"]}, weight=-15.0
     )
-    # Penalty for dopping the cloth during pulling the cloth
-    pen_drop = RewTerm(func=mdp.cloth_drag_drop_penalty, params={"stages": ["drag", "goal"]}, weight=-3.0)
+    # Reward per second of holding a raised node locked; at most ~3.5 per episode, below drag + goal progress (~8)
+    drag_hold = RewTerm(func=mdp.cloth_held, params={"stages": ["drag", "goal"]}, weight=0.5)
+    # Off: the telescoping progress terms already make drop/re-grasp laps pay nothing, and a lump drop cost made the
+    # policy avoid the lock with default resets (run 2026-11-13_21-03-01); a drop now costs the lost drag_hold
+    # pen_drop = RewTerm(func=mdp.cloth_drag_drop_penalty, params={"stages": ["drag", "goal"]}, weight=-3.0)
 
     # -------------- Goal --------------
     # Penalty for lifting the EE above 4cm during the goal stage
@@ -825,7 +801,6 @@ class CurriculumCfg:
             "ramp_steps": 3600,  # 150 iterations at 24 steps/iteration
             "ema_episodes": 2048,
             "initial_progress": 0.1,  # hidden in 10 % of episodes from the start (from 0 %, success fell 0.06-0.09)
-            "reset_term": "reset_from_bank",  # success gate on episodes from default resets only
         },
     )
 
@@ -840,7 +815,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     """Manager-based RL environment: Franka Panda dragging a cloth across the table."""
 
     # Scene settings
-    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=4096, env_spacing=2.2, replicate_physics=True)
+    scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=2048, env_spacing=2.2, replicate_physics=True)
 
     # MDP settings
     observations: ObservationsCfg = ObservationsCfg()
@@ -848,11 +823,12 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     commands: CommandsCfg = CommandsCfg()
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
-    events: EventCfg = EventCfg()
+    events: ResetStrategiesCfg = ResetStrategiesCfg()
     curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self) -> None:
-        # General settings
+        
+        # Simulation settings
         self.decimation = 4
         self.episode_length_s = 10.0
         self.sim.dt = 1.0 / 120
@@ -860,20 +836,17 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.physics = PhysicsCfg()
 
     def play_mode(self):
-        """Settings for running the policy in play mode"""
+        """Settings for playing the policy"""
         super().play_mode()
 
-        # Visualization settings for vizer
+        # Visualization settings
         self.sim.visualizer_cfgs = [
             ViserVisualizerCfg(eye=(0.5 + 3.18, -3.18, 7.59), lookat=(0.5, 0.0, -0.2), focal_length=23.5, port=8755)
         ]
 
-        # Set the curriculum to the end of the ramp
+        # Curriculum settings
         if self.curriculum is not None and self.curriculum.observation_hiding is not None:
-            self.curriculum.observation_hiding.params["initial_progress"] = 1.0
+            self.curriculum.observation_hiding.params["initial_progress"] = 0.0
 
-        # Use the default resets only form the beginning of the task
-        if self.events.reset_from_bank is not None:
-            self.events.reset_from_bank.params["bank_path"] = None
-            self.events.reset_from_bank.params["mode_probabilities"] = {"default": 1.0}
-            self.events.reset_from_bank.params["min_probabilities"] = None
+        # Reset to Task beginning
+        self.events = DefaultResetsCfg()

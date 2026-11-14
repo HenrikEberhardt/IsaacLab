@@ -147,6 +147,10 @@ class ClothTargetCommandCfg(CommandTermCfg):
     goal_zone_margin: float = 0.05
     """Margin added to :attr:`success_radius` for the planar distance below which DRAG turns into GOAL [m]."""
 
+    success_window_steps: int = 480
+    """Number of environment steps the smoothed success rates per start stage average over (20 iterations at 24
+    steps/iteration), see :class:`~.commands.StartStageSuccess`."""
+
     goal_visualizer_cfg: VisualizationMarkersCfg = SPHERE_MARKER_CFG.replace(prim_path="/Visuals/Command/cloth_target")
     """Configuration of the marker drawn at the target when :attr:`debug_vis` is enabled."""
 

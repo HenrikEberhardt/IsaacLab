@@ -5,20 +5,18 @@
 
 """Scripted state machine that drags the cloth of ``IsaacContrib-Drag-Cloth-Franka`` to its target.
 
-The state machine grasps the cloth at a raised node: by default the one closest to the segment from the cloth's central
-node to the target (without raised nodes, the node on that segment a few centimeters from the central node), or a
-chosen one per environment. It hovers above the node with a fully open gripper, the hand's long side tangent around the
-cloth center so its narrow side faces the center, lowers the open fingers onto the cloth and squeezes, so the cloth
-creases up between the jaws. It then drags the task's goal point (the cube on the cloth, or the central node without
-one) to the target, stops until the task counts the cloth as held there, releases the cloth and rises. It is
-implemented in the kernel function :func:`infer_state_machine`, which uses the ``warp`` library to run all environments
-in parallel on the GPU.
+The state machine grasps the cloth at the task's grasp node (:attr:`~..mdp.commands.ClothTargetCommand.grasp_node_id`):
+the raised node closest to the segment from the cloth's central node to the target. It hovers above the node with a
+fully open gripper, the hand's long side tangent around the cloth center so its narrow side faces the center, lowers the
+open fingers onto the cloth and squeezes, so the cloth creases up between the jaws. It then drags the task's goal point
+(the cube on the cloth, or the central node without one) to the target, stops until the task counts the cloth as held
+there, releases the cloth and rises. It is implemented in the kernel function :func:`infer_state_machine`, which uses
+the ``warp`` library to run all environments in parallel on the GPU.
 
 Drag speed, drag height and an offset of the grasp yaw are set per environment, so the state machine can be randomized
-for the reset states (``scripts/environments/state_machine/nonprehensile_cloth_collect_resets.py``). With
-``pregrasp_hold``, it first holds a per-environment pre-grasp pose (an offset from the grasp node and a yaw error,
-gripper open) before the approach; the grasp itself is unchanged. Used by the scripts in
-``scripts/environments/state_machine``.
+for the reset states (:mod:`.collect`). With ``pregrasp_hold``, it first holds a per-environment pre-grasp pose (an
+offset from the grasp node and a yaw error, gripper open) before the approach; the grasp itself is unchanged. The
+gripper is the task's locking grasp action, so an empty grasp is detected and retried.
 """
 
 from __future__ import annotations
@@ -28,8 +26,6 @@ from typing import TYPE_CHECKING
 
 import torch
 import warp as wp
-
-from .mdp.stages import grasp_node_ids
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv, ManagerBasedRLEnvCfg
@@ -101,7 +97,7 @@ class DragSmWaitTime:
     APPROACH_CLOTH = wp.constant(0.3)
     # time for the squeeze to ramp in after the grasp locked the cloth
     GRASP_SQUEEZE = wp.constant(0.3)
-    # time after which a grasp that locked nothing is retried (or a friction grasp moves on)
+    # time after which a grasp that locked nothing is retried
     GRASP_TIMEOUT = wp.constant(2.0)
     # longest the drag stops at the target waiting for the task's success before the release; the success needs the
     # cloth held by a raised node for the hold time
@@ -182,7 +178,6 @@ def infer_state_machine(
     grasp_threshold: float,
     wrist_lower: float,
     wrist_upper: float,
-    attach: int,
     pregrasp_hold: int,
 ):
     # retrieve thread id
@@ -262,18 +257,14 @@ def infer_state_machine(
             sm_state[tid] = DragSmState.DRAG_CLOTH
             sm_wait_time[tid] = 0.0
         elif sm_wait_time[tid] >= DragSmWaitTime.GRASP_TIMEOUT:
-            if attach == 0:
-                # a friction grasp never locks the cloth: drag what the fingers hold
-                sm_state[tid] = DragSmState.DRAG_CLOTH
+            num_tries[tid] = num_tries[tid] + 1
+            if num_tries[tid] < MAX_GRASP_TRIES:
+                # open and hover again for another try
+                sm_state[tid] = DragSmState.APPROACH_ABOVE_CLOTH
             else:
-                num_tries[tid] = num_tries[tid] + 1
-                if num_tries[tid] < MAX_GRASP_TRIES:
-                    # open and hover again for another try
-                    sm_state[tid] = DragSmState.APPROACH_ABOVE_CLOTH
-                else:
-                    # give up: open and rise where the hand is
-                    hold_pos[tid] = ee_pos[tid]
-                    sm_state[tid] = DragSmState.RETREAT
+                # give up: open and rise where the hand is
+                hold_pos[tid] = ee_pos[tid]
+                sm_state[tid] = DragSmState.RETREAT
             sm_wait_time[tid] = 0.0
     elif state == DragSmState.DRAG_CLOTH:
         # advance the drag target the way the goal point has to go, at the drag speed, leading the lagging arm by at
@@ -341,7 +332,7 @@ class DragClothSm:
        radius, and turns the hand, until the task counts the hand as near the cloth.
     3. APPROACH_CLOTH: The robot lowers the open fingers onto the cloth, keeping the yaw.
     4. GRASP_CLOTH: The robot squeezes until the task counts the cloth as grasped. A grasp that locked nothing is
-       retried from the hover pose once, then the robot gives up and rises; a friction grasp moves on after a timeout.
+       retried from the hover pose once, then the robot gives up and rises.
     5. DRAG_CLOTH: The robot drags the cloth at the per-environment :attr:`drag_speed` and :attr:`drag_height` until
        the goal point is within the goal tolerance of the target, or until the drag stalls at the arm's reach limit.
        The yaw changes only if the cloth turns too far under the hand.
@@ -361,7 +352,6 @@ class DragClothSm:
         drag_speed: float,
         goal_tolerance: float,
         wrist_limits: tuple[float, float],
-        attach: bool,
         approach_threshold: float = 0.01,
         grasp_threshold: float = 0.005,
         pregrasp_hold: bool = False,
@@ -378,7 +368,6 @@ class DragClothSm:
             drag_speed: Speed of the drag [m/s], the start value of every environment.
             goal_tolerance: Planar distance of the goal point to the target at which the drag stops [m].
             wrist_limits: Range of the last arm joint that the yaw action may command [rad].
-            attach: Whether the gripper locks the grasped cloth nodes, so an empty grasp can be detected and retried.
             approach_threshold: Distance at which the end-effector counts as at the hover pose [m].
             grasp_threshold: Distance at which the end-effector counts as at the touch pose [m].
             pregrasp_hold: Whether to hold the pre-grasp pose (:attr:`pregrasp_offset`, :attr:`pregrasp_yaw_error`)
@@ -392,7 +381,6 @@ class DragClothSm:
         self.grasp_height = grasp_height
         self.goal_tolerance = goal_tolerance
         self.wrist_limits = wrist_limits
-        self.attach = attach
         self.approach_threshold = approach_threshold
         self.grasp_threshold = grasp_threshold
         self.pregrasp_hold = pregrasp_hold
@@ -544,7 +532,6 @@ class DragClothSm:
                 self.grasp_threshold,
                 self.wrist_limits[0],
                 self.wrist_limits[1],
-                int(self.attach),
                 int(self.pregrasp_hold),
             ],
             device=self.device,
@@ -597,7 +584,7 @@ def pad_cloth_gaps(
 class ClothDragSmRunner:
     """Feed the task's state to a :class:`DragClothSm` and turn its output into the task's actions.
 
-    The runner reads the task state in the robot base frame, picks the grasp node while the state machine rests,
+    The runner reads the task state in the robot base frame, takes the task's grasp node while the state machine rests,
     detects a stalled drag, runs the state machine and converts its output to the 4-DoF delta end-effector action and
     the binary gripper command. The quantities of the last :meth:`compute` stay readable as attributes.
     """
@@ -610,7 +597,7 @@ class ClothDragSmRunner:
             sm: The state machine of all environments.
             raised_nodes_event: Name of the reset event that raises the grasp candidates, or None.
         """
-        from .mdp.frames import raised_node_ids
+        from ..mdp.frames import raised_node_ids
 
         self.env = env
         self.sm = sm
@@ -623,10 +610,6 @@ class ClothDragSmRunner:
         # the raised nodes of the cloth reset, redrawn at every reset (live tensor); None grasps the flat cloth
         self.raised_node_ids = raised_node_ids(env, raised_nodes_event)
         num_envs, device = env.num_envs, env.device
-        self.grasp_choice: torch.Tensor | None = None
-        """Index of the raised node each environment grasps, shape [num_envs]; None grasps the task's grasp node
-        (:attr:`~.mdp.commands.ClothTargetCommand.grasp_node_id`), the node closest to the segment from the central node
-        to the target."""
         self.grasp_node = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.stall_steps = torch.zeros(num_envs, dtype=torch.long, device=device)
         self.stall_limit = round(STALL_TIME / env.step_dt)
@@ -648,8 +631,8 @@ class ClothDragSmRunner:
             The actions of all environments: translation and yaw deltas, normalized to [-1, 1], and the gripper command
             (1 open, -1 close), shape [num_envs, 5].
         """
-        from .mdp.frames import cloth_center_pos_b, ee_pose_in_base, points_to_base, top_down_yaw
-        from .mdp.stages import goal_point_pos_b
+        from ..mdp.frames import cloth_center_pos_b, ee_pose_in_base, points_to_base, top_down_yaw
+        from ..mdp.stages import goal_point_pos_b
 
         env = self.env
         # observations in the robot base frame
@@ -661,13 +644,7 @@ class ClothDragSmRunner:
         # -- grasp node, chosen while resting
         resting = self.sm.sm_state == DragSmState.REST
         if resting.any():
-            if self.grasp_choice is None:
-                node = self.command.grasp_node_id
-            else:
-                node = grasp_node_ids(
-                    self.nodes_b, self.center_pos, target_pos, self.raised_node_ids, self.grasp_choice
-                )
-            self.grasp_node[resting] = node[resting]
+            self.grasp_node[resting] = self.command.grasp_node_id[resting]
         # -- drag stall: the arm stopped, e.g. at its reach limit next to the robot base
         still = (self.ee_pos - self._prev_ee_pos).norm(dim=-1) < STALL_STEP
         dragging = self.sm.sm_state == DragSmState.DRAG_CLOTH

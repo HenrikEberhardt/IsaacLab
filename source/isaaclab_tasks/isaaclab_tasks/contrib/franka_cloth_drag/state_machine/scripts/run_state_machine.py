@@ -4,7 +4,8 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 """
-Script to drag a cloth over the table to a target with a robotic arm, to watch and debug the cloth grasp.
+Script to run the scripted state machine on ``IsaacContrib-Drag-Cloth-Franka``, to watch and debug the expert that
+generates the reset states.
 
 The state machine grasps the ``IsaacContrib-Drag-Cloth-Franka`` cloth at the raised node closest to the segment from
 the cloth's central node to the target (without raised nodes, at the node on that segment a few centimeters from the
@@ -15,25 +16,23 @@ the target, stops until the task counts the cloth as held there (the success nee
 releases the cloth and rises. The state machine is implemented in
 :mod:`isaaclab_tasks.contrib.franka_cloth_drag.state_machine` (warp kernel, all environments in parallel on the GPU).
 
-The state machine commands the task's own action terms, the 4-DoF delta end-effector action and the cloth grasp
-gripper, so the grasp behaves exactly as in training: once the closing fingers rest, the cloth nodes between the pads
-are locked to the end-effector frame (``--grasp_mode attach``). ``--grasp_mode friction`` holds the cloth by friction
-alone. Its transitions follow the task's stages: the hover pose lies within the task's approach radius, and the drag
-starts once the task counts the cloth as grasped by a raised node. Episodes end and reset as in training (task
-episode length, terminations and reset events), except that success does not end the episode, so the release and the
-rise play out; success is reported per episode from the task's success check. The state machine restarts in every
-reset environment.
+The state machine commands the task's own action terms, the 4-DoF delta end-effector action and the cloth grasp gripper,
+so the grasp behaves exactly as in training: once the closing fingers rest, the cloth nodes between the pads are locked
+to the end-effector frame. Its transitions follow the task's stages: the hover pose lies within the task's approach
+radius, and the drag starts once the task counts the cloth as grasped by a raised node. Episodes end and reset as in
+training (task episode length, terminations and reset events), except that success does not end the episode, so the
+release and the rise play out; success is reported per episode from the task's success check. The state machine restarts
+in every reset environment.
 
 .. code-block:: bash
 
-    # Viser web viewer on port 8750 (default); open http://localhost:8750.
-    uv run python scripts/environments/state_machine/franka_cloth_drag_sm.py --num_envs 4
+    SM=source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag/state_machine/scripts
 
-    # Friction-only grasp.
-    uv run python scripts/environments/state_machine/franka_cloth_drag_sm.py --grasp_mode friction
+    # Viser web viewer on port 8750 (default); open http://localhost:8750.
+    uv run python $SM/run_state_machine.py --num_envs 4
 
     # Headless, a fixed number of steps.
-    uv run python scripts/environments/state_machine/franka_cloth_drag_sm.py --viz none --num_steps 1200
+    uv run python $SM/run_state_machine.py --viz none --num_steps 1200
 
 """
 
@@ -69,13 +68,6 @@ parser.add_argument(
     "--num_steps", type=int, default=None, help="Number of environment steps to run. Defaults to running until Ctrl+C."
 )
 parser.add_argument("--task", type=str, default="IsaacContrib-Drag-Cloth-Franka", help="The task to run.")
-parser.add_argument(
-    "--grasp_mode",
-    type=str,
-    default="attach",
-    choices=["attach", "friction"],
-    help="Hold the cloth by locking the grasped nodes to the end-effector frame, or by friction alone.",
-)
 parser.add_argument("--drag_speed", type=float, default=0.08, help="Speed of the drag [m/s].")
 parser.add_argument(
     "--episode_length", type=float, default=None, help="Episode length [s]. Defaults to the task's episode length."
@@ -125,8 +117,8 @@ def main():
         env_cfg.episode_length_s = args_cli.episode_length
     env_cfg.terminations.success = None
     env_cfg.rewards.success = None
-    # grasp with the task's own gripper action: lock the grasped nodes, or hold the cloth by friction alone
-    env_cfg.actions.gripper_action.attach = args_cli.grasp_mode == "attach"
+    # the state machine detects an empty grasp by the locked nodes of the task's gripper action
+    env_cfg.actions.gripper_action.attach = True
     if not isinstance(env_cfg.actions.arm_action, TopDownDeltaEEActionCfg):
         raise SystemExit("The state machine commands the delta end-effector action: use the 'ee_delta' actions preset.")
     # turn the hand faster than the task's yaw scale allows
@@ -172,7 +164,6 @@ def main():
             drag_speed=args_cli.drag_speed,
             goal_tolerance=min(args_cli.goal_tolerance, command.cfg.success_radius),
             wrist_limits=arm_cfg.wrist_joint_limits,
-            attach=args_cli.grasp_mode == "attach",
         )
         runner = ClothDragSmRunner(unwrapped, drag_sm)
         # a reset without raised nodes grasps the flat cloth
@@ -188,9 +179,7 @@ def main():
         hover_time = torch.zeros(num_envs, device=device)
         hover_ready = torch.full((num_envs, 3), -1.0, device=device)
         actions = runner.actions
-        print(
-            f"[INFO]: Dragging the cloth with a {args_cli.grasp_mode} grasp on the {grasp_info} in {num_envs} env(s)."
-        )
+        print(f"[INFO]: Dragging the cloth with a locking grasp on the {grasp_info} in {num_envs} env(s).")
 
         step = 0
         while args_cli.num_steps is None or step < args_cli.num_steps:
@@ -273,13 +262,9 @@ def main():
             grasped = (previous_state == DragSmState.GRASP_CLOTH) & (new_state == DragSmState.DRAG_CLOTH)
             for env_id in grasped.nonzero(as_tuple=False).squeeze(-1).tolist():
                 opening_mm = robot.data.joint_pos.torch[env_id, finger_joint_id].item() * 1e3
-                if gripper.is_grasping[env_id]:
-                    info = f"locked {gripper.num_grasped[env_id].item()} cloth nodes"
-                else:
-                    info = "friction grasp"
                 print(
                     f"[INFO]: env {env_id}: grasped node {runner.grasp_node[env_id].item()} at a finger opening of"
-                    f" {opening_mm:.1f} mm, {info}."
+                    f" {opening_mm:.1f} mm, locked {gripper.num_grasped[env_id].item()} cloth nodes."
                 )
             retried = (previous_state == DragSmState.GRASP_CLOTH) & (new_state == DragSmState.APPROACH_ABOVE_CLOTH)
             for env_id in retried.nonzero(as_tuple=False).squeeze(-1).tolist():

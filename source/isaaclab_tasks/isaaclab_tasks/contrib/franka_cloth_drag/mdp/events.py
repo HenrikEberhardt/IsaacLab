@@ -3,11 +3,10 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Reset events for the Franka cloth dragging task."""
+"""Default reset events of the Franka cloth dragging task: every episode starts at the beginning of the task."""
 
 from __future__ import annotations
 
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -155,43 +154,48 @@ def reset_object_on_cloth_center(
     rigid_object.write_root_velocity_to_sim_index(root_velocity=torch.zeros(num, 6, device=device), env_ids=env_ids)
 
 
-class ResetClothWithRaisedNodes(ManagerTermBase):
-    """Reset a cloth like :func:`reset_cloth_planar_pose` and raise a few nodes that keep sticking out.
+class ClothRaisedNodes:
+    """Rest shape of a cloth around a few raised nodes that keep sticking out.
 
-    At every reset, ``num_raised_nodes`` nodes are drawn anew from :data:`interior_nodes`, or from
-    :data:`edge_included` if ``include_edge_nodes``, in random order and at least ``min_spacing`` apart where
-    possible, and start lifted by ``node_raise_height``. The triangles and bending edges around them take the lifted
-    shape as their full rest shape (triangle rest shapes and areas, bending rest lengths and angles), and every other
-    rest value is restored. The bump is stress-free, so it keeps its height and its neighbours stay flat. It adds a
-    little material, so the cloth has local slack there, and it acts like a set crease: pressed flat, it springs
-    back, and it travels with the cloth. The drawn nodes are kept, sorted, in :attr:`raised_node_ids`.
+    The triangles and bending edges around the raised nodes take the lifted shape as their full rest shape (triangle
+    rest shapes and areas, bending rest lengths and angles), and every other rest value is restored. The bump is
+    stress-free, so it keeps its height and its neighbours stay flat. It adds a little material, so the cloth has local
+    slack there, and it acts like a set crease: pressed flat, it springs back, and it travels with the cloth. The raised
+    nodes of every environment are kept, sorted, in :attr:`raised_node_ids`.
 
-    The shape is built from the default nodes and then turned and shifted like :func:`reset_cloth_planar_pose`; the
-    rest values do not change under that planar motion. The cloth must be the only particle body of each environment,
-    and its physics manager must provide ``set_cloth_rest`` (see :mod:`..coupler`).
+    The rest values do not change under a planar motion of the cloth. The cloth must be the only particle body of each
+    environment, and its physics manager must provide ``set_cloth_rest`` (see :mod:`..coupler`).
+
+    An environment has one instance: the cloth reset event :class:`ResetClothWithRaisedNodes` of the default resets, or
+    the bank reset event of a strategy without that event.
     """
 
-    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
-        """Collect the cloth triangles and bending edges of every environment."""
-        super().__init__(cfg, env)
-        params = cfg.params
-        cloth: DeformableObject = env.scene[params.get("asset_cfg", SceneEntityCfg("deformable")).name]
-        num_nodes = cloth.max_sim_vertices_per_body
-        node_set = edge_included if params.get("include_edge_nodes", False) else interior_nodes
-        self._node_set = torch.tensor(node_set, dtype=torch.long, device=env.device)
-        if ((self._node_set < 0) | (self._node_set >= num_nodes)).any():
-            raise ValueError(f"The raised-node candidates must be cloth node ids in [0, {num_nodes}).")
-        if not 0 <= params["num_raised_nodes"] <= len(self._node_set):
-            raise ValueError(f"num_raised_nodes must be between 0 and the {len(self._node_set)} candidate nodes.")
+    def __init__(
+        self,
+        env: ManagerBasedEnv,
+        num_raised_nodes: int,
+        node_raise_height: float,
+        asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
+    ):
+        """Collect the cloth triangles and bending edges of every environment.
+
+        Args:
+            env: The environment instance.
+            num_raised_nodes: Number of nodes raised in every episode.
+            node_raise_height: Height of the raised nodes above the rest of the cloth [m].
+            asset_cfg: Scene entity of the cloth.
+        """
+        cloth: DeformableObject = env.scene[asset_cfg.name]
+        self.num_nodes: int = cloth.max_sim_vertices_per_body
+        """Number of cloth nodes per environment."""
+        self.node_raise_height = node_raise_height
+        """Height of the raised nodes above the rest of the cloth [m]."""
 
         # default nodes about their mean, the frame the shape is built in
         rest_pos = cloth.data.default_nodal_state_w.torch[0, :, :3]
-        self._rest_pos = rest_pos - rest_pos.mean(dim=0)
-        candidate_xy = self._rest_pos[self._node_set, :2]
-        self._candidate_dist = torch.cdist(candidate_xy, candidate_xy)
-        self.raised_node_ids = torch.zeros(
-            env.num_envs, params["num_raised_nodes"], dtype=torch.long, device=env.device
-        )
+        self.rest_pos = rest_pos - rest_pos.mean(dim=0)
+        """Default nodes about their mean [m], shape [num_nodes, 3]."""
+        self.raised_node_ids = torch.zeros(env.num_envs, num_raised_nodes, dtype=torch.long, device=env.device)
         """Nodes raised in the current episode of every environment, sorted, shape [num_envs, num_raised_nodes]."""
 
         # the solver views copy the rest values, so they are set through the physics manager (the task's coupler)
@@ -208,14 +212,104 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
         quads = model.edge_indices.numpy()
         bending = np.flatnonzero((quads[:, 0] >= 0) & (quads[:, 1] >= 0))
         self._edge_ids, self._quads = _cloth_elements_per_env(
-            bending, quads[bending], world, first_particle, num_nodes, env.device
+            bending, quads[bending], world, first_particle, self.num_nodes, env.device
         )
         tris = model.tri_indices.numpy()
         self._tri_ids, self._tris = _cloth_elements_per_env(
-            np.arange(len(tris)), tris, world, first_particle, num_nodes, env.device
+            np.arange(len(tris)), tris, world, first_particle, self.num_nodes, env.device
         )
         # rest values the cloth was built with, read at the first reset once every model setup has run
         self._base_rest: dict[str, torch.Tensor] | None = None
+
+    def set_raised_nodes(
+        self, env_ids: torch.Tensor, raised: torch.Tensor, node_raise_height: float | None = None
+    ) -> torch.Tensor:
+        """Set the cloth rest shape of the given environments around the given raised nodes.
+
+        Records ``raised`` in :attr:`raised_node_ids` and sets the rest shape as the class docstring describes, without
+        moving the cloth. A reset to a stored cloth state uses this to restore the bumps of its raised nodes.
+
+        Args:
+            env_ids: The environment indices, shape [N].
+            raised: Ids of the nodes to raise, sorted, shape [N, num_raised_nodes].
+            node_raise_height: Height of the raised nodes above the rest of the cloth [m]. Defaults to
+                :attr:`node_raise_height`.
+
+        Returns:
+            The default nodes about their mean with the raised nodes lifted [m], shape [N, num_nodes, 3].
+        """
+        if node_raise_height is None:
+            node_raise_height = self.node_raise_height
+        ids = {"edge_rest_angle": self._edge_ids, "edge_rest_length": self._edge_ids}
+        ids |= {"tri_poses": self._tri_ids, "tri_areas": self._tri_ids}
+        if self._base_rest is None:
+            self._base_rest = {name: self._physics.get_cloth_rest(name, ids[name]) for name in ids}
+        base = {name: values[env_ids] for name, values in self._base_rest.items()}
+        rest_pos = self.rest_pos.expand(len(env_ids), -1, -1)
+        self.raised_node_ids[env_ids] = raised
+        is_raised = torch.zeros(len(env_ids), len(self.rest_pos), dtype=torch.bool, device=rest_pos.device)
+        is_raised.scatter_(1, raised, True)
+        shaped = rest_pos.clone()
+        shaped[..., 2] += node_raise_height * is_raised
+
+        # the elements around a raised node take the lifted shape as their rest shape, bending and in-plane
+        angle_change = _dihedral_angles(shaped, self._quads) - _dihedral_angles(rest_pos, self._quads)
+        rest = {"edge_rest_angle": base["edge_rest_angle"] + angle_change}
+        tri_raised = is_raised[:, self._tris].any(dim=-1)
+        poses, areas = _triangle_rest_shapes(shaped, self._tris)
+        rest["tri_poses"] = torch.where(tri_raised[..., None, None], poses, base["tri_poses"])
+        rest["tri_areas"] = torch.where(tri_raised, areas, base["tri_areas"])
+        edge_raised = is_raised[:, self._quads[:, 2:]].any(dim=-1)
+        lengths = (shaped[:, self._quads[:, 3]] - shaped[:, self._quads[:, 2]]).norm(dim=-1)
+        rest["edge_rest_length"] = torch.where(edge_raised, lengths, base["edge_rest_length"])
+        for name, values in rest.items():
+            self._physics.set_cloth_rest(name, ids[name][env_ids], values)
+        return shaped
+
+
+class ResetClothWithRaisedNodes(ManagerTermBase):
+    """Reset a cloth like :func:`reset_cloth_planar_pose` and raise a few nodes that keep sticking out.
+
+    At every reset, ``num_raised_nodes`` nodes are drawn anew from :data:`interior_nodes`, or from
+    :data:`edge_included` if ``include_edge_nodes``, in random order and at least ``min_spacing`` apart where
+    possible, and start lifted by ``node_raise_height``. The cloth takes the lifted shape as its rest shape around
+    them, see :class:`ClothRaisedNodes` (:attr:`raised_nodes`). The drawn nodes are kept, sorted, in
+    :attr:`raised_node_ids`.
+
+    The shape is built from the default nodes and then turned and shifted like :func:`reset_cloth_planar_pose`; the
+    rest values do not change under that planar motion.
+    """
+
+    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
+        """Set up the raised nodes of the cloth and their candidates."""
+        super().__init__(cfg, env)
+        params = cfg.params
+        self.raised_nodes = ClothRaisedNodes(
+            env,
+            params["num_raised_nodes"],
+            params["node_raise_height"],
+            params.get("asset_cfg", SceneEntityCfg("deformable")),
+        )
+        """Rest shape of the cloth around the raised nodes."""
+        num_nodes = self.raised_nodes.num_nodes
+        node_set = edge_included if params.get("include_edge_nodes", False) else interior_nodes
+        self._node_set = torch.tensor(node_set, dtype=torch.long, device=env.device)
+        if ((self._node_set < 0) | (self._node_set >= num_nodes)).any():
+            raise ValueError(f"The raised-node candidates must be cloth node ids in [0, {num_nodes}).")
+        if not 0 <= params["num_raised_nodes"] <= len(self._node_set):
+            raise ValueError(f"num_raised_nodes must be between 0 and the {len(self._node_set)} candidate nodes.")
+        candidate_xy = self.raised_nodes.rest_pos[self._node_set, :2]
+        self._candidate_dist = torch.cdist(candidate_xy, candidate_xy)
+
+    @property
+    def raised_node_ids(self) -> torch.Tensor:
+        """Nodes raised in the current episode of every environment, sorted, shape [num_envs, num_raised_nodes]."""
+        return self.raised_nodes.raised_node_ids
+
+    @property
+    def node_raise_height(self) -> float:
+        """Height of the raised nodes above the rest of the cloth [m]."""
+        return self.raised_nodes.node_raise_height
 
     def __call__(
         self,
@@ -246,54 +340,15 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
         cloth: DeformableObject = env.scene[asset_cfg.name]
         raised = self._node_set[self._draw_spread(len(env_ids), num_raised_nodes, min_spacing)]
         shaped = self.set_raised_nodes(env_ids, raised, node_raise_height)
-        displacement = shaped - self._rest_pos
+        displacement = shaped - self.raised_nodes.rest_pos
         nodal_state = _planar_pose_nodal_state(cloth, env_ids, position_range, yaw_range, displacement)
         cloth.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids)
 
     def set_raised_nodes(
         self, env_ids: torch.Tensor, raised: torch.Tensor, node_raise_height: float | None = None
     ) -> torch.Tensor:
-        """Set the cloth rest shape of the given environments around the given raised nodes.
-
-        Records ``raised`` in :attr:`raised_node_ids` and sets the rest shape as the class docstring describes, without
-        moving the cloth. A reset to a stored cloth state uses this to restore the bumps of its raised nodes.
-
-        Args:
-            env_ids: The environment indices, shape [N].
-            raised: Ids of the nodes to raise, sorted, shape [N, num_raised_nodes].
-            node_raise_height: Height of the raised nodes above the rest of the cloth [m]. Defaults to the term's
-                ``node_raise_height`` parameter.
-
-        Returns:
-            The default nodes about their mean with the raised nodes lifted [m], shape [N, num_nodes, 3].
-        """
-        if node_raise_height is None:
-            node_raise_height = self.cfg.params["node_raise_height"]
-        ids = {"edge_rest_angle": self._edge_ids, "edge_rest_length": self._edge_ids}
-        ids |= {"tri_poses": self._tri_ids, "tri_areas": self._tri_ids}
-        if self._base_rest is None:
-            self._base_rest = {name: self._physics.get_cloth_rest(name, ids[name]) for name in ids}
-        base = {name: values[env_ids] for name, values in self._base_rest.items()}
-        rest_pos = self._rest_pos.expand(len(env_ids), -1, -1)
-        self.raised_node_ids[env_ids] = raised
-        is_raised = torch.zeros(len(env_ids), len(self._rest_pos), dtype=torch.bool, device=rest_pos.device)
-        is_raised.scatter_(1, raised, True)
-        shaped = rest_pos.clone()
-        shaped[..., 2] += node_raise_height * is_raised
-
-        # the elements around a raised node take the lifted shape as their rest shape, bending and in-plane
-        angle_change = _dihedral_angles(shaped, self._quads) - _dihedral_angles(rest_pos, self._quads)
-        rest = {"edge_rest_angle": base["edge_rest_angle"] + angle_change}
-        tri_raised = is_raised[:, self._tris].any(dim=-1)
-        poses, areas = _triangle_rest_shapes(shaped, self._tris)
-        rest["tri_poses"] = torch.where(tri_raised[..., None, None], poses, base["tri_poses"])
-        rest["tri_areas"] = torch.where(tri_raised, areas, base["tri_areas"])
-        edge_raised = is_raised[:, self._quads[:, 2:]].any(dim=-1)
-        lengths = (shaped[:, self._quads[:, 3]] - shaped[:, self._quads[:, 2]]).norm(dim=-1)
-        rest["edge_rest_length"] = torch.where(edge_raised, lengths, base["edge_rest_length"])
-        for name, values in rest.items():
-            self._physics.set_cloth_rest(name, ids[name][env_ids], values)
-        return shaped
+        """Set the cloth rest shape around the given raised nodes, see :meth:`ClothRaisedNodes.set_raised_nodes`."""
+        return self.raised_nodes.set_raised_nodes(env_ids, raised, node_raise_height)
 
     def _draw_spread(self, num_envs: int, num_drawn: int, min_spacing: float) -> torch.Tensor:
         """Draw ``num_drawn`` candidate indices per environment, at least ``min_spacing`` [m] apart where possible.
@@ -315,49 +370,6 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
                 chosen[rows, candidate] |= take
                 blocked |= take.unsqueeze(1) & (self._candidate_dist[candidate] < min_spacing)
         return chosen.nonzero()[:, 1].view(num_envs, num_drawn)
-
-
-class RefreshFrameSensors(ManagerTermBase):
-    """Refresh frame transformer sensors at the end of every reset, so they show the poses after the reset.
-
-    On Newton, a frame transformer copies the transforms of a Newton frame-transform sensor, which Newton only updates
-    at the end of a physics step: :meth:`NewtonManager.forward` refreshes the body poses after a state write, but not
-    that sensor. Until the next step, the frame transformers of reset environments would keep the previous episode's
-    poses, in the first observation, the first stage update and the grasp selection of the first gripper action (see
-    ``implementation_log/reset_states.md``).
-
-    The refresh runs in the term's :meth:`reset`, which the event manager calls after all reset events and the
-    manager resets, so the term's position among the reset events does not matter. Calling the term does nothing.
-    """
-
-    def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
-        """Look up the frame transformers to refresh."""
-        super().__init__(cfg, env)
-        self._sensors = [env.scene[name] for name in cfg.params.get("sensor_names", ("ee_frame",))]
-
-    def __call__(self, env: ManagerBasedEnv, env_ids: torch.Tensor, sensor_names: Sequence[str] = ("ee_frame",)):
-        """Do nothing: the refresh runs in :meth:`reset`, once every reset has written its state.
-
-        Args:
-            env: The environment instance.
-            env_ids: The environment indices to reset.
-            sensor_names: Scene names of the frame transformers to refresh.
-        """
-
-    def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        """Update the Newton frame-transform sensors from the reset state and mark the frame transformers outdated."""
-        # private: Newton has no public way to update its sensors outside a step; empty without Newton sensors
-        newton_sensors = NewtonManager._newton_frame_transform_sensors
-        if not newton_sensors:
-            return
-        # forward kinematics of the written joint states, then the sensors from the refreshed body poses
-        NewtonManager.forward()
-        state = NewtonManager.get_state_0()
-        for sensor in newton_sensors:
-            sensor.update(state)
-        # the frame transformers recompute lazily from the updated transforms at their next read
-        for sensor in self._sensors:
-            sensor.reset(env_ids)
 
 
 def _cloth_elements_per_env(

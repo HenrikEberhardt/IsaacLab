@@ -11,6 +11,7 @@ __all__ = [
     "cloth_target_displacement_b",
     "cloth_drag_success",
     "cloth_drag_drop_penalty",
+    "cloth_held",
     "cloth_drag_success_bonus",
     "cloth_drag_termination_penalty",
     "ClothGraspActionCfg",
@@ -41,9 +42,8 @@ __all__ = [
     "ee_velocity_b",
     "edge_included",
     "interior_nodes",
-    "RefreshFrameSensors",
+    "ClothRaisedNodes",
     "ResetClothWithRaisedNodes",
-    "ResetFromBank",
     "reset_cloth_planar_pose",
     "reset_franka_top_down",
     "reset_object_on_cloth_center",
@@ -94,7 +94,7 @@ from .curriculums import ActionRateCurriculum, ObservationHidingCurriculum
 from .events import (
     edge_included,
     interior_nodes,
-    RefreshFrameSensors,
+    ClothRaisedNodes,
     ResetClothWithRaisedNodes,
     reset_cloth_planar_pose,
     reset_franka_top_down,
@@ -124,13 +124,13 @@ from .observations import (
     target_pos_ee,
     termination_flag,
 )
-from .reset_bank import ResetFromBank
 from .rewards import (
     ClothDistanceProgress,
     GripperCloseProgress,
     action_term_l2,
     action_term_rate_l2,
     cloth_drag_drop_penalty,
+    cloth_held,
     cloth_drag_success_bonus,
     cloth_drag_termination_penalty,
     cloth_between_fingers,

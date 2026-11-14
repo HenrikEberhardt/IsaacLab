@@ -18,17 +18,17 @@ from isaaclab.utils import configclass
 class FrontierSamplerCfg:
     """Configuration for per-reset-state success-guided sampling."""
 
-    history_length: int = 4
-    """Number of recent next-stage outcomes retained per reset state."""
+    window_size: int = 4
+    """Number of recent next-stage outcomes per reset state that its success estimate averages over."""
 
     weight_increment: float = 1.0
     """Linear weight increase from one outcome to the next, oldest to newest."""
 
-    target_success_rate: float = 0.5
-    """Next-stage success rate at which the beta sampling kernel peaks."""
+    target_success_estimate: float = 0.5
+    """Success estimate of a reset state at which the beta sampling kernel peaks: states near it are drawn most."""
 
     kappa: float = 1.0
-    """Concentration of the beta sampling kernel around :attr:`target_success_rate`."""
+    """Concentration of the beta sampling kernel around :attr:`target_success_estimate`."""
 
     temperature: float = 2.0
     """Temperature applied to the beta-kernel logits, at least one."""
@@ -42,16 +42,16 @@ class FrontierSamplerCfg:
 
     def validate_values(self) -> None:
         """Validate values after construction or runtime overrides."""
-        if isinstance(self.history_length, bool) or not isinstance(self.history_length, int) or self.history_length < 1:
-            raise ValueError("history_length must be a positive integer.")
-        for name in ("weight_increment", "kappa", "temperature", "epsilon", "target_success_rate"):
+        if isinstance(self.window_size, bool) or not isinstance(self.window_size, int) or self.window_size < 1:
+            raise ValueError("window_size must be a positive integer.")
+        for name in ("weight_increment", "kappa", "temperature", "epsilon", "target_success_estimate"):
             value = getattr(self, name)
             if isinstance(value, bool) or not math.isfinite(float(value)):
                 raise ValueError(f"{name} must be finite.")
         if self.weight_increment < 0.0:
             raise ValueError("weight_increment must be non-negative.")
-        if not 0.0 < self.target_success_rate < 1.0:
-            raise ValueError("target_success_rate must lie strictly between zero and one.")
+        if not 0.0 < self.target_success_estimate < 1.0:
+            raise ValueError("target_success_estimate must lie strictly between zero and one.")
         if self.kappa <= 0.0:
             raise ValueError("kappa must be positive.")
         if self.temperature < 1.0:
@@ -75,7 +75,7 @@ class ResetStateFrontierSampler:
             raise ValueError("num_rows must be a positive integer.")
         cfg.validate_values()
         self.cfg = cfg
-        self.history = torch.zeros((num_rows, cfg.history_length), dtype=torch.bool, device=device)
+        self.history = torch.zeros((num_rows, cfg.window_size), dtype=torch.bool, device=device)
         """Circular next-stage outcome histories, shape [N, H]."""
         self.history_pointer = torch.zeros(num_rows, dtype=torch.long, device=device)
         """Next history column written for every reset state, shape [N]."""
@@ -84,7 +84,7 @@ class ResetStateFrontierSampler:
         self.success_rate = torch.zeros(num_rows, device=device)
         """Linearly weighted next-stage success estimate, shape [N]."""
         self._linear_weights = 1.0 + cfg.weight_increment * torch.arange(
-            cfg.history_length, dtype=torch.float32, device=device
+            cfg.window_size, dtype=torch.float32, device=device
         )
 
     def record(self, rows: torch.Tensor, success: torch.Tensor) -> None:
@@ -110,20 +110,16 @@ class ResetStateFrontierSampler:
             present = counts > offset
             update_rows = unique_rows[present]
             value_indices = starts[present] + offset
-            columns = (self.history_pointer[update_rows] + offset) % self.cfg.history_length
+            columns = (self.history_pointer[update_rows] + offset) % self.cfg.window_size
             self.history[update_rows, columns] = sorted_success[value_indices]
 
-        self.history_pointer[unique_rows] = (
-            self.history_pointer[unique_rows] + counts
-        ) % self.cfg.history_length
-        self.history_size[unique_rows] = (self.history_size[unique_rows] + counts).clamp(
-            max=self.cfg.history_length
-        )
+        self.history_pointer[unique_rows] = (self.history_pointer[unique_rows] + counts) % self.cfg.window_size
+        self.history_size[unique_rows] = (self.history_size[unique_rows] + counts).clamp(max=self.cfg.window_size)
         self._refresh_success_rates(unique_rows)
 
     def sampling_weights(self) -> torch.Tensor:
         """Return positive SGS beta-kernel weights for every reset state."""
-        target = self.cfg.target_success_rate
+        target = self.cfg.target_success_estimate
         rate = self.success_rate
         weights = (rate + self.cfg.epsilon).pow(self.cfg.kappa * target)
         weights *= (1.0 - rate + self.cfg.epsilon).pow(self.cfg.kappa * (1.0 - target))
@@ -154,9 +150,9 @@ class ResetStateFrontierSampler:
     def _refresh_success_rates(self, rows: torch.Tensor) -> None:
         """Recompute the weighted estimates of the given rows in chronological history order."""
         size = self.history_size[rows]
-        start = torch.where(size == self.cfg.history_length, self.history_pointer[rows], 0)
-        offsets = torch.arange(self.cfg.history_length, device=rows.device)
-        columns = (start.unsqueeze(1) + offsets.unsqueeze(0)) % self.cfg.history_length
+        start = torch.where(size == self.cfg.window_size, self.history_pointer[rows], 0)
+        offsets = torch.arange(self.cfg.window_size, device=rows.device)
+        columns = (start.unsqueeze(1) + offsets.unsqueeze(0)) % self.cfg.window_size
         values = self.history[rows.unsqueeze(1), columns].float()
         valid = offsets.unsqueeze(0) < size.unsqueeze(1)
         weights = self._linear_weights.unsqueeze(0) * valid

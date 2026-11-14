@@ -174,26 +174,49 @@ def raised_node_ids(env: ManagerBasedEnv, event_name: str | None = "reset_deform
     """Ids of the cloth nodes raised in the current episode, shape [num_envs, K], or None.
 
     The ids come from the reset event term ``event_name`` (:class:`~.events.ResetClothWithRaisedNodes`), which
-    redraws them, sorted, at every reset. Reset events run before the observation and command resets, so those see
-    the ids of the new episode.
+    redraws them, sorted, at every reset. A reset strategy without that event restores stored raised nodes instead;
+    the ids then come from its reset event that provides them. Reset events run before the observation and command
+    resets, so those see the ids of the new episode.
 
     Args:
         env: The environment.
         event_name: Name of the reset event term that raises the nodes. None => no raised nodes.
 
     Returns:
-        The live tensor of node ids, or None if the term is missing, raises no nodes, or ``event_name`` is None.
+        The live tensor of node ids, or None if no reset event raises nodes or ``event_name`` is None.
+    """
+    term = raised_nodes_term(env, event_name)
+    return None if term is None else term.raised_node_ids
+
+
+def raised_nodes_term(env: ManagerBasedEnv, event_name: str | None = "reset_deformable"):
+    """The reset event term that holds the raised cloth nodes of the current episode, or None.
+
+    This is the term ``event_name`` (:class:`~.events.ResetClothWithRaisedNodes`) or, in a reset strategy without it,
+    the reset event that restores stored raised nodes. The term has ``raised_node_ids`` and ``set_raised_nodes``.
+
+    Args:
+        env: The environment.
+        event_name: Name of the reset event term that raises the nodes. None => no raised nodes.
+
+    Returns:
+        The term, or None if no reset event raises nodes or ``event_name`` is None.
     """
     if event_name is None:
         return None
+    manager = env.event_manager
     try:
-        term = env.event_manager.get_term_cfg(event_name).func
+        names = [event_name] if manager.get_term_cfg(event_name) is not None else []
     except ValueError:
-        return None
-    ids = getattr(term, "raised_node_ids", None)
-    if ids is None or ids.shape[1] == 0:
-        return None
-    return ids
+        # another reset strategy: any reset event that provides raised nodes
+        names = getattr(manager, "active_terms", {}).get("reset", [])
+    for name in names:
+        term = manager.get_term_cfg(name).func
+        ids = getattr(term, "raised_node_ids", None)
+        # a term that is not set up yet shows its class, without ids
+        if isinstance(ids, torch.Tensor) and ids.shape[1] > 0:
+            return term
+    return None
 
 
 def cloth_center_pos_b(

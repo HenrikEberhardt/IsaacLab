@@ -13,7 +13,7 @@ event manager. The action and command resets clear the grasp and draw a new targ
 2. :func:`restore_task_state`, from the event term's reset hook after the manager resets: gripper and grasp state,
    target and stage, and the gripper entry of the action buffers.
 
-Both write only the given environments. :class:`~..mdp.reset_bank.ResetFromBank` calls them in that order.
+Both write only the given environments. :class:`~.reset_from_bank.ResetFromBank` calls them in that order.
 """
 
 from __future__ import annotations
@@ -22,12 +22,23 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .capture import GRASP_STATE_KEYS
-
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
     from .bank import ResetBank
+
+GRASP_STATE_KEYS = (
+    "closed",
+    "finger_target",
+    "grasp_tried",
+    "held_opening",
+    "active",
+    "grasped",
+    "grasp_offsets",
+    "squeeze_progress",
+    "contacts_disabled",
+)
+"""Entries of :meth:`~..mdp.actions.ClothGraspAction.get_grasp_state` that a reset state stores."""
 
 
 def restore_physical(
@@ -42,9 +53,9 @@ def restore_physical(
 ) -> None:
     """Write the physical state of the bank rows ``rows`` into the environments ``env_ids``.
 
-    Uses the same writes as the task's reset events, so the solvers see a reset like any other. The cloth rest shape
-    is set around the stored raised nodes through the reset event's
-    :meth:`~..mdp.events.ResetClothWithRaisedNodes.set_raised_nodes`.
+    Uses the same writes as the task's default reset events, so the solvers see a reset like any other. The cloth rest
+    shape is set around the stored raised nodes through the reset event that holds them
+    (:func:`~..mdp.frames.raised_nodes_term`, :meth:`~..mdp.events.ClothRaisedNodes.set_raised_nodes`).
 
     Args:
         env: The environment.
@@ -54,8 +65,10 @@ def restore_physical(
         robot_name: Scene name of the robot.
         cloth_name: Scene name of the cloth.
         cube_name: Scene name of the cube standing on the cloth, or None without one.
-        raised_nodes_event: Name of the reset event that raises the cloth nodes.
+        raised_nodes_event: Name of the reset event that raises the cloth nodes, if the reset strategy has one.
     """
+    from ..mdp.frames import raised_nodes_term
+
     # the asset writes pass the indices to warp kernels as they are, which take int32 like the env's reset indices
     env_ids = env_ids.to(dtype=torch.int32)
     scene = bank.data["scene"]
@@ -71,8 +84,7 @@ def restore_physical(
         pose[:, :3] += origins
         cube.write_root_pose_to_sim_index(root_pose=pose, env_ids=env_ids)
         cube.write_root_velocity_to_sim_index(root_velocity=scene["cube_root_vel"][rows], env_ids=env_ids)
-    raise_term = env.event_manager.get_term_cfg(raised_nodes_event).func
-    raise_term.set_raised_nodes(env_ids, bank.data["task"]["raised_node_ids"][rows])
+    raised_nodes_term(env, raised_nodes_event).set_raised_nodes(env_ids, bank.data["task"]["raised_node_ids"][rows])
 
 
 def restore_task_state(

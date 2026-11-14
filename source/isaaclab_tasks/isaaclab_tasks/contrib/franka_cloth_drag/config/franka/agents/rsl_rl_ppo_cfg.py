@@ -44,7 +44,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     action_dim_names = ["dx", "dy", "dz", "dyaw", "gripper"]
 
     actor = RslRlMLPModelCfg(
-        hidden_dims=[512, 256, 128, 64], #[256, 128, 64], #
+        hidden_dims=[512, 256, 128, 64],  # [256, 128, 64], #
         activation="elu",
         obs_normalization=True,
         # The bounds loss pulls a saturated mean back toward the nominal range
@@ -54,7 +54,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     )
 
     critic = RslRlMLPModelCfg(
-        hidden_dims=[512, 256, 128, 64], #[256, 128, 64], #
+        hidden_dims=[512, 256, 128, 64],  # [256, 128, 64], #
         activation="elu",
         obs_normalization=True,
     )
