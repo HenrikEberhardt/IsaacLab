@@ -119,6 +119,21 @@ def focus_stage_ratios(focus_id: int, minimum: torch.Tensor) -> torch.Tensor:
     return ratios
 
 
+def learning_progress_ratios(progress: torch.Tensor, minimum: torch.Tensor, eps: float = 0.01) -> torch.Tensor:
+    """Put every stage at its minimum and split the rest in proportion to the stages' learning progress.
+
+    Args:
+        progress: Absolute change of each stage's success over the learning-progress window, shape [M].
+        minimum: Minimum ratios in the same order, shape [M].
+        eps: Progress added to every stage, so no progress anywhere splits the rest evenly.
+
+    Returns:
+        The ratios in the same order, shape [M].
+    """
+    weights = progress.clamp(min=0.0) + eps
+    return minimum + (1.0 - minimum.sum()) * weights / weights.sum()
+
+
 def limit_ratio_shift(current: torch.Tensor, target: torch.Tensor, max_shift: float) -> torch.Tensor:
     """Move the ratios towards the target by at most ``max_shift`` in any stage.
 

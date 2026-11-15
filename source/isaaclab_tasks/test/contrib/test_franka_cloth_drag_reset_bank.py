@@ -42,6 +42,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.stage_ratios impo
     check_stage_ratios,
     focus_stage_ratios,
     handover_stage_ratios,
+    learning_progress_ratios,
     limit_ratio_shift,
     sample_reset_rows,
 )
@@ -640,6 +641,16 @@ def test_focus_stage_ratios_give_the_rest_to_the_focus():
         ([0.80, 0.10, 0.05, 0.05], [0.10, 0.80, 0.05, 0.05], [0.10, 0.10, 0.75, 0.05], [0.10, 0.10, 0.05, 0.75])
     ):
         assert focus_stage_ratios(focus_id, minimum).tolist() == pytest.approx(expected)
+
+
+def test_learning_progress_ratios_follow_the_change_of_success():
+    minimum = torch.full((4,), 0.10)
+    # all rest to the only stage that is learning, apart from the small even share of eps
+    ratios = learning_progress_ratios(torch.tensor([0.0, 0.30, 0.0, 0.0]), minimum, eps=0.0)
+    assert ratios.tolist() == pytest.approx([0.10, 0.70, 0.10, 0.10])
+    # a drop counts like a rise; no progress anywhere splits the rest evenly
+    assert learning_progress_ratios(torch.zeros(4), minimum).tolist() == pytest.approx([0.25] * 4)
+    assert learning_progress_ratios(torch.tensor([0.2, 0.2, 0.0, 0.0]), minimum, eps=0.0).sum() == pytest.approx(1.0)
 
 
 def test_focus_moves_on_once_the_focus_stage_is_solved(monkeypatch, tmp_path):

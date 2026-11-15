@@ -7,8 +7,10 @@ __all__ = [
     "ClothDragStage",
     "ClothDistanceProgress",
     "GripperCloseProgress",
+    "StageProgress",
     "ClothPointsInBaseFrame",
     "cloth_target_displacement_b",
+    "bank_start_advanced",
     "cloth_drag_success",
     "cloth_drag_drop_penalty",
     "cloth_held",
@@ -128,6 +130,7 @@ from .observations import (
 from .rewards import (
     ClothDistanceProgress,
     GripperCloseProgress,
+    StageProgress,
     action_term_l2,
     action_term_rate_l2,
     cloth_drag_drop_penalty,
@@ -161,4 +164,4 @@ from .rewards import (
     object_slip_speed,
 )
 from .stages import ClothDragStage
-from .terminations import cloth_drag_success, nonfinite_state, physics_contact
+from .terminations import bank_start_advanced, cloth_drag_success, nonfinite_state, physics_contact

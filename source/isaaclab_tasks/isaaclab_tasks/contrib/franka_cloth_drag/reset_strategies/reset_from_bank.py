@@ -25,6 +25,7 @@ from .stage_ratios import (
     check_stage_ratios,
     focus_stage_ratios,
     handover_stage_ratios,
+    learning_progress_ratios,
     limit_ratio_shift,
     sample_reset_rows,
 )
@@ -132,6 +133,13 @@ class ResetFromBank(ManagerTermBase):
             if not 0.0 < cfg.focus_advance_success <= 1.0 or cfg.focus_min_steps < 0:
                 raise ValueError("focus_advance_success must lie in (0, 1] and focus_min_steps be non-negative.")
             self._focus_ids = [START_STAGE_NAMES.index(stage) for stage in cfg.focus_order]
+        # learning-progress ratios: history of (step, stage success) to measure the change over the window
+        self._success_history: list[tuple[int, torch.Tensor]] = []
+        if cfg.learning_progress_window_steps is not None:
+            if self._min_ratios is None or cfg.focus_order is not None:
+                raise ValueError("learning_progress_window_steps needs min_stage_ratios and no focus_order.")
+            if cfg.learning_progress_window_steps <= 0:
+                raise ValueError("learning_progress_window_steps must be positive.")
             for stage_id in self._focus_ids:
                 if focus_stage_ratios(stage_id, self._min_ratios)[stage_id] <= 0.0:
                     raise ValueError(f"The minimum ratios leave nothing for focus stage {START_STAGE_NAMES[stage_id]}.")
@@ -359,6 +367,16 @@ class ResetFromBank(ManagerTermBase):
                 self._focus_since = step
                 focus_id = self._focus_ids[self._focus_pos]
             target = focus_stage_ratios(focus_id, self._min_ratios)
+        elif self.cfg.learning_progress_window_steps is not None:
+            window = self.cfg.learning_progress_window_steps
+            self._success_history.append((step, self._stage_success.clone()))
+            old = [entry for entry in self._success_history if entry[0] <= step - window]
+            if not old:
+                return
+            # keep the newest entry at least a window old as the reference
+            self._success_history = self._success_history[len(old) - 1 :]
+            progress = (self._stage_success - old[-1][1]).abs()
+            target = learning_progress_ratios(progress, self._min_ratios)
         else:
             target = handover_stage_ratios(
                 self._start_ratios, self._min_ratios, self._stage_success, self.cfg.ratio_shift_success_range

@@ -778,6 +778,39 @@ class GripperCloseProgress(ManagerTermBase):
         return reward
 
 
+class StageProgress(ManagerTermBase):
+    """Signed progress of the task stage (:class:`~.stages.ClothDragStage` index), paid per stage step.
+
+    The first call of an episode sets the reference at the stage the episode starts in, so a bank start pays only for
+    the stages it reaches itself. Entering the next stage pays one, falling back (leaving the grasp radius, dropping the
+    cloth, leaving the goal zone) takes back what the stages paid, so the return telescopes and cannot be farmed. Every
+    start stage gets the same dense "reach the next stage" signal.
+    """
+
+    def __init__(self, cfg: RewardTermCfg, env: ManagerBasedRLEnv):
+        """Initialize per-environment stage references."""
+        super().__init__(cfg, env)
+        self._previous_stage = torch.zeros(self.num_envs, device=self.device)
+        self._has_reference = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Invalidate the stage references of the selected environments."""
+        self._has_reference[slice(None) if env_ids is None else env_ids] = False
+
+    def __call__(self, env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:
+        """Return the stage change since the last call per control second.
+
+        Args:
+            env: The environment.
+            command_name: Name of the cloth target command.
+        """
+        stage = _command(env, command_name).stage.float()
+        reward = torch.where(self._has_reference, stage - self._previous_stage, 0.0) / env.step_dt
+        self._previous_stage.copy_(stage)
+        self._has_reference[:] = True
+        return reward
+
+
 def cloth_drag_success_bonus(env: ManagerBasedRLEnv, termination_name: str = "success") -> torch.Tensor:
     """Pay one on successful termination, compensating for reward-manager time integration."""
     return env.termination_manager.get_term(termination_name).float() / env.step_dt

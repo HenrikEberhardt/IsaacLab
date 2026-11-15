@@ -24,6 +24,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.cloth_grasp import ClothGraspC
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     ClothDistanceProgress,
     GripperCloseProgress,
+    StageProgress,
     cloth_drag_drop_penalty,
     cloth_drag_termination_penalty,
     cloth_held,
@@ -36,6 +37,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import (
     gripper_holds_raised_node,
     pad_box_mask,
 )
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.terminations import bank_start_advanced
 
 NUM_NODES = 6
 CFG = SimpleNamespace(gripper_action_name="gripper_action", raised_nodes_event="reset_deformable")
@@ -401,6 +403,34 @@ def test_ee_speed_penalty_scales_above_the_limit_and_respects_its_gates(monkeypa
     assert penalty(only_while_closing=True) == 0.0
     command.stage[:] = 2
     assert penalty() == 0.0
+
+
+def test_stage_progress_telescopes_from_the_start_stage():
+    command = SimpleNamespace(stage=torch.tensor([1, 0]))
+    env = SimpleNamespace(
+        num_envs=2, device="cpu", step_dt=0.5, command_manager=SimpleNamespace(get_term=lambda name: command)
+    )
+    term = StageProgress(SimpleNamespace(params={}), env)
+    paid = []
+    # a grasp start (env 0) and an approach start (env 1): the first call sets the reference and pays nothing
+    for stage in ([1, 0], [2, 1], [3, 2], [0, 0], [2, 2]):
+        command.stage = torch.tensor(stage)
+        paid.append(term(env) * env.step_dt)
+    total = torch.stack(paid).sum(dim=0)
+    assert paid[0].tolist() == [0.0, 0.0]
+    assert paid[1].tolist() == [1.0, 1.0]
+    # the return is the stage reached minus the start stage, whatever happened in between
+    assert total.tolist() == [1.0, 2.0]
+    term.reset([0])
+    command.stage = torch.tensor([3, 2])
+    assert (term(env) * env.step_dt).tolist() == [0.0, 0.0]
+
+
+def test_bank_start_advanced_ends_only_grasp_and_drag_starts_past_their_stage():
+    # starts: approach, grasp, grasp, drag, goal
+    command = SimpleNamespace(start_stage=torch.tensor([0, 1, 1, 2, 3]), stage=torch.tensor([3, 1, 2, 3, 3]))
+    env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda name: command))
+    assert bank_start_advanced(env).tolist() == [False, False, True, True, False]
 
 
 def test_termination_penalty_counts_each_terminated_episode_once_over_the_step():

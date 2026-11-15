@@ -93,3 +93,10 @@ class ResetFromBankCfg(EventTermCfg):
 
     focus_min_steps: int = 240
     """Smallest number of environment steps a stage stays the focus (10 iterations at 24 steps/iteration)."""
+
+    learning_progress_window_steps: int | None = None
+    """Window [environment steps] of the learning-progress ratios. Replaces the handover: every stage keeps its
+    :attr:`min_stage_ratios` entry (the approach entry included) and the rest is split in proportion to the absolute
+    change of each stage's success (as for the handover) over this window, so the resets go where the policy is
+    learning now. Until a full window has passed, the start ratios stay. None uses the handover. Used with
+    :attr:`min_stage_ratios`; not combined with :attr:`focus_order`."""

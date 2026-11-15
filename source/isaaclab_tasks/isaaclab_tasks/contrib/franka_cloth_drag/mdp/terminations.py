@@ -53,3 +53,17 @@ def physics_contact(env: ManagerBasedRLEnv, contact_name: str) -> torch.Tensor:
     touched = physics.contact_latch(contact_name).clone()
     physics.clear_contact_latch(contact_name)
     return touched
+
+
+def bank_start_advanced(env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:
+    """End an episode that started in the GRASP or DRAG stage of a reset bank once it reaches the next stage.
+
+    Use as a truncation (``time_out=True``) so the value of the reached stage is bootstrapped: bank starts become short,
+    stage-local episodes and the critic chains the stages. Approach and goal starts are never ended by it.
+    """
+    from .stages import ClothDragStage
+
+    command = env.command_manager.get_term(command_name)
+    start = command.start_stage
+    bank_start = (start == int(ClothDragStage.GRASP)) | (start == int(ClothDragStage.DRAG))
+    return bank_start & (command.stage > start)
