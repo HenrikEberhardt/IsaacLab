@@ -629,8 +629,8 @@ class AdaptiveResetsCfg:
         min_stage_ratios={"grasp": 0.10, "drag": 0.05, "goal": 0.05},
         # Ratio Changing Variables: a bank stage's smoothed stage success between these hands its ratio over
         # to approach; bank grasps keep helping real arrivals until about 0.8
-        ratio_shift_success_range=(0.80, 0.92),
-        ratio_max_shift_per_step=0.0008,  # 0.02 per iteration: a full grasp handover takes ~16 iterations
+        ratio_shift_success_range=(0.70, 0.85),
+        ratio_max_shift_per_step=0.0016,  # 0.04 per iteration: a full grasp handover takes ~10 iterations
         ratio_hold_steps=300,  # no adaptation over first 12.5 iterations
         # off: frontier starved never-solved grasp states (g0a); handover then uses the smoothed stage success
         use_frontier_sampling=False,
