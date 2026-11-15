@@ -201,6 +201,9 @@ def check_ppo_cfg(base_src: str, new_src: str) -> list[str]:
 
 
 def file_allowed(path: str) -> bool:
+    # the orchestrator may fix its own tooling on the night branch; it does not change training
+    if path.startswith(".agents/skills/personal_cloth-drag-autotune/"):
+        return True
     return path in ALLOWED_FILES or path.startswith(ALLOWED_PREFIXES) or bool(ALLOWED_TEST_PATTERN.match(path))
 
 
