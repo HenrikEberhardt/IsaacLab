@@ -623,15 +623,17 @@ class AdaptiveResetsCfg:
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
         bank_path="logs/reset_banks/bank_v8.pt",  # approach 8000, grasp 1000, drag 100, goal 100 states
-        start_stage_ratios={"approach": 0.4125, "grasp": 0.4125, "drag": 0.075, "goal": 0.10},  # as uniform_resets
+        # as the uniform_v8 reference run, normalized .381/.476/.071/.071
+        start_stage_ratios={"approach": 0.40, "grasp": 0.50, "drag": 0.075, "goal": 0.075},
         # approach never gives up ratio, so it has no minimum; it reaches at most 1 - 0.20 = 0.80
         min_stage_ratios={"grasp": 0.10, "drag": 0.05, "goal": 0.05},
-        # Ratio Changing Variables: a bank stage's mean per-state frontier success between these hands its ratio over
+        # Ratio Changing Variables: a bank stage's smoothed stage success between these hands its ratio over
         # to approach; bank grasps keep helping real arrivals until about 0.8
         ratio_shift_success_range=(0.80, 0.92),
         ratio_max_shift_per_step=0.0008,  # 0.02 per iteration: a full grasp handover takes ~16 iterations
         ratio_hold_steps=300,  # no adaptation over first 12.5 iterations
-        use_frontier_sampling=True,
+        # off: frontier starved never-solved grasp states (g0a); handover then uses the smoothed stage success
+        use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
         frontier_stages=("grasp", "drag", "goal"),  # the large approach bank is drawn uniformly
     )
