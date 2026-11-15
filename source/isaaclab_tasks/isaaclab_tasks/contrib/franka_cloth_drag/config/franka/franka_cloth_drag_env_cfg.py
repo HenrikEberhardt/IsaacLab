@@ -706,9 +706,13 @@ class RewardsCfg:
     #     weight=-10.0,
     # )
 
+    # -------------- Stage Potential --------------
+    # Telescoping reward on the stage index: entering the next stage pays, falling back takes it back
+    stage_progress = RewTerm(func=mdp.StageProgress, weight=10.0)
+
     # -------------- Task Rewards / Penalties --------------
     # Onetime reward after task success
-    success = RewTerm(func=mdp.cloth_drag_success_bonus, weight=75.0)
+    success = RewTerm(func=mdp.cloth_drag_success_bonus, weight=40.0)
     # Penalty for failing episode
     pen_termination = RewTerm(
         func=mdp.cloth_drag_termination_penalty,
