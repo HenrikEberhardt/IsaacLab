@@ -103,6 +103,22 @@ def handover_stage_ratios(
     return ratios
 
 
+def focus_stage_ratios(focus_id: int, minimum: torch.Tensor) -> torch.Tensor:
+    """Put every stage at its minimum and give the rest to the focus stage (reverse curriculum).
+
+    Args:
+        focus_id: Index of the focus stage in :data:`~..mdp.stages.START_STAGE_NAMES`.
+        minimum: Minimum ratios in the same order, shape [M]; the focus stage's is not used.
+
+    Returns:
+        The ratios in the same order, shape [M].
+    """
+    ratios = minimum.clone()
+    ratios[focus_id] = 0.0
+    ratios[focus_id] = 1.0 - ratios.sum()
+    return ratios
+
+
 def limit_ratio_shift(current: torch.Tensor, target: torch.Tensor, max_shift: float) -> torch.Tensor:
     """Move the ratios towards the target by at most ``max_shift`` in any stage.
 

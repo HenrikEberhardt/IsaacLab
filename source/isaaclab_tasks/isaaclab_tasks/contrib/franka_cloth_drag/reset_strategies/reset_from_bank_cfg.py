@@ -78,3 +78,18 @@ class ResetFromBankCfg(EventTermCfg):
 
     ratio_hold_steps: int = 0
     """Number of environment steps the adaptive ratios keep their start values. Used with :attr:`min_stage_ratios`."""
+
+    focus_order: tuple[str, ...] | None = None
+    """Stages to focus on one after another (reverse curriculum), e.g. ``("goal", "drag", "grasp", "approach")``.
+    Replaces the handover: every stage keeps its :attr:`min_stage_ratios` entry (the approach entry included) and the
+    focus stage gets the rest. The focus moves on, never back, once the focus stage's success (as for the handover,
+    see :attr:`ratio_shift_success_range`) reaches :attr:`focus_advance_success`, at the earliest
+    :attr:`focus_min_steps` after it became the focus. The ratios move at most :attr:`ratio_max_shift_per_step`. The
+    focus index into this tuple is logged as ``Reset/focus_stage``. None uses the handover. Used with
+    :attr:`min_stage_ratios`."""
+
+    focus_advance_success: float = 0.85
+    """Success of the focus stage at which the focus moves to the next stage of :attr:`focus_order`."""
+
+    focus_min_steps: int = 240
+    """Smallest number of environment steps a stage stays the focus (10 iterations at 24 steps/iteration)."""

@@ -7,6 +7,7 @@
 
 from types import SimpleNamespace
 
+import pytest
 import torch
 
 from isaaclab.managers import TerminationTermCfg as DoneTerm
@@ -18,6 +19,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_en
     RewardsCfg,
     TerminationsCfg,
 )
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp import rewards as rewards_module
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.cloth_grasp import ClothGraspConstraint
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     ClothDistanceProgress,
@@ -25,6 +27,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     cloth_drag_drop_penalty,
     cloth_drag_termination_penalty,
     cloth_held,
+    ee_speed_above,
     gripper_closed_off_grasp_node,
     gripper_closed_on_grasp_node,
 )
@@ -368,6 +371,36 @@ def test_ee_height_penalties_cover_drag_and_goal():
     cfg = RewardsCfg()
     assert cfg.pen_ee_height_drag.params["stages"] == ["drag"]
     assert cfg.pen_ee_height_goal.params["stages"] == ["goal"]
+
+
+def test_ee_speed_penalty_scales_above_the_limit_and_respects_its_gates(monkeypatch):
+    env, command, term = _grasp_reward_env([[0.0, 0.0, 0.0]])
+    state = {"speed": 0.0, "distance": 0.01}
+    monkeypatch.setattr(
+        rewards_module,
+        "ee_twist_in_base",
+        lambda *args: (torch.tensor([[state["speed"], 0.0, 0.0]]), torch.zeros(1, 3)),
+    )
+    monkeypatch.setattr(
+        rewards_module, "ee_grasp_node_distance", lambda *args, **kwargs: torch.tensor([state["distance"]])
+    )
+
+    def penalty(**params):
+        return ee_speed_above(env, 0.05, ["approach", "grasp"], hand_cfg=None, **params).item()
+
+    # zero up to the limit, linear above it, one from twice the limit
+    for speed, expected in ((0.04, 0.0), (0.075, 0.5), (0.2, 1.0)):
+        state["speed"] = speed
+        assert penalty() == pytest.approx(expected)
+    # gates: away from the grasp node, an open gripper, a stage outside the active ones
+    assert penalty(near_node_radius=0.03) == 1.0
+    state["distance"] = 0.05
+    assert penalty(near_node_radius=0.03) == 0.0
+    assert penalty(only_while_closing=True) == 1.0
+    term.closed[:] = False
+    assert penalty(only_while_closing=True) == 0.0
+    command.stage[:] = 2
+    assert penalty() == 0.0
 
 
 def test_termination_penalty_counts_each_terminated_episode_once_over_the_step():

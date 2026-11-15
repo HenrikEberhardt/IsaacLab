@@ -431,6 +431,42 @@ def ee_height_above(
     return _stage_gate((ee_height - max_height).clamp(min=0.0), command.stage, stages, saturate=False)
 
 
+def ee_speed_above(
+    env: ManagerBasedRLEnv,
+    max_speed: float,
+    stages: Sequence[str],
+    hand_cfg: SceneEntityCfg,
+    near_node_radius: float | None = None,
+    only_while_closing: bool = False,
+    command_name: str = "cloth_target",
+) -> torch.Tensor:
+    """Return the EE frame's speed above ``max_speed`` relative to ``max_speed``, clipped to [0, 1], in the active
+    stages. A penalty: it never saturates.
+
+    Near the grasp node it makes the approach arrive as slowly as the bank's grasp states were captured, and while
+    closing it keeps the EE still, so the grasp the policy learns from bank starts also works on its own arrivals.
+
+    Args:
+        env: The environment.
+        max_speed: EE speed up to which there is no penalty [m/s]; the penalty is one from twice this speed.
+        stages: Names of the stages the term is active in.
+        hand_cfg: The robot, with ``body_names`` selecting the hand body that carries the end-effector frame.
+        near_node_radius: Only count steps with the EE frame origin this close to the grasp node [m]; None counts
+            all.
+        only_while_closing: Only count steps on which the gripper is commanded closed.
+        command_name: Name of the cloth target command.
+    """
+    command = _command(env, command_name)
+    ee_vel_b, _ = ee_twist_in_base(env, hand_cfg, SceneEntityCfg(command.cfg.ee_frame_name))
+    penalty = ((torch.linalg.norm(ee_vel_b, dim=1) - max_speed) / max_speed).clamp(0.0, 1.0)
+    if near_node_radius is not None:
+        near = ee_grasp_node_distance(env, command.cfg, command.grasp_node_id) < near_node_radius
+        penalty = penalty * near.float()
+    if only_while_closing:
+        penalty = penalty * gripper_closing(env, command.cfg).float()
+    return _stage_gate(penalty, command.stage, stages, saturate=False)
+
+
 def object_slip_speed(
     env: ManagerBasedRLEnv,
     threshold: float,

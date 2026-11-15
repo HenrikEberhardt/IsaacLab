@@ -40,6 +40,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.frontier import (
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.stage_ratios import (
     check_min_stage_ratios,
     check_stage_ratios,
+    focus_stage_ratios,
     handover_stage_ratios,
     limit_ratio_shift,
     sample_reset_rows,
@@ -631,6 +632,80 @@ def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path, max_
     for step in range(9, 15):
         shares = goal_batch(step=step)[1]
     assert shares == pytest.approx(start)
+
+
+def test_focus_stage_ratios_give_the_rest_to_the_focus():
+    minimum = torch.tensor([0.10, 0.10, 0.05, 0.05])
+    for focus_id, expected in enumerate(
+        ([0.80, 0.10, 0.05, 0.05], [0.10, 0.80, 0.05, 0.05], [0.10, 0.10, 0.75, 0.05], [0.10, 0.10, 0.05, 0.75])
+    ):
+        assert focus_stage_ratios(focus_id, minimum).tolist() == pytest.approx(expected)
+
+
+def test_focus_moves_on_once_the_focus_stage_is_solved(monkeypatch, tmp_path):
+    success = torch.ones(4)
+    bank = _bank([0, 1, 2, 3])
+    bank.save(tmp_path / "bank.pt")
+    floors = {"approach": 0.10, "grasp": 0.10, "drag": 0.10, "goal": 0.10}
+    term, env = _reset_term(
+        monkeypatch,
+        bank,
+        success,
+        bank_path=str(tmp_path / "bank.pt"),
+        start_stage_ratios={"approach": 0.10, "grasp": 0.10, "drag": 0.10, "goal": 0.70},
+        min_stage_ratios=floors,
+        ratio_max_shift_per_step=1.0,
+        focus_order=("goal", "drag"),
+        focus_advance_success=0.85,
+        focus_min_steps=3,
+        window_steps=3,
+    )
+    drawn = []
+
+    def record_shares(_, shares, num):
+        drawn.append(shares.tolist())
+        return torch.full((num,), -1)
+
+    monkeypatch.setattr(reset_from_bank, "sample_reset_rows", record_shares)
+    all_envs, goal_envs = torch.arange(4), torch.arange(1, 4)
+
+    def goal_batch(step):
+        term.force_rows(goal_envs, torch.full((3,), 3))
+        return _reset(term, env, all_envs, step=step)
+
+    goal_focus, drag_focus = [0.10, 0.10, 0.10, 0.70], [0.10, 0.10, 0.70, 0.10]
+    # solved goal starts from the first episodes, but the focus stays for focus_min_steps
+    for step in range(3):
+        log = goal_batch(step)
+        assert drawn[-1] == pytest.approx(goal_focus)
+    assert log["Reset/focus_stage"] == 0.0
+    log = goal_batch(3)
+    assert drawn[-1] == pytest.approx(drag_focus) and log["Reset/focus_stage"] == 1.0
+    # the focus never moves back, and the last stage of the order stays the focus
+    success.zero_()
+    for step in range(4, 10):
+        log = goal_batch(step)
+    assert drawn[-1] == pytest.approx(drag_focus) and log["Reset/focus_stage"] == 1.0
+
+
+def test_focus_settings_are_checked(monkeypatch, tmp_path):
+    _bank([0, 1, 2, 3]).save(tmp_path / "bank.pt")
+    ratios = {"approach": 0.25, "grasp": 0.25, "drag": 0.25, "goal": 0.25}
+    floors = {"approach": 0.10, "grasp": 0.10, "drag": 0.10, "goal": 0.10}
+
+    def build(focus_order, min_stage_ratios=floors):
+        params = {"bank_path": str(tmp_path / "bank.pt"), "start_stage_ratios": ratios, "focus_order": focus_order}
+        if min_stage_ratios is not None:
+            params["min_stage_ratios"] = min_stage_ratios
+        _reset_term(monkeypatch, None, torch.ones(1), **params)
+
+    with pytest.raises(ValueError, match="distinct"):
+        build(("goal", "goal"))
+    with pytest.raises(ValueError, match="distinct"):
+        build(("unknown",))
+    with pytest.raises(ValueError, match="needs min_stage_ratios"):
+        build(("goal",), min_stage_ratios=None)
+    build(("goal", "drag", "grasp", "approach"))
 
 
 def test_handover_reads_the_per_state_frontier_success(monkeypatch, tmp_path):

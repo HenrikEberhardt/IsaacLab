@@ -625,12 +625,10 @@ class AdaptiveResetsCfg:
         bank_path="logs/reset_banks/bank_v8.pt",
         start_stage_ratios={"approach": 0.40, "grasp": 0.50, "drag": 0.075, "goal": 0.075},
         min_stage_ratios={"grasp": 0.15, "drag": 0.05, "goal": 0.05},
-
         # Ratio Changing Variables
         ratio_shift_success_range=(0.70, 0.95),
         ratio_max_shift_per_step=0.0016,
         ratio_hold_steps=300,
-
         # Frontier Sampling
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,

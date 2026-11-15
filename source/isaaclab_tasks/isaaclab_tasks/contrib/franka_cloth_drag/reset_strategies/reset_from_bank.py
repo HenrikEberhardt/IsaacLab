@@ -23,6 +23,7 @@ from .restore import restore_physical, restore_task_state
 from .stage_ratios import (
     check_min_stage_ratios,
     check_stage_ratios,
+    focus_stage_ratios,
     handover_stage_ratios,
     limit_ratio_shift,
     sample_reset_rows,
@@ -118,6 +119,22 @@ class ResetFromBank(ManagerTermBase):
             self._min_ratios = check_min_stage_ratios(
                 cfg.min_stage_ratios, self._start_ratios, cfg.ratio_shift_success_range
             )
+        # reverse curriculum: stage ids in focus order, the position of the focus in it and the step it started
+        self._focus_ids: list[int] | None = None
+        self._focus_pos = 0
+        self._focus_since = 0
+        if cfg.focus_order is not None:
+            if self._min_ratios is None:
+                raise ValueError("focus_order needs min_stage_ratios as the floors of the stages.")
+            unknown = set(cfg.focus_order) - set(START_STAGE_NAMES)
+            if unknown or len(set(cfg.focus_order)) != len(cfg.focus_order) or not cfg.focus_order:
+                raise ValueError(f"focus_order must name distinct stages of {START_STAGE_NAMES}: {cfg.focus_order}.")
+            if not 0.0 < cfg.focus_advance_success <= 1.0 or cfg.focus_min_steps < 0:
+                raise ValueError("focus_advance_success must lie in (0, 1] and focus_min_steps be non-negative.")
+            self._focus_ids = [START_STAGE_NAMES.index(stage) for stage in cfg.focus_order]
+            for stage_id in self._focus_ids:
+                if focus_stage_ratios(stage_id, self._min_ratios)[stage_id] <= 0.0:
+                    raise ValueError(f"The minimum ratios leave nothing for focus stage {START_STAGE_NAMES[stage_id]}.")
         self.rows = torch.full((env.num_envs,), -1, dtype=torch.long, device=env.device)
         """Bank row the current episode of every environment started from, -1 without a stored state."""
         self._forced_rows = torch.full_like(self.rows, -1)
@@ -331,9 +348,21 @@ class ResetFromBank(ManagerTermBase):
                 self._stage_success[stage_id] = successes[stage_id] / counts[stage_id]
         if step < self.cfg.ratio_hold_steps:
             return
-        target = handover_stage_ratios(
-            self._start_ratios, self._min_ratios, self._stage_success, self.cfg.ratio_shift_success_range
-        )
+        if self._focus_ids is not None:
+            focus_id = self._focus_ids[self._focus_pos]
+            if (
+                self._focus_pos < len(self._focus_ids) - 1
+                and step - self._focus_since >= self.cfg.focus_min_steps
+                and self._stage_success[focus_id] >= self.cfg.focus_advance_success
+            ):
+                self._focus_pos += 1
+                self._focus_since = step
+                focus_id = self._focus_ids[self._focus_pos]
+            target = focus_stage_ratios(focus_id, self._min_ratios)
+        else:
+            target = handover_stage_ratios(
+                self._start_ratios, self._min_ratios, self._stage_success, self.cfg.ratio_shift_success_range
+            )
         elapsed = 1 if self._last_ratio_step is None else max(step - self._last_ratio_step, 0)
         self._ratios = limit_ratio_shift(self._ratios, target, self.cfg.ratio_max_shift_per_step * elapsed)
         self._last_ratio_step = step
@@ -343,7 +372,10 @@ class ResetFromBank(ManagerTermBase):
         if self._min_ratios is None:
             return {}
         values = self._stage_success.tolist()
-        return {f"Reset/handover_success_{name}": values[i] for i, name in enumerate(START_STAGE_NAMES) if i > 0}
+        log = {f"Reset/handover_success_{name}": values[i] for i, name in enumerate(START_STAGE_NAMES) if i > 0}
+        if self._focus_ids is not None:
+            log["Reset/focus_stage"] = float(self._focus_pos)
+        return log
 
     def _row_weights(self) -> torch.Tensor:
         """Frontier weights of the stored states of the ``frontier_stages``, 1 for the states of the other stages."""
