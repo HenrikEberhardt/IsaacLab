@@ -375,9 +375,15 @@ def cmd_launch(args) -> int:
                 log("\n".join(f"VIOLATION {v}" for v in violations))
                 return 6
 
-        # The GPU must still be free after the smoke run.
-        gpu2, preflight = pick_gpu()
-        free_now = re.search(rf"^{gpu}\s+\S+\s+\S+\s+free", preflight, re.M)
+        # The GPU must still be free after the smoke run. Our own smoke run leaves utilization above the
+        # threshold for a few seconds after it exits, so re-check a few times (thresholds unchanged).
+        for attempt in range(4):
+            if attempt:
+                time.sleep(15)
+            gpu2, preflight = pick_gpu()
+            free_now = re.search(rf"^{gpu}\s+\S+\s+\S+\s+free", preflight, re.M)
+            if free_now:
+                break
         if not free_now:
             log(preflight)
             log(f"NO_FREE_GPU GPU {gpu} was taken during the smoke run; nothing started")
