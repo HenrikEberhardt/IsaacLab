@@ -625,11 +625,11 @@ class AdaptiveResetsCfg:
         bank_path="logs/reset_banks/bank_v8.pt",  # approach 8000, grasp 1000, drag 100, goal 100 states
         # as the uniform_v8 reference run, normalized .381/.476/.071/.071
         start_stage_ratios={"approach": 0.40, "grasp": 0.50, "drag": 0.075, "goal": 0.075},
-        # approach never gives up ratio, so it has no minimum; it reaches at most 1 - 0.20 = 0.80
-        min_stage_ratios={"grasp": 0.10, "drag": 0.05, "goal": 0.05},
+        # approach never gives up ratio, so it has no minimum; it reaches at most 1 - 0.25 = 0.75
+        min_stage_ratios={"grasp": 0.15, "drag": 0.05, "goal": 0.05},
         # Ratio Changing Variables: a bank stage's smoothed stage success between these hands its ratio over
         # to approach; bank grasps keep helping real arrivals until about 0.8
-        ratio_shift_success_range=(0.70, 0.85),
+        ratio_shift_success_range=(0.70, 0.95),  # same start as g1b, gentler approach to the grasp floor (g4b)
         ratio_max_shift_per_step=0.0016,  # 0.04 per iteration: a full grasp handover takes ~10 iterations
         ratio_hold_steps=300,  # no adaptation over first 12.5 iterations
         # off: frontier starved never-solved grasp states (g0a); handover then uses the smoothed stage success
