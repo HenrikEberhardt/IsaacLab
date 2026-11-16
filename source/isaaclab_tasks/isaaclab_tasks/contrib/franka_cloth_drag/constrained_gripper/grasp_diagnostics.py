@@ -121,9 +121,7 @@ class GraspDiagnostics:
         """
         env, cfg = self._env, self._cfg
         term = env.action_manager.get_term(cfg.gripper_action_name)
-        constraint = getattr(term, "constraint", None)
-        if constraint is None:
-            return
+        constraint = term.constraint
         dt = env.step_dt
         closed = gripper_closing(env, cfg)
         tried = term.grasp_tried

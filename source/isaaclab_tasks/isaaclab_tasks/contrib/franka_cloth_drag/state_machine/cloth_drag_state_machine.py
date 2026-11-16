@@ -363,7 +363,7 @@ class DragClothSm:
             num_envs: The number of environments to simulate.
             device: The device to run the state machine on.
             hover_height: Height of the hover pose above the grasp node [m].
-            grasp_height: End-effector height with the open fingertips resting on the cloth [m].
+            grasp_height: End-effector height of the squeeze, with the closed fingertips just above the table [m].
             drag_height: End-effector height while dragging [m], the start value of every environment.
             drag_speed: Speed of the drag [m/s], the start value of every environment.
             goal_tolerance: Planar distance of the goal point to the target at which the drag stops [m].
@@ -544,6 +544,7 @@ def pad_cloth_gaps(
     ee_quat_w: torch.Tensor,
     nodes_w: torch.Tensor,
     opening: torch.Tensor,
+    pad_shift: torch.Tensor,
     pad_half_width: float,
     pad_thickness: float,
     pad_half_length: float,
@@ -551,8 +552,9 @@ def pad_cloth_gaps(
 ) -> torch.Tensor:
     """Gap between the lower end of each finger pad and the cloth surface below it [m], shape [N, 2].
 
-    The gap is measured along the EE frame's z-axis, which points from the hand to the finger ends, to the highest
-    cloth surface (node minus the layer half thickness) in the pad's footprint. Negative gaps press into the cloth.
+    The pads are centered ``pad_shift`` along the EE frame's z-axis, which points from the hand to the finger ends. The
+    gap is measured along it to the highest cloth surface (node minus the layer half thickness) in the pad's footprint.
+    Negative gaps press into the cloth.
     A pad without a node in its footprint has a NaN gap.
 
     Args:
@@ -560,6 +562,7 @@ def pad_cloth_gaps(
         ee_quat_w: EE frame orientations (x, y, z, w) in the world frame, shape [N, 4].
         nodes_w: Cloth node positions in the world frame [m], shape [N, P, 3].
         opening: Distance of each pad's inner face from the EE frame origin [m], shape [N].
+        pad_shift: Position of the pads' centers along the EE frame's z-axis [m], shape [N].
         pad_half_width: Half width of the pads along the EE frame's x-axis [m].
         pad_thickness: Thickness of the pads along the EE frame's y-axis [m].
         pad_half_length: Half length of the pads along the EE frame's z-axis [m].
@@ -569,7 +572,7 @@ def pad_cloth_gaps(
 
     quat = ee_quat_w.unsqueeze(1).expand(-1, nodes_w.shape[1], -1)
     rel = quat_apply_inverse(quat, nodes_w - ee_pos_w.unsqueeze(1))
-    surface_gap = rel[..., 2] - layer_half_thickness - pad_half_length
+    surface_gap = rel[..., 2] - layer_half_thickness - pad_half_length - pad_shift.unsqueeze(1)
     in_width = rel[..., 0].abs() <= pad_half_width
     inner = opening.unsqueeze(1)
     gaps = []

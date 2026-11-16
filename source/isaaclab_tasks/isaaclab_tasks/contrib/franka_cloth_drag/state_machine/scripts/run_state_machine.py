@@ -28,7 +28,7 @@ in every reset environment.
 
     SM=source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag/state_machine/scripts
 
-    # Viser web viewer on port 8750 (default); open http://localhost:8750.
+    # Viser web viewer on port 8752; open http://localhost:8752.
     uv run python $SM/run_state_machine.py --num_envs 4
 
     # Headless, a fixed number of steps.
@@ -42,10 +42,18 @@ import sys
 import gymnasium as gym
 import torch
 import warp as wp
+from isaaclab_visualizers.viser import ViserVisualizerCfg
 
 from isaaclab.app import add_launcher_args, launch_simulation
 
 import isaaclab_tasks  # noqa: F401
+from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import DefaultResetsCfg
+from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper import pad_gap_from_joint, pad_shift_from_joint
+from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.robotiq import (
+    ROBOTIQ_PAD_HALF_LENGTH,
+    ROBOTIQ_PAD_HALF_WIDTH,
+    ROBOTIQ_PAD_THICKNESS,
+)
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownDeltaEEActionCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
     HOVER_MARGIN,
@@ -61,6 +69,8 @@ from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
 )
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
+VISER_PORT = 8752
+
 # add argparse arguments
 parser = argparse.ArgumentParser(description="Drag a cloth to a target with a robotic arm.")
 parser.add_argument("--num_envs", type=int, default=1, help="Number of environments to simulate.")
@@ -75,16 +85,16 @@ parser.add_argument(
 parser.add_argument(
     "--grasp_height",
     type=float,
-    default=0.0095,
+    default=0.0195,
     help=(
-        "End-effector height commanded for the squeeze [m], at least the action's floor. The hand comes to rest with"
-        " the pads on the cloth at about 12.3 mm, so 9.5 mm presses the open pads onto the cloth."
+        "End-effector height commanded for the squeeze [m], at least the action's floor. The closing pads move"
+        " 13.5 mm towards the fingertips, which end 19 mm below the end-effector frame."
     ),
 )
 parser.add_argument(
     "--drag_height",
     type=float,
-    default=0.02,
+    default=0.031,
     help="End-effector height while dragging [m], at most the task's success height.",
 )
 parser.add_argument(
@@ -107,6 +117,8 @@ wp.init()
 def main():
     # parse configuration via Hydra, so presets can be selected on the CLI
     env_cfg, _ = resolve_task_config(args_cli.task, "")
+    # The scripted expert always starts at the beginning of the task, independent of training reset presets.
+    env_cfg.events = DefaultResetsCfg()
     if args_cli.device is not None:
         env_cfg.sim.device = args_cli.device
     args_cli.device = env_cfg.sim.device
@@ -117,13 +129,18 @@ def main():
         env_cfg.episode_length_s = args_cli.episode_length
     env_cfg.terminations.success = None
     env_cfg.rewards.success = None
-    # the state machine detects an empty grasp by the locked nodes of the task's gripper action
-    env_cfg.actions.gripper_action.attach = True
     if not isinstance(env_cfg.actions.arm_action, TopDownDeltaEEActionCfg):
         raise SystemExit("The state machine commands the delta end-effector action: use the 'ee_delta' actions preset.")
     # turn the hand faster than the task's yaw scale allows
     env_cfg.actions.arm_action.scale_rot = YAW_ACTION_SCALE
     keep_requested_visualizers(env_cfg, args_cli.visualizer)
+    if args_cli.visualizer is not None and "viser" in args_cli.visualizer:
+        viser_cfgs = [cfg for cfg in env_cfg.sim.visualizer_cfgs if cfg.visualizer_type == "viser"]
+        if viser_cfgs:
+            for cfg in viser_cfgs:
+                cfg.port = VISER_PORT
+        else:
+            env_cfg.sim.visualizer_cfgs.append(ViserVisualizerCfg(port=VISER_PORT))
 
     with launch_simulation(env_cfg, args_cli):
         from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import ClothDragStage
@@ -140,7 +157,8 @@ def main():
         gripper = unwrapped.action_manager.get_term("gripper_action")
         arm_cfg = unwrapped.action_manager.get_term("arm_action").cfg
         cloth, robot = unwrapped.scene["deformable"], unwrapped.scene["robot"]
-        finger_joint_id = robot.find_joints("panda_finger_joint1")[0][0]
+        finger_joint_id = robot.find_joints(gripper.cfg.finger_joint_name)[0][0]
+        close_joint_pos = gripper.cfg.close_command_expr[gripper.cfg.finger_joint_name]
 
         # heights from the task: hover inside the approach radius, touch above the action's floor, drag below the
         # success height
@@ -242,14 +260,18 @@ def main():
             hover_ready = torch.where((new_state == DragSmState.APPROACH_ABOVE_CLOTH).unsqueeze(1), hover_ready, -1.0)
             touched = (previous_state == DragSmState.APPROACH_CLOTH) & (new_state == DragSmState.GRASP_CLOTH)
             if touched.any():
+                finger_pos = robot.data.joint_pos.torch[:, finger_joint_id]
                 gaps = pad_cloth_gaps(
                     ee_frame.data.target_pos_w.torch[:, 0],
                     ee_frame.data.target_quat_w.torch[:, 0],
                     cloth.data.nodal_pos_w.torch,
-                    robot.data.joint_pos.torch[:, finger_joint_id],
-                    gripper.cfg.contact_pad_half_width,
-                    gripper.cfg.contact_pad_thickness,
-                    gripper.cfg.finger_pad_half_length,
+                    0.5 * pad_gap_from_joint(finger_pos, gripper.cfg.gap_curve),
+                    pad_shift_from_joint(
+                        finger_pos, gripper.cfg.gap_curve, close_joint_pos, gripper.cfg.pad_path_direction
+                    ),
+                    ROBOTIQ_PAD_HALF_WIDTH,
+                    ROBOTIQ_PAD_THICKNESS,
+                    ROBOTIQ_PAD_HALF_LENGTH,
                     layer_half_thickness,
                 )
                 for env_id in touched.nonzero(as_tuple=False).squeeze(-1).tolist():
@@ -260,10 +282,10 @@ def main():
                     )
             grasped = (previous_state == DragSmState.GRASP_CLOTH) & (new_state == DragSmState.DRAG_CLOTH)
             for env_id in grasped.nonzero(as_tuple=False).squeeze(-1).tolist():
-                opening_mm = robot.data.joint_pos.torch[env_id, finger_joint_id].item() * 1e3
+                gap = pad_gap_from_joint(robot.data.joint_pos.torch[env_id, finger_joint_id], gripper.cfg.gap_curve)
                 print(
-                    f"[INFO]: env {env_id}: grasped node {runner.grasp_node[env_id].item()} at a finger opening of"
-                    f" {opening_mm:.1f} mm, locked {gripper.num_grasped[env_id].item()} cloth nodes."
+                    f"[INFO]: env {env_id}: grasped node {runner.grasp_node[env_id].item()} at a pad gap of"
+                    f" {gap.item() * 1e3:.1f} mm, locked {gripper.num_grasped[env_id].item()} cloth nodes."
                 )
             retried = (previous_state == DragSmState.GRASP_CLOTH) & (new_state == DragSmState.APPROACH_ABOVE_CLOTH)
             for env_id in retried.nonzero(as_tuple=False).squeeze(-1).tolist():

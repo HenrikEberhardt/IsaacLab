@@ -3,7 +3,12 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""State of the constrained gripper: its command, finger opening and the cloth nodes between its pads.
+"""State of the constrained Robotiq gripper: its command, pad gap and the cloth nodes between its pads.
+
+The Robotiq 2F-85 is driven by one joint angle ``q`` [rad] that grows while closing. A parallel linkage moves each pad
+on a circle, so the gap between the pad faces and the pad's position along the finger are both functions of ``q``, see
+:func:`pad_gap_from_joint` and :func:`pad_shift_from_joint`. The EE frame sits at the center of the closed pads, so a
+pad that is open sits behind it along the frame's z-axis by its shift.
 
 Every function takes the cloth target command configuration for the scene names and reads the gripper settings
 (finger joint, pad box) from the gripper action term it names, see :func:`gripper_cfg`.
@@ -18,12 +23,35 @@ import torch
 from isaaclab.utils.math import quat_apply_inverse
 
 if TYPE_CHECKING:
-    from isaaclab.assets import Articulation, DeformableObject
+    from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedEnv
     from isaaclab.sensors import FrameTransformer
 
     from ..mdp.commands_cfg import ClothTargetCommandCfg
     from .grasp_action_cfg import ClothGraspActionCfg
+
+
+def pad_gap_from_joint(q: torch.Tensor, curve: tuple[float, float, float]) -> torch.Tensor:
+    """Distance [m] between the pad faces at finger joint angle ``q`` [rad], ``a - b * sin(q + c)``."""
+    a, b, c = curve
+    return a - b * torch.sin(q + c)
+
+
+def joint_from_pad_gap(gap: torch.Tensor, curve: tuple[float, float, float]) -> torch.Tensor:
+    """Return the finger joint angle [rad] at which the pad faces are ``gap`` [m] apart (inverse of the gap curve)."""
+    a, b, c = curve
+    return torch.asin(((a - gap) / b).clamp(-1.0, 1.0)) - c
+
+
+def pad_shift_from_joint(
+    q: torch.Tensor, curve: tuple[float, float, float], closed_q: float, direction: float
+) -> torch.Tensor:
+    """Position [m] of the pads along the EE frame's z-axis at angle ``q`` [rad], zero when closed at ``closed_q``.
+
+    The pads move on a circle of radius ``b / 2``: ``direction * b / 2 * (cos(q + c) - cos(closed_q + c))``.
+    """
+    _, b, c = curve
+    return direction * 0.5 * b * (torch.cos(q + c) - torch.cos(torch.as_tensor(closed_q + c, device=q.device)))
 
 
 def gripper_cfg(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> ClothGraspActionCfg:
@@ -32,30 +60,49 @@ def gripper_cfg(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> ClothGraspA
 
 
 def gripper_closing(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
-    """Whether the binary gripper action commands closing. Shape is (num_envs,)."""
-    term = env.action_manager.get_term(cfg.gripper_action_name)
-    if hasattr(term, "closed"):
-        return term.closed
-    return torch.any(term.raw_actions < 0.0, dim=1)
+    """Whether the gripper action commands closing. Shape is (num_envs,)."""
+    return env.action_manager.get_term(cfg.gripper_action_name).closed
 
 
-def finger_opening(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
-    """Measured half the distance [m] between the finger joint positions."""
+def finger_joint_pos(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Measured angle [rad] of the driven finger joint, which grows while closing. Shape is (num_envs,)."""
     robot: Articulation = env.scene[cfg.asset_name]
     finger_ids, _ = robot.find_joints(gripper_cfg(env, cfg).finger_joint_name)
     return robot.data.joint_pos.torch[:, finger_ids[0]]
 
 
+def pad_gap(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Measured distance [m] between the pad faces. Shape is (num_envs,)."""
+    return pad_gap_from_joint(finger_joint_pos(env, cfg), gripper_cfg(env, cfg).gap_curve)
+
+
+def finger_opening(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Measured half the distance [m] between the pad faces. Shape is (num_envs,)."""
+    return 0.5 * pad_gap(env, cfg)
+
+
+def pad_shift(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
+    """Measured position [m] of the pads along the EE frame's z-axis, zero when closed. Shape is (num_envs,)."""
+    action_cfg = gripper_cfg(env, cfg)
+    closed_q = action_cfg.close_command_expr[action_cfg.finger_joint_name]
+    return pad_shift_from_joint(
+        finger_joint_pos(env, cfg), action_cfg.gap_curve, closed_q, action_cfg.pad_path_direction
+    )
+
+
 def gripper_closure(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
     """Measured closure of the gripper, zero at its open command and one at its close command. Shape is (num_envs,)."""
     action_cfg = gripper_cfg(env, cfg)
-    open_opening = action_cfg.open_command_expr[action_cfg.finger_joint_name]
-    close_opening = action_cfg.close_command_expr[action_cfg.finger_joint_name]
-    return ((open_opening - finger_opening(env, cfg)) / (open_opening - close_opening)).clamp(0.0, 1.0)
+    open_q = action_cfg.open_command_expr[action_cfg.finger_joint_name]
+    close_q = action_cfg.close_command_expr[action_cfg.finger_joint_name]
+    return ((finger_joint_pos(env, cfg) - open_q) / (close_q - open_q)).clamp(0.0, 1.0)
 
 
 def pad_box_mask(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg, points_w: torch.Tensor) -> torch.Tensor:
-    """Whether each point lies between the finger pads. Shape is (num_envs, num_points)."""
+    """Whether each point lies between the finger pads. Shape is (num_envs, num_points).
+
+    The box follows the pads: it is centered on the EE frame's origin shifted by :func:`pad_shift` along its z-axis.
+    """
     action_cfg = gripper_cfg(env, cfg)
     ee_frame: FrameTransformer = env.scene[cfg.ee_frame_name]
     ee_pos_w = ee_frame.data.target_pos_w.torch[:, 0]
@@ -66,24 +113,15 @@ def pad_box_mask(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg, points_w: tor
     return (
         (rel_ee[..., 0].abs() <= action_cfg.finger_pad_half_width)
         & (rel_ee[..., 1].abs() <= half_gap)
-        & (rel_ee[..., 2].abs() <= action_cfg.finger_pad_half_length)
+        & ((rel_ee[..., 2] - pad_shift(env, cfg).unsqueeze(1)).abs() <= action_cfg.finger_pad_half_length)
     )
-
-
-def nodes_between_fingers(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
-    """Number of cloth nodes between the finger pads."""
-    cloth: DeformableObject = env.scene[cfg.object_name]
-    return pad_box_mask(env, cfg, cloth.data.nodal_pos_w.torch).sum(dim=1)
 
 
 def nodes_in_grasp(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
     """Number of cloth nodes a grasp would lock now. Shape is (num_envs,)."""
-    constraint = getattr(env.action_manager.get_term(cfg.gripper_action_name), "constraint", None)
-    if constraint is None:
-        return nodes_between_fingers(env, cfg)
-    return constraint.select().sum(dim=1)
+    return env.action_manager.get_term(cfg.gripper_action_name).constraint.select().sum(dim=1)
 
 
 def gripper_holds_cloth(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:
-    """Whether the gripper holds the cloth with constraints or friction."""
+    """Whether the gripper holds cloth nodes locked to the EE frame. Shape is (num_envs,)."""
     return env.action_manager.get_term(cfg.gripper_action_name).is_grasping

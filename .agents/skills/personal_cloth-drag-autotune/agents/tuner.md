@@ -37,9 +37,10 @@ Task dir `T=source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag`.
 Observations, actions, the curriculum, `DefaultResetsCfg` (it defines the task start distribution the score
 is measured on), the `success` and `time_out` terminations and `cloth_drag_success`, the command and its
 metrics (`mdp/commands.py`, `stages.py`, `grasp_diagnostics.py`), actor/critic networks, std settings,
-`num_envs`, `max_iterations`, `seed`, cloth material, physics and assets. Never vary the seed: every run
-uses 42. A new reset bank must keep the approach bucket drawn from the default-reset distribution; never
-narrow what the task starts look like.
+`num_envs`, `seed`, cloth material, physics and assets. Never vary the seed: every run uses 42. The orchestrator may
+vary a run's iteration count only to keep environment transitions equal when `num_steps_per_env` changes. A new
+reset bank must keep the approach bucket drawn from the default-reset distribution; never narrow what the task
+starts look like.
 
 ## How to design variants
 
@@ -87,7 +88,7 @@ Reply with one JSON object per variant, nothing else besides one short paragraph
 ```json
 {"run_id": "g2a", "ref": "autotune-<night>-g2a", "slug": "ratio_hold_kl",
  "hypothesis": "what should change in which metric by how much, and why",
- "changes": ["AdaptiveResetsCfg.ratio_hold_steps 300 -> 600", "desired_kl 0.01 -> 0.008"],
+ "changes": ["AdaptiveResetsCfg.ratio_hold_steps 300 -> 600", "desired_kl 0.01 -> 0.008"], "iterations": 300,
  "splits_bundle": null, "new_bank": null}
 ```
 

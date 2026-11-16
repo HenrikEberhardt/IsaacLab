@@ -24,6 +24,7 @@ import torch
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse, quat_inv, quat_mul, quat_unique
 
+from ..constrained_gripper.geometry import pad_gap_from_joint
 from .frames import (
     cloth_center_pos_b,
     cloth_landmark_ids,
@@ -95,17 +96,20 @@ def _robot_with_action_joints(
     return robot
 
 
-def gripper_width(env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg) -> torch.Tensor:
-    """Distance between the finger pads, the sum of the finger joint positions [m], shape [num_envs, 1].
+def gripper_width(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
+    """Distance between the finger pads [m], from the finger joint angle, shape [num_envs, 1].
 
-    This is the gripper width the real Franka Hand reports.
+    The real Robotiq reports its finger position, from which the gap follows.
 
     Args:
         env: The environment.
-        asset_cfg: The robot, with ``joint_names`` selecting both finger joints.
+        action_name: Name of the :class:`~..constrained_gripper.grasp_action.ClothGraspAction` term.
     """
-    asset: Articulation = env.scene[asset_cfg.name]
-    width = asset.data.joint_pos.torch[:, asset_cfg.joint_ids].sum(dim=1, keepdim=True)
+    action: ClothGraspAction = env.action_manager.get_term(action_name)
+    robot: Articulation = env.scene[action.cfg.asset_name]
+    finger_id = robot.find_joints(action.cfg.finger_joint_name)[0][0]
+    angle = robot.data.joint_pos.torch[:, finger_id]
+    width = pad_gap_from_joint(angle, action.cfg.gap_curve).unsqueeze(1)
     return torch.nan_to_num(width, nan=0.0, posinf=0.0, neginf=0.0)
 
 

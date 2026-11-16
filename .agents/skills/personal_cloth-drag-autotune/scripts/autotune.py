@@ -201,6 +201,24 @@ def last_iteration(text: str) -> tuple[int | None, int | None]:
     return (int(hits[-1][0]), int(hits[-1][1])) if hits else (None, None)
 
 
+def run_dimensions(run_dir: Path) -> tuple[int, int]:
+    """Return ``(num_envs, num_steps_per_env)`` from a generated run's parameter files."""
+    env_text = (run_dir / "params/env.yaml").read_text()
+    agent_text = (run_dir / "params/agent.yaml").read_text()
+    num_envs = re.search(r"^\s+num_envs:\s+(\d+)\s*$", env_text, re.MULTILINE)
+    num_steps = re.search(r"^num_steps_per_env:\s+(\d+)\s*$", agent_text, re.MULTILINE)
+    if num_envs is None or num_steps is None:
+        raise ValueError(f"could not read rollout dimensions from {run_dir / 'params'}")
+    return int(num_envs.group(1)), int(num_steps.group(1))
+
+
+def transitions(iterations: int | None, run: dict) -> int | None:
+    """Environment transitions for ``iterations`` of a registered run."""
+    if iterations is None or "num_envs" not in run or "num_steps_per_env" not in run:
+        return None
+    return iterations * run["num_envs"] * run["num_steps_per_env"]
+
+
 def tail(path: Path, nbytes: int = 200_000) -> str:
     if not path.exists():
         return ""
@@ -302,8 +320,12 @@ def cmd_status(args) -> int:
     for run in state["runs"]:
         text = tail(Path(run["log"]), 50_000) if run.get("log") else ""
         it, total = last_iteration(text)
+        done = transitions(it, run)
+        budget = transitions(run.get("iterations", total), run)
+        transition_status = f" transitions {done}/{budget}" if budget is not None else ""
         log(
-            f"{run['id']:5s} {run['status']:10s} gpu {run.get('gpu')} it {it}/{total} {run['slug']}  "
+            f"{run['id']:5s} {run['status']:10s} gpu {run.get('gpu')} it {it}/{total}{transition_status} "
+            f"{run['slug']}  "
             f"decision={run.get('decision', '-')}"
         )
     return 0
@@ -374,6 +396,7 @@ def cmd_launch(args) -> int:
             if violations:
                 log("\n".join(f"VIOLATION {v}" for v in violations))
                 return 6
+        num_envs, num_steps_per_env = run_dimensions(smoke_dir)
 
         # The GPU must still be free after the smoke run. Our own smoke run leaves utilization above the
         # threshold for a few seconds after it exits, so re-check a few times (thresholds unchanged).
@@ -396,13 +419,15 @@ def cmd_launch(args) -> int:
             "run_name": run_name, "session": session, "gpu": gpu,
             "log": str(d / "train.log"), "exit_file": str(d / "train.exit"), "run_dir": None,
             "status": "starting", "launched_at": now().isoformat(), "pids": [],
+            "iterations": args.iterations or state["iterations"],
+            "num_envs": num_envs, "num_steps_per_env": num_steps_per_env,
         }  # fmt: skip
         with edit_state() as fresh:
             if any(r["id"] == args.run_id for r in fresh["runs"]):
                 sys.exit(f"run id {args.run_id} already exists")
             fresh["runs"].append(run)
 
-        full_cmd = train_args(state, run_name, state["iterations"])
+        full_cmd = train_args(state, run_name, run["iterations"])
         inner = (
             f"set -o pipefail; cd {shlex.quote(str(REPO))}; "
             f"CUDA_VISIBLE_DEVICES={gpu} PYTHONUNBUFFERED=1 {shlex.join(full_cmd)} 2>&1 "
@@ -620,11 +645,15 @@ def cmd_report(args) -> int:
             k = {
                 "final": p.get("final_mean"), "auc": p.get("auc"),
                 "c50": (p.get("cross") or {}).get("0.5"), "c80": (p.get("cross") or {}).get("0.8"),
+                "c95_transitions": (p.get("cross_transitions") or {}).get("0.95"),
+                "c95_minutes": (p.get("cross_minutes") or {}).get("0.95"),
                 "lock": (a.get("grasp", {}).get("attempt_right_lock_rate") or {}).get("final_mean"),
             }  # fmt: skip
         it, total = last_iteration(tail(Path(run["log"]), 50_000)) if run.get("log") else (None, None)
+        budget = transitions(run.get("iterations", total), run)
         rows.append(
-            f"| {run['id']} | {run['slug']} | {run['status']} | {it}/{total} | {k.get('final', '-')} | "
+            f"| {run['id']} | {run['slug']} | {run['status']} | {it}/{total} | {budget or '-'} | "
+            f"{k.get('c95_transitions', '-')} | {k.get('c95_minutes', '-')} | {k.get('final', '-')} | "
             f"{k.get('auc', '-')} | {k.get('c50', '-')} | {k.get('c80', '-')} | {k.get('lock', '-')} | "
             f"{run.get('decision', '-')} | `{run['run_name']}` |"
         )
@@ -640,10 +669,12 @@ def cmd_report(args) -> int:
         f"Branch `{branch}` from `{state['start_branch']}` at `{start[:9]}`. "
         f"Champion: {state['champion']}.", "",
         "Score = task success from default (approach) starts, `task_success_approach_smoothed`: final = mean of the "
-        "last 50 iterations, auc = mean over the run, c50/c80 = iteration of reaching 0.5/0.8; lock = right-lock "
-        "rate per grasp attempt.", "",
-        "| run | change | status | iteration | final | auc | c50 | c80 | lock | decision | wandb / run name |",
-        "|---|---|---|---|---|---|---|---|---|---|---|",
+        "last 50 iterations, auc = mean over the run, c50/c80 = iteration of reaching 0.5/0.8, c95 = first "
+        "0.95 crossing in environment transitions and elapsed training minutes; lock = right-lock rate per grasp "
+        "attempt.", "",
+        "| run | change | status | iteration | transition budget | c95 transitions | c95 minutes | final | auc | "
+        "c50 | c80 | lock | decision | wandb / run name |",
+        "|---|---|---|---|---|---|---|---|---|---|---|---|---|---|",
         *rows, "",
         "## Still running", "",
         *([f"- {r['id']} `{r['session']}` on GPU {r['gpu']}: `tmux attach -t {r['session']}`; stop it with "
@@ -688,6 +719,13 @@ def main() -> int:
     p.add_argument("--ref", required=True, help="Commit or tag to train.")
     p.add_argument("--slug", required=True, help="Short name of the change, [a-z0-9_].")
     p.add_argument("--hypothesis", required=True)
+    p.add_argument(
+        "--iterations",
+        type=int,
+        default=None,
+        help="Iterations of this run; default: the night's. Use it to keep the"
+        " transitions equal when num_steps_per_env changes.",
+    )
     p = sub.add_parser("watch")
     p.add_argument("--interval", type=int, default=60)
     p = sub.add_parser("update")

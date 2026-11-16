@@ -29,33 +29,42 @@ from tensorboard.backend.event_processing.event_accumulator import EventAccumula
 
 STAGES = ("approach", "grasp", "drag", "goal")  # start stages; "approach" = default task start
 TASK_ORDER = ("goal", "drag", "grasp", "approach")  # expected order in which task success should rise
-THRESHOLDS = (0.2, 0.5, 0.8, 0.9)
+THRESHOLDS = (0.2, 0.5, 0.8, 0.9, 0.95)
 PRIMARY = "Metrics/cloth_target/task_success_approach_smoothed"
 FINAL_WINDOW = 50  # iterations
 CHECKPOINT_EVERY = 50  # iterations of the compact curve table
 
 
-def load(run_dir: Path, until: int | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
-    """All scalar series of a run as ``tag -> (iterations, values)``; later event files win on overlap.
+def load_with_wall_times(
+    run_dir: Path, until: int | None = None
+) -> tuple[dict[str, tuple[np.ndarray, np.ndarray]], dict[str, np.ndarray]]:
+    """Load scalar values and wall times; later event files win on overlapping iterations.
 
     ``until`` drops iterations after it, so a longer run compares fairly with a shorter one.
     """
     files = sorted(glob.glob(str(run_dir / "events.out.tfevents.*")))
     if not files:
         raise FileNotFoundError(f"no tfevents file in {run_dir}")
-    merged: dict[str, dict[int, float]] = {}
+    merged: dict[str, dict[int, tuple[float, float]]] = {}
     for f in files:
         ea = EventAccumulator(f, size_guidance={"scalars": 0})
         ea.Reload()
         for tag in ea.Tags()["scalars"]:
-            merged.setdefault(tag, {}).update({e.step: e.value for e in ea.Scalars(tag)})
-    out = {}
+            merged.setdefault(tag, {}).update({e.step: (e.value, e.wall_time) for e in ea.Scalars(tag)})
+    series = {}
+    wall_times = {}
     for tag, points in merged.items():
         steps = np.array(sorted(s for s in points if until is None or s <= until), dtype=int)
         if len(steps) == 0:
             continue
-        out[tag] = (steps, np.array([points[s] for s in steps], dtype=float))
-    return out
+        series[tag] = (steps, np.array([points[s][0] for s in steps], dtype=float))
+        wall_times[tag] = np.array([points[s][1] for s in steps], dtype=float)
+    return series, wall_times
+
+
+def load(run_dir: Path, until: int | None = None) -> dict[str, tuple[np.ndarray, np.ndarray]]:
+    """All scalar series of a run as ``tag -> (iterations, values)``."""
+    return load_with_wall_times(run_dir, until)[0]
 
 
 def rolling(x: np.ndarray, n: int) -> np.ndarray:
@@ -71,6 +80,27 @@ def first_crossing(steps: np.ndarray, values: np.ndarray, threshold: float) -> i
     smooth = rolling(values, 10)
     idx = np.nonzero(smooth >= threshold)[0]
     return int(steps[idx[0]]) if len(idx) else None
+
+
+def crossing_minutes(values: np.ndarray, wall_times: np.ndarray, threshold: float) -> float | None:
+    """Elapsed training minutes to a crossing, including an estimate for the first logged iteration."""
+    idx = np.nonzero(rolling(values, 10) >= threshold)[0]
+    if len(idx) == 0:
+        return None
+    intervals = np.diff(wall_times)
+    first_iteration = float(np.median(intervals[intervals > 0])) if np.any(intervals > 0) else 0.0
+    return (float(wall_times[idx[0]] - wall_times[0]) + first_iteration) / 60.0
+
+
+def run_dimensions(run_dir: Path) -> tuple[int, int]:
+    """Return ``(num_envs, num_steps_per_env)`` from the generated parameter files."""
+    env_text = (run_dir / "params/env.yaml").read_text()
+    agent_text = (run_dir / "params/agent.yaml").read_text()
+    num_envs = re.search(r"^\s+num_envs:\s+(\d+)\s*$", env_text, re.MULTILINE)
+    num_steps = re.search(r"^num_steps_per_env:\s+(\d+)\s*$", agent_text, re.MULTILINE)
+    if num_envs is None or num_steps is None:
+        raise ValueError(f"could not read rollout dimensions from {run_dir / 'params'}")
+    return int(num_envs.group(1)), int(num_steps.group(1))
 
 
 def r(x: float | None, digits: int = 4) -> float | None:
@@ -157,14 +187,32 @@ def at_iterations(steps: np.ndarray, values: np.ndarray, every: int = CHECKPOINT
 
 
 def analyze(run_dir: Path, until: int | None = None) -> dict:
-    s = load(run_dir, until)
-    out: dict = {"run_dir": str(run_dir), "num_tags": len(s)}
+    s, wall_times = load_with_wall_times(run_dir, until)
+    num_envs, num_steps_per_env = run_dimensions(run_dir)
+    out: dict = {
+        "run_dir": str(run_dir),
+        "num_tags": len(s),
+        "num_envs": num_envs,
+        "num_steps_per_env": num_steps_per_env,
+    }
     if "Train/mean_reward" in s:
         out["last_iteration"] = int(s["Train/mean_reward"][0][-1])
     if "Perf/total_fps" in s:
         out["fps_mean"] = r(s["Perf/total_fps"][1].mean(), 0)
 
-    out["primary"] = {"tag": PRIMARY, **curve_summary(*s[PRIMARY])} if PRIMARY in s else None
+    if PRIMARY in s:
+        primary = curve_summary(*s[PRIMARY])
+        primary["cross_transitions"] = {
+            threshold: crossing * num_envs * num_steps_per_env if crossing is not None else None
+            for threshold, crossing in primary["cross"].items()
+        }
+        primary["cross_minutes"] = {
+            str(threshold): r(crossing_minutes(s[PRIMARY][1], wall_times[PRIMARY], threshold), 2)
+            for threshold in THRESHOLDS
+        }
+        out["primary"] = {"tag": PRIMARY, **primary}
+    else:
+        out["primary"] = None
 
     # Stage and task success per start stage.
     stages = {}
@@ -274,6 +322,9 @@ def key_numbers(a: dict) -> dict:
                 "primary_auc": p["auc"],
                 "primary_cross_0.5": p["cross"]["0.5"],
                 "primary_cross_0.8": p["cross"]["0.8"],
+                "primary_cross_0.95": p["cross"]["0.95"],
+                "primary_cross_0.95_transitions": p["cross_transitions"]["0.95"],
+                "primary_cross_0.95_minutes": p["cross_minutes"]["0.95"],
             }
         )
     for st, v in a["stages"].items():

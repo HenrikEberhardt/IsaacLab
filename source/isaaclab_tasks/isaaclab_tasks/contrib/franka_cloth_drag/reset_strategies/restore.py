@@ -31,7 +31,7 @@ GRASP_STATE_KEYS = (
     "closed",
     "finger_target",
     "grasp_tried",
-    "held_opening",
+    "held_finger_pos",
     "active",
     "grasped",
     "grasp_offsets",

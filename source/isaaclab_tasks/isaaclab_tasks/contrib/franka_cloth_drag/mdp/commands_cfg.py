@@ -40,8 +40,7 @@ class ClothTargetCommandCfg(CommandTermCfg):
       :func:`~.stages.gripper_holds_raised_node` and :class:`~..constrained_gripper.grasp_action.ClothGraspAction`. The
       nodes lock once the closing fingers have come to rest with at least
       :attr:`~..constrained_gripper.grasp_action_cfg.ClothGraspActionCfg.grasp_min_nodes` nodes selected; a lock without
-      a raised node (e.g. a pinch of the edge) stays in the earlier stage. Without raised nodes any lock counts. A
-      gripper that does not lock nodes (``attach`` False) never reaches DRAG.
+      a raised node (e.g. a pinch of the edge) stays in the earlier stage. Without raised nodes any lock counts.
     * GOAL: DRAG, and the cloth's central node is within :attr:`success_radius` + :attr:`goal_zone_margin` of the
       target.
 
@@ -89,11 +88,11 @@ class ClothTargetCommandCfg(CommandTermCfg):
     hold_time: float = 0.5
     """Time the cloth's central node must stay within :attr:`success_radius` in a row to succeed [s]."""
 
-    max_ee_height: float | None = 0.04
+    max_ee_height: float | None = 0.06
     """Highest the EE frame origin may be above the table top while the target counts as reached [m]. Optional.
 
     The held cloth hangs from the EE frame, so this keeps the cloth dragged on the table instead of carried. Defaults
-    to 0.04. None disables the condition.
+    to 0.06, 4 cm above the lowest EE height. None disables the condition.
     """
 
     speed_window: int = 10

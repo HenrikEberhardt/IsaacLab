@@ -66,6 +66,7 @@ class SigmoidBoundedGaussianDistribution(GaussianDistribution):
         self.std_raw = nn.Parameter(torch.full((output_dim,), math.log(share / (1.0 - share))), learn_std)
         self.mean_bound = mean_bound
         self.mean_bound_coef = mean_bound_coef
+        self._kl_batch_means: list[torch.Tensor] = []
 
     def update(self, mlp_output: torch.Tensor) -> None:
         """Update the Gaussian from the MLP output (the mean), shape [..., A]."""
@@ -79,6 +80,22 @@ class SigmoidBoundedGaussianDistribution(GaussianDistribution):
         """Bounds loss of a batch of means, shape [..., A], as weighted by ``mean_bound_coef``."""
         excess = (mean.abs() - self.mean_bound).clamp(min=0.0)
         return self.mean_bound_coef * excess.square().sum(dim=-1).mean()
+
+    def kl_divergence(self, old_params: tuple[torch.Tensor, ...], new_params: tuple[torch.Tensor, ...]) -> torch.Tensor:
+        """Compute KL(old || new) and retain its minibatch mean for training diagnostics."""
+        kl = super().kl_divergence(old_params, new_params)
+        self._kl_batch_means.append(kl.detach().mean())
+        return kl
+
+    def reset_kl_metrics(self):
+        """Clear the retained minibatch KL means before a PPO update."""
+        self._kl_batch_means.clear()
+
+    def kl_batch_means(self) -> torch.Tensor:
+        """Return the retained minibatch KL means, shape [num PPO minibatch updates]."""
+        if not self._kl_batch_means:
+            return torch.empty(0, device=self.std_raw.device)
+        return torch.stack(self._kl_batch_means)
 
     def _add_bounds_loss_grad(self, mean: torch.Tensor):
         """Gradient hook adding the bounds-loss gradient of ``mean`` to the incoming gradient."""

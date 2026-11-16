@@ -39,10 +39,11 @@ from ..mdp.stages import START_STAGE_NAMES, canonical_start_stage_name
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
-SCHEMA_VERSION = 6
+SCHEMA_VERSION = 7
 """Version of the bank layout; a bank of another version does not load. Version 5 (2026-11-13): the states of all four
 stages, the task-start states included. Version 6 (2026-11-13): no ``labels`` group (the stage is ``task.stage``; the
-per-state rollout labels are dropped), the generator settings in ``meta`` identify the bank."""
+per-state rollout labels are dropped), the generator settings in ``meta`` identify the bank. Version 7 (2026-11-16):
+the Robotiq finger angle in ``task.held_finger_pos`` replaces the Panda finger opening."""
 
 STRICT_FINGERPRINT_KEYS = ("num_nodes", "joint_names", "scene_entities")
 """Fingerprint entries that must match exactly: without them the stored states do not fit the task's tensors."""

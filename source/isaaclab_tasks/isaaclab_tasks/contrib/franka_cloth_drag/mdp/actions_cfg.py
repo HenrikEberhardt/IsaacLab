@@ -70,9 +70,9 @@ class TopDownDeltaEEActionCfg(DifferentialInverseKinematicsActionCfg):
     y_limits: tuple[float, float] = (-0.65, 0.65)
     """Planes at the table sides: end-effector y-range [m]."""
 
-    z_min: float = 0.0085
-    """Floor: lowest end-effector height. The fingertips are 8.65 mm below the
-    end-effector frame."""
+    z_min: float = 0.0195
+    """Floor: lowest end-effector height. The closed fingertips are 19.0 mm below the end-effector frame, 0.5 mm of
+    clearance above the table; the open ones are 5.5 mm below it."""
 
     joint_vel_factor: float | None = None
     """Velocity-limit fraction used to cap PD position error by uniformly scaling the IK step."""

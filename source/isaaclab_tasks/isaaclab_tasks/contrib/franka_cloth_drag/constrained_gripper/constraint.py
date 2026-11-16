@@ -32,14 +32,15 @@ if TYPE_CHECKING:
 class ClothGraspConstraint:
     """Lock grasped cloth nodes to the end-effector (EE) frame with position-level bilateral constraints.
 
-    A grasp locks every node inside the picker box, plus the nodes of every edge whose midpoint and of every triangle
-    whose centroid lies inside it.
+    A grasp locks every node inside the picker box, plus the nodes of every edge whose midpoint and of every
+    triangle whose centroid lies inside it.
 
     Over ``squeeze_steps`` calls of :meth:`advance_squeeze` after the grasp, the two flanks of the pinched fold are
-    pressed onto each other, a squeeze like Nayak Eq. 7-8 that stops at the cloth thickness.
+    pressed onto each other, a squeeze like Nayak Eq. 7-8 that stops at the cloth thickness. It relaxes again as the
+    gripper opens.
 
     While the constraint holds cloth, the gripper stops colliding with the cloth, since the fingers would otherwise
-    press against the immovable locked nodes and destabilize the coupling.
+    press against the immovable locked nodes and blow up the solver.
     """
 
     def __init__(
@@ -51,29 +52,25 @@ class ClothGraspConstraint:
         squeeze_lift: float,
         squeeze_steps: int,
     ):
-        """Set up the empty grasp state for the cloth and EE frame named by ``command_cfg``."""
+        """Set up the empty grasp state for the cloth and EE frame"""
         self._env = env
         self._command_cfg = command_cfg
         self.grasp_min_nodes = grasp_min_nodes
         self.layer_half_thickness = layer_half_thickness
         self.squeeze_lift = squeeze_lift
         self._squeeze_rate = 1.0 / max(squeeze_steps, 1)
-        # the task's coupler manager can switch the gripper's cloth contacts per environment
         self._set_gripper_contacts = getattr(env.sim.physics_manager, "set_proxy_particle_contacts", None)
         self._ee_frame: FrameTransformer = env.scene[command_cfg.ee_frame_name]
         self._cloth: DeformableObject = env.scene[command_cfg.object_name]
         cloth_cfg = SceneEntityCfg(command_cfg.object_name)
         self._edges = cloth_edges(env, cloth_cfg)
         self._triangles = cloth_triangles(env, cloth_cfg)
-
         num_envs, device = env.num_envs, env.device
         num_nodes = self._cloth.max_sim_vertices_per_body
-        # grasp point of each node in the EE frame at the moment of the grasp [m]
         self.grasp_offsets = torch.zeros((num_envs, num_nodes, 3), device=device)
         self.grasped = torch.zeros((num_envs, num_nodes), dtype=torch.bool, device=device)
         self.active = torch.zeros(num_envs, dtype=torch.bool, device=device)
         self.contacts_disabled = torch.zeros(num_envs, dtype=torch.bool, device=device)
-        # squeeze progress alpha of each environment, from 0 at the grasp to 1
         self.squeeze_progress = torch.zeros(num_envs, device=device)
 
     @property
@@ -87,7 +84,6 @@ class ClothGraspConstraint:
         selected = pad_box_mask(self._env, self._command_cfg, nodal_pos_w)
         for cells in (self._edges, self._triangles):
             inside = pad_box_mask(self._env, self._command_cfg, nodal_pos_w[:, cells].mean(dim=2))
-            # every node of a cell whose center is inside the box
             hits = torch.zeros_like(nodal_pos_w[..., 0])
             hits.index_add_(1, cells.flatten(), inside.float().repeat_interleave(cells.shape[1], dim=1))
             selected |= hits > 0
@@ -147,11 +143,12 @@ class ClothGraspConstraint:
             self._set_gripper_contacts(disable.tolist(), enabled=False)
             self.contacts_disabled[disable] = True
 
-    def advance_squeeze(self, pressing: torch.Tensor):
-        """Ramp the squeeze of the holding environments in where ``pressing``, else out, by one step."""
-        step = torch.where(pressing, self._squeeze_rate, -self._squeeze_rate)
+    def advance_squeeze(self, ceiling: torch.Tensor):
+        """Ramp the squeeze of the holding environments in by one step"""
         self.squeeze_progress = torch.where(
-            self.active, (self.squeeze_progress + step).clamp(0.0, 1.0), self.squeeze_progress
+            self.active,
+            torch.minimum(self.squeeze_progress + self._squeeze_rate, ceiling).clamp(0.0, 1.0),
+            self.squeeze_progress,
         )
 
     def kinematic_targets(self) -> torch.Tensor:

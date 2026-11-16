@@ -9,7 +9,8 @@
   configuration :class:`ClothGraspActionCfg`.
 * :mod:`.constraint`: the lock :class:`ClothGraspConstraint`, which selects the pinched nodes and moves them with the
   hand.
-* :mod:`.geometry`: gripper state for the MDP terms (command, finger opening, nodes between the pads).
+* :mod:`.robotiq`: the Robotiq 2F-85 asset, its pad gap curve, and the finger drive with its command delay.
+* :mod:`.geometry`: gripper state for the MDP terms (command, pad gap and shift, nodes between the pads).
 * :mod:`.coupler` / :mod:`.coupler_cfg`: the Newton coupler manager that the lock needs, and its configuration
   :class:`ClothGraspCouplerProxyCfg`.
 * :mod:`.grasp_diagnostics`: per-episode grasp statistics logged under ``Grasp/*``.

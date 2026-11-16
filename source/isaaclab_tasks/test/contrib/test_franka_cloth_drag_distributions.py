@@ -5,11 +5,16 @@
 
 """Tests for the bounded action standard deviation of the Franka cloth dragging actor. No Kit/GPU required."""
 
+from types import SimpleNamespace
+
+import pytest
 import torch
+from rsl_rl.algorithms import PPO
 from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
 from isaaclab_tasks.contrib.franka_cloth_drag.distributions import SigmoidBoundedGaussianDistribution
+from isaaclab_tasks.contrib.franka_cloth_drag.ppo import KLMetricsPPO
 
 STD_MIN = 0.05
 STD_MAX = 1.0
@@ -101,3 +106,43 @@ def test_bounds_loss_gradient_pulls_only_an_excess_mean_back():
     inside = mean.abs() <= bound
     torch.testing.assert_close(hooked[inside], plain[inside])
     assert (torch.sign(hooked - plain)[~inside] == torch.sign(mean)[~inside]).all()
+
+
+def test_kl_minibatch_means_are_retained_and_reset():
+    """KL diagnostics retain one scalar per scheduler call and reset between PPO updates."""
+    distribution = SigmoidBoundedGaussianDistribution(NUM_ACTIONS, init_std=INIT_STD, std_range=(STD_MIN, STD_MAX))
+    old_std = torch.full((3, NUM_ACTIONS), INIT_STD)
+    old_params = (torch.zeros_like(old_std), old_std)
+
+    expected = []
+    for shift in (0.1, 0.3):
+        new_params = (torch.full_like(old_std, shift), old_std)
+        kl = distribution.kl_divergence(old_params, new_params)
+        expected.append(kl.mean())
+
+    torch.testing.assert_close(distribution.kl_batch_means(), torch.stack(expected))
+    distribution.reset_kl_metrics()
+    assert distribution.kl_batch_means().shape == (0,)
+
+
+def test_ppo_adds_mean_and_max_kl_to_loss_metrics(monkeypatch):
+    """The task PPO adds scheduler-compatible KL summaries to the standard loss dictionary."""
+    distribution = SigmoidBoundedGaussianDistribution(NUM_ACTIONS, init_std=INIT_STD, std_range=(STD_MIN, STD_MAX))
+    old_std = torch.full((3, NUM_ACTIONS), INIT_STD)
+    old_params = (torch.zeros_like(old_std), old_std)
+    algorithm = object.__new__(KLMetricsPPO)
+    algorithm._raw_actor = SimpleNamespace(distribution=distribution)
+    algorithm.is_multi_gpu = False
+
+    def update(_algorithm):
+        for shift in (0.1, 0.3):
+            new_params = (torch.full_like(old_std, shift), old_std)
+            distribution.kl_divergence(old_params, new_params)
+        return {"value": 2.0}
+
+    monkeypatch.setattr(PPO, "update", update)
+    metrics = algorithm.update()
+
+    assert metrics["value"] == 2.0
+    assert metrics["kl_mean"] == pytest.approx(0.5)
+    assert metrics["kl_max"] == pytest.approx(0.9)

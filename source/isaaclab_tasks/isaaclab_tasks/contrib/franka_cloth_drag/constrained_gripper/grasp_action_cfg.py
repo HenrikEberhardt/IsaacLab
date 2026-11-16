@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 from isaaclab.utils import configclass
 
 from ..mdp.actions_cfg import RateLimitedBinaryJointPositionActionCfg
+from .robotiq import ROBOTIQ_DRIVE_JOINT, ROBOTIQ_GAP_CURVE
 
 if TYPE_CHECKING:
     from .grasp_action import ClothGraspAction
@@ -21,31 +22,40 @@ if TYPE_CHECKING:
 class ClothGraspActionCfg(RateLimitedBinaryJointPositionActionCfg):
     """Configuration for the constraint-based cloth gripper.
 
-    Holds every setting of the gripper: the finger command, the closing latch, the pad box that selects the nodes to
-    lock, the lock itself and the clearance before the gripper collides with the cloth again.
+    Holds every setting of the Robotiq 2F-85 gripper: the finger command, the closing latch, the pad box that selects
+    the nodes to lock, the lock itself and its release by opening, and the clearance before the gripper collides with
+    the cloth again.
     """
 
     class_type: type[ClothGraspAction] | str = "{DIR}.grasp_action:ClothGraspAction"
-
-    attach: bool = True
-    """Whether to attach grasped cloth nodes. False uses friction alone."""
 
     command_name: str = "cloth_target"
     """Name of the :class:`~..mdp.commands.ClothTargetCommand` term whose scene names (robot, cloth, EE frame) the
     grasp uses."""
 
-    finger_joint_name: str = "panda_finger_joint1"
-    """Name of the actuated finger joint, whose position is the half gap between the finger pads."""
+    finger_joint_name: str = ROBOTIQ_DRIVE_JOINT
+    """Name of the driven finger joint, whose angle [rad] grows while closing."""
 
-    latch_threshold: float | None = None
-    """Action threshold: close below its negative, open above it, otherwise retain the command.
-    """
+    gap_curve: tuple[float, float, float] = ROBOTIQ_GAP_CURVE
+    """``(a, b, c)`` of the distance between the pad faces, ``a - b * sin(q + c)`` [m], over the finger joint angle
+    ``q`` [rad]."""
 
-    settle_speed: float = 0.005
-    """Maximum finger speed [m/s] counted as settled when attempting a grasp."""
+    pad_path_direction: float = 1.0
+    """Direction of the pads' motion along the EE frame's z-axis while the gripper opens: 1.0 if the open pads sit
+    towards the fingertips (``+z``) of the closed ones, -1.0 if they sit behind them."""
 
-    release_travel: float = 0.002
-    """Opening distance [m] that the gripper has to make after a failed grip before rearming the grasp."""
+    latch_threshold: float = 0.5
+    """Action threshold: close below its negative, open above it, otherwise retain the command."""
+
+    settle_speed: float = 0.05
+    """Maximum finger joint speed [rad/s] counted as settled when attempting a grasp."""
+
+    release_travel: float = 0.004
+    """Growth of the pad gap [m] that the gripper has to make after a failed grip before rearming the grasp."""
+
+    release_gap: float = 0.002
+    """Growth of the pad gap [m] from the pinch, once commanded open, at which the lock lets go of the cloth. The
+    squeeze relaxes over this distance. A close command before it keeps the lock."""
 
     grasp_min_nodes: int = 1
     """Number of cloth nodes the gripper must lock to hold the cloth.
@@ -81,23 +91,7 @@ class ClothGraspActionCfg(RateLimitedBinaryJointPositionActionCfg):
     al. [m]."""
 
     squeeze_steps: int = 5
-    """Number of environment steps over which the press of the fold and the fingers ramp in after the grasp, and back
-    out before the release when the gripper is commanded open."""
+    """Number of environment steps over which the press of the fold and the fingers ramp in after the grasp."""
 
     contact_clearance: float = 0.01
-    """Cloth-node clearance [m] required to restore gripper contacts after release."""
-
-    contact_pad_half_width: float = 0.0088
-    """Half width of a physical finger pad along the hand's x-axis, for the contact clearance [m]."""
-
-    contact_pad_thickness: float = 0.0152
-    """Thickness of a physical finger pad along the closing direction, for the contact clearance [m]."""
-
-    contact_pad_half_length: float = 0.0082
-    """Half length of a physical finger pad along the hand's z-axis, for the contact clearance [m]."""
-
-    contact_hand_half_extents: tuple[float, float, float] = (0.04, 0.10, 0.04)
-    """Half extents of the box around the hand in the EE frame, for the contact clearance [m]."""
-
-    contact_hand_center_z: float = -0.0737
-    """Position of the hand box's center along the EE frame's z-axis, for the contact clearance [m]."""
+    """Distance [m] from the gripper's colliders that every cloth node needs before the contacts are restored."""

@@ -47,12 +47,18 @@ from isaaclab_tasks.utils import PresetCfg
 
 from ... import mdp, reset_strategies
 from ...constrained_gripper import ClothGraspActionCfg, ClothGraspCouplerProxyCfg
+from ...constrained_gripper.robotiq import (
+    FRANKA_PANDA_ROBOTIQ_CFG,
+    ROBOTIQ_DRIVE_EFFORT,
+    ROBOTIQ_DRIVE_JOINT,
+    ROBOTIQ_SPEED,
+    RobotiqGripperActuatorCfg,
+    stiffen_robotiq_mimics,
+)
 
 ##
 #################### Pre-defined configs ####################
 ##
-
-from isaaclab_assets.robots.franka import FRANKA_PANDA_MENAGERIE_CFG  # isort:skip
 
 # Blender cloth meshes
 CLOTH_MESH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "cloth20")
@@ -60,6 +66,13 @@ CLOTH_MESH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", 
 ##
 #################### Physics ####################
 ##
+
+# Robotiq 2F-85 bodies with colliders, as the labels of their prims. The outer knuckles carry none: the outer-finger
+# box encloses them (fixed joint).
+ROBOTIQ_BODIES = (
+    r"/World/envs/env_[^/]+/Robot/Geometry/.*/Robotiq/"
+    r"(base_link|(left|right)_(inner_finger|outer_finger|inner_knuckle))"
+)
 
 
 @configclass
@@ -100,10 +113,7 @@ class PhysicsCfg(NewtonCfg):
                 source="rigid",
                 destination="soft",
                 mode="lagged",
-                bodies=[
-                    r"/World/envs/env_[^/]+/Robot/Geometry/.*panda_hand",
-                    r"/World/envs/env_[^/]+/Robot/Geometry/.*panda_(left|right)finger",
-                ],
+                bodies=[ROBOTIQ_BODIES],  # the gripper collides with the cloth, the arm does not
                 collide_interval=1,  # Compute collision with proxy at every step
                 collision_pipeline=NewtonCollisionPipelineCfg(
                     enable_rigid_soft_full_surface_contact=True,
@@ -117,7 +127,7 @@ class PhysicsCfg(NewtonCfg):
         # Monitor Franka-Cube Contacts
         monitored_contacts={
             "gripper_cube": (
-                r"/World/envs/env_[^/]+/Robot/Geometry/.*panda_(hand|leftfinger|rightfinger)",
+                ROBOTIQ_BODIES,
                 r"/World/envs/env_[^/]+/Cube",
             ),
         },
@@ -145,7 +155,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
     """Scene for the Franka Cloth Dragging environment."""
 
     # Franka Panda Robot Arm
-    robot: ArticulationCfg = FRANKA_PANDA_MENAGERIE_CFG.replace(
+    robot: ArticulationCfg = FRANKA_PANDA_ROBOTIQ_CFG.replace(
         prim_path="{ENV_REGEX_NS}/Robot",
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
@@ -158,11 +168,9 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                 "panda_joint5": 0.0,
                 "panda_joint6": 2.162,
                 "panda_joint7": math.pi / 4,
-                "panda_finger_joint.*": 0.03,  # half the opening
             },
         ),
-        spawn=FRANKA_PANDA_MENAGERIE_CFG.spawn.replace(
-            variants={"Physics": "mujoco", "Colliders": "gripper_only"},
+        spawn=FRANKA_PANDA_ROBOTIQ_CFG.spawn.replace(
             articulation_props=NewtonArticulationCfg(self_collision_enabled=False),
             rigid_props=[MujocoRigidBodyCfg(gravcomp=1.0)],
             physics_material=RigidBodyMaterialBaseCfg(
@@ -178,10 +186,10 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             FrameTransformerCfg.FrameCfg(
                 prim_path=(
                     "{ENV_REGEX_NS}/Robot/Geometry/panda_link0/panda_link1/panda_link2/panda_link3/"
-                    "panda_link4/panda_link5/panda_link6/panda_link7/panda_hand"
+                    "panda_link4/panda_link5/panda_link6/panda_link7/robotiq_mount/Robotiq/base_link"
                 ),
                 name="end_effector",
-                offset=OffsetCfg(pos=(0.0, 0.0, 0.10365)),  # centered between the pads
+                offset=OffsetCfg(pos=(0.0, 0.0, 0.1429)),  # centered between the closed pads
             ),
         ],
     )
@@ -281,24 +289,32 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                     "panda_joint[3-4]": 0.4625,
                     "panda_joint[5-7]": 0.2055,
                 },
+                viscous_friction=0.0,  # the drive damping above is the only damping; the MuJoCo variant adds its own
             ),
-            # Real gripper: closes with grasp(width=0, speed=0.1, force=70) and opens with move(width=0.08, speed=0.1)
-            "panda_hand": ImplicitActuatorCfg(
-                joint_names_expr=["panda_finger_joint1"],
-                joint_effort_limit=70.0,  # grasp force limit [N]
-                joint_velocity_limit=0.05,
-                stiffness=7.5e3,  # pinon-rack mechanism with high stiffness
-                damping=150.0,
-                armature=0.1,
+            # Robotiq 2F-85 gripper
+            "gripper": RobotiqGripperActuatorCfg(
+                joint_names_expr=[ROBOTIQ_DRIVE_JOINT],
+                stiffness=200.0,
+                damping=5.0,
+                armature=0.02,  # sets the delay fitted to the real step response
+                viscous_friction=ROBOTIQ_DRIVE_EFFORT / ROBOTIQ_SPEED,  # saturated drive cruises at 0.95 rad/s
+                joint_effort_limit=ROBOTIQ_DRIVE_EFFORT,  # about 25 N per pad
+                actuator_velocity_limit=3.0,
+                joint_velocity_limit=2.0,
+                min_delay=5,
+                max_delay=5,
             ),
-            # Finger 2 mimics finger 1
-            "panda_finger2_passive": ImplicitActuatorCfg(
-                joint_names_expr=["panda_finger_joint2"],
-                joint_effort_limit=70.0,
-                joint_velocity_limit=0.05,
-                stiffness=0.0,  # zero stiffness and damping => accept mimic constraint
+            # Mimic the second finger of the Gripper
+            "gripper_passive": ImplicitActuatorCfg(
+                joint_names_expr=[
+                    ".*_inner_finger_joint",
+                    ".*_inner_finger_knuckle_joint",
+                    "right_outer_knuckle_joint",
+                ],
+                stiffness=0.0,
                 damping=0.0,
-                armature=0.1,
+                armature=0.02,
+                viscous_friction=0.0,
             ),
         }
 
@@ -309,18 +325,26 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
 
 # ------------------- Action Terms -------------------
 GRIPPER_ACTION_CFG = ClothGraspActionCfg(
-    # Binary gripper action: open <0 or close >0 (e.g sign from distance)
+    # Binary gripper action: close below -latch_threshold, open above it, else keep the last command
     asset_name="robot",
-    joint_names=["panda_finger_joint1"],
-    # Ensure controller respects joint range and velocity limits
-    open_command_expr={"panda_finger_joint1": 0.03},
-    close_command_expr={"panda_finger_joint1": 0.005},  # gap keeps the pads
-    joint_vel_factor=0.75,  # closing speed as fraction of hardware max speed
+    joint_names=[ROBOTIQ_DRIVE_JOINT],
+    finger_joint_name=ROBOTIQ_DRIVE_JOINT,
+    # The finger joint angle [rad] grows while closing; the pads stop 2 mm apart just short of its 0.82 limit
+    open_command_expr={ROBOTIQ_DRIVE_JOINT: 0.0},
+    close_command_expr={ROBOTIQ_DRIVE_JOINT: 0.8},
+    joint_vel_factor=0.475,  # target speed as fraction of the drive's 2 rad/s limit: the real 0.95 rad/s
     latch_threshold=0.5,  # action threshold to change from open to close
     # Grasping parameters
-    release_travel=0.002,  # reopen after failed grasp to retry
+    settle_speed=0.05,  # [rad/s] finger speed below which a closing gripper counts as settled
+    release_travel=0.004,  # [m] gap growth after a failed grasp that re-arms it
+    release_gap=0.002,  # [m] gap growth from the pinch at which the lock lets go of the cloth
     squeeze_steps=5,  # Squeezing Model
     grasp_min_nodes=2,  # GRASP -> DRAG: a grasp locking at least this many nodes to the EE, one of them raised
+    # Pad box that selects the nodes to lock, in the EE frame
+    finger_pad_half_width=0.0125,  # [m] along x, the physical pad is 22 mm wide
+    finger_pad_half_length=0.019,  # [m] along z, the physical pad is 38 mm long
+    finger_gap_margin=0.003,  # [m] added to the measured finger gap
+    contact_clearance=0.01,  # [m] cloth distance from the gripper's colliders that restores the contacts
 )
 
 
@@ -354,7 +378,7 @@ class EEDeltaActionsCfg:
             ik_params={"lambda_val": 0.1},  # Damping factor
         ),
         # Ensure controller respects joint range and velocity limits
-        scale_trans=0.025,  # [m] per step at action 1 (0.75 m/s); 0.03 left the mean action saturated 75 % of the time
+        scale_trans=0.015,  # [m] per step at action 1 (0.3 m/s)
         scale_rot=0.2,
         limit_operation_space=True,  # limit end-effector to reasonable task space
         joint_vel_factor=0.9,  # limit commanded veloctiy by [factor] of hardware max
@@ -396,12 +420,10 @@ class ActorObsCfg(ObsGroup):
 
     # EE position and veloctiy for all 4 DoFs (x, y, z, yaw) in base frame
     ee_pose = ObsTerm(func=mdp.ee_pose_b)
-    ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="panda_hand")})
+    ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")})
 
     # Gripper information
-    gripper_width = ObsTerm(
-        func=mdp.gripper_width, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])}
-    )
+    gripper_width = ObsTerm(func=mdp.gripper_width, params={"action_name": "gripper_action"})
     # Privileged grasp flag (+1 / -1), hidden for whole episodes by the curriculum after success (zero)
     cloth_grasped = ObsTerm(func=mdp.cloth_grasped, params={"hide_curriculum": "observation_hiding"})
 
@@ -454,14 +476,12 @@ class CriticObsCfg(ObsGroup):
 
     # EE information
     ee_pose = ObsTerm(func=mdp.ee_pose_b)
-    ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="panda_hand")})
+    ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")})
 
     # Privileged gripper information
     cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
     grasped_node_ratio = ObsTerm(func=mdp.grasped_node_ratio)
-    gripper_width = ObsTerm(
-        func=mdp.gripper_width, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_finger_joint.*"])}
-    )
+    gripper_width = ObsTerm(func=mdp.gripper_width, params={"action_name": "gripper_action"})
 
     # Last actions
     actions = ObsTerm(func=mdp.last_action)
@@ -532,7 +552,7 @@ class CommandsCfg:
         ),
         success_radius=0.04,  # Radius [m] around the target position for success
         hold_time=0.75,  # Time [s] to hold the cube in the target zone for success
-        max_ee_height=0.05,  # success only with low EE (maybe delete this)
+        max_ee_height=0.06,  # success only with low EE (maybe delete this)
         # Success needs a raised node locked during the hold; pushing or dragging with different nodes is not enough.
         debug_vis=True,  # Target marker
         # Task stage transitions
@@ -559,6 +579,9 @@ FRONTIER_SAMPLER_CFG = reset_strategies.FrontierSamplerCfg(
 @configclass
 class DefaultResetsCfg:
     """Fresh randomized resets that start at the beginning of the task."""
+
+    # Gripper linkage: the gripper is locked in parallel mode, so contact loads must not bend it
+    robotiq_linkage = EventTerm(func=stiffen_robotiq_mimics, mode="startup")
 
     # Robot Reset
     reset_robot_joints = EventTerm(
@@ -609,8 +632,11 @@ class DefaultResetsCfg:
 class UniformResetsCfg:
     """Bank resets using fixed configured ratios between start stages."""
 
+    # Gripper linkage: the gripper is locked in parallel mode, so contact loads must not bend it
+    robotiq_linkage = EventTerm(func=stiffen_robotiq_mimics, mode="startup")
+
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_v8.pt",  # approach 8000, grasp 1000, drag 100, goal 100
+        bank_path="logs/reset_banks/bank_v11_robotiq.pt",  # approach 8000, grasp 1000, drag 100, goal 100
         start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
@@ -621,12 +647,15 @@ class UniformResetsCfg:
 class AdaptiveResetsCfg:
     """Bank resets whose start-stage ratios adapt to training success."""
 
+    # Gripper linkage: the gripper is locked in parallel mode, so contact loads must not bend it
+    robotiq_linkage = EventTerm(func=stiffen_robotiq_mimics, mode="startup")
+
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_v9_focus.pt",  # approach 8000, grasp 2000, drag 1000, goal 1000
+        bank_path="logs/reset_banks/bank_v11_focus_robotiq.pt",  # approach 8000, grasp 2000, drag 1000, goal 1000
         start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
         min_stage_ratios={"grasp": 0.15, "drag": 0.05, "goal": 0.05},
         # Ratio Changing Variables
-        ratio_shift_success_range=(0.70, 0.95),
+        ratio_shift_success_range=(0.775, 0.95),
         ratio_max_shift_per_step=0.0016,
         ratio_hold_steps=300,
         # Frontier Sampling
@@ -655,7 +684,7 @@ class RewardsCfg:
     # Linear reward for approaching towards point above the raised node
     approach_progress = RewTerm(
         func=mdp.ClothDistanceProgress,
-        params={"stages": ["approach", "grasp"], "distance_scale": 0.1, "target_height": 0.04},
+        params={"stages": ["approach", "grasp"], "distance_scale": 0.1, "target_height": 0.05},
         weight=1.0,
     )
     # Penalty for closing the gripper if the target node is not between the pads
@@ -667,7 +696,7 @@ class RewardsCfg:
     # Tanh reward for approaching heightened node at the same height as in the state machine
     approach_precision = RewTerm(
         func=mdp.ClothDistanceProgress,
-        params={"stages": ["approach", "grasp"], "kernel_std": 0.02, "target_height": 0.0085},
+        params={"stages": ["approach", "grasp"], "kernel_std": 0.02, "target_height": 0.0195},
         weight=2.0,
     )
     # Signed progress on closing the gripper with target node between the pads, a full close of 6+ nodes pays the weight
@@ -682,7 +711,7 @@ class RewardsCfg:
     )
     # Penalty for lifting the EE above 4cm during the drag stage
     pen_ee_height_drag = RewTerm(
-        func=mdp.ee_height_above, params={"max_height": 0.04, "stages": ["drag"]}, weight=-15.0
+        func=mdp.ee_height_above, params={"max_height": 0.05, "stages": ["drag"]}, weight=-15.0
     )
     # Reward per second of holding a raised node locked; at most ~3.5 per episode, below drag + goal progress (~8)
     drag_hold = RewTerm(func=mdp.cloth_held, params={"stages": ["drag", "goal"]}, weight=0.5)
@@ -693,7 +722,7 @@ class RewardsCfg:
     # -------------- Goal --------------
     # Penalty for lifting the EE above 4cm during the goal stage
     pen_ee_height_goal = RewTerm(
-        func=mdp.ee_height_above, params={"max_height": 0.04, "stages": ["goal"]}, weight=-15.0
+        func=mdp.ee_height_above, params={"max_height": 0.05, "stages": ["goal"]}, weight=-15.0
     )
     # Tanh reward for placing the cube precisely at the target
     goal_precision = RewTerm(

@@ -27,13 +27,20 @@ class BoundedGaussianDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
 
 
 @configclass
+class KLMetricsPPOCfg(RslRlPpoAlgorithmCfg):
+    """PPO configuration that logs the adaptive-scheduler KL statistics."""
+
+    class_name: str = "isaaclab_tasks.contrib.franka_cloth_drag.ppo:KLMetricsPPO"
+
+
+@configclass
 class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     """Non-Prehensile Cloth Drag Task"""
 
     seed = 42
     experiment_name = "cloth_drag_task"
     num_steps_per_env = 24
-    max_iterations = 400
+    max_iterations = 300
     save_interval = 50
     logger = "wandb"
     wandb_project = "non-prehensile_cloth_task"
@@ -59,17 +66,17 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         obs_normalization=True,
     )
 
-    algorithm = RslRlPpoAlgorithmCfg(
+    algorithm = KLMetricsPPOCfg(
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.005,
         num_learning_epochs=5,
         num_mini_batches=4,
-        learning_rate=1.0e-3,
+        learning_rate=1.0e-3,  # optimizer step size for the actor and critic
         schedule="adaptive",
         gamma=0.995,
         lam=0.95,
-        desired_kl=0.01,
+        desired_kl=0.01,  # target policy-distribution change for the adaptive schedule
         max_grad_norm=1.0,
     )

@@ -21,6 +21,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_en
 )
 from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.constraint import ClothGraspConstraint
 from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.geometry import pad_box_mask
+from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.robotiq import ROBOTIQ_GAP_CURVE
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp import rewards as rewards_module
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     ClothDistanceProgress,
@@ -38,8 +39,8 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.terminations import bank_start
 
 NUM_NODES = 6
 CFG = SimpleNamespace(gripper_action_name="gripper_action", raised_nodes_event="reset_deformable")
-# finger openings of the open and close commands, and halfway between them [m]
-OPEN, HALFWAY, CLOSED = 0.03, 0.0175, 0.005
+# finger joint angles of the open and close commands, and halfway between them [rad]; the angle grows while closing
+OPEN, HALFWAY, CLOSED = 0.0, 0.4, 0.8
 
 
 def test_action_regularization_and_clip_configuration():
@@ -53,6 +54,7 @@ def test_action_regularization_and_clip_configuration():
     assert not hasattr(curriculum, "action_magnitude")
     assert not hasattr(curriculum, "action_rate")
     assert runner.clip_actions is None
+    assert runner.algorithm.class_name == "isaaclab_tasks.contrib.franka_cloth_drag.ppo:KLMetricsPPO"
 
 
 def test_stage_and_grasp_flag_are_hidden_by_the_same_curriculum_term():
@@ -76,7 +78,7 @@ class _EventManager:
         return SimpleNamespace(func=SimpleNamespace(raised_node_ids=self._raised))
 
 
-def _env(active, grasped, raised, constraint=True):
+def _env(active, grasped, raised):
     """A fake environment: per env, whether a lock is active, which nodes it locked, and which nodes are raised."""
     active = torch.tensor(active)
     locked = torch.zeros(len(active), NUM_NODES, dtype=torch.bool)
@@ -84,7 +86,7 @@ def _env(active, grasped, raised, constraint=True):
         locked[env_id, nodes] = True
     term = SimpleNamespace(
         is_grasping=active,
-        constraint=SimpleNamespace(active=active, grasped=locked) if constraint else None,
+        constraint=SimpleNamespace(active=active, grasped=locked),
     )
     return SimpleNamespace(
         action_manager=SimpleNamespace(get_term=lambda name: term),
@@ -98,14 +100,12 @@ def test_only_locks_with_a_raised_node_count():
     assert gripper_holds_raised_node(env, CFG).tolist() == [True, False, False]
 
 
-def test_without_raised_nodes_or_constraint_any_grasp_counts():
+def test_without_raised_nodes_any_grasp_counts():
     env = _env(active=[True, False], grasped=[[0, 1], []], raised=None)
     assert gripper_holds_raised_node(env, CFG).tolist() == [True, False]
-    env = _env(active=[True, False], grasped=[[0], []], raised=[[4], [4]], constraint=False)
-    assert gripper_holds_raised_node(env, CFG).tolist() == [True, False]
 
 
-def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.005, grasp_node=0):
+def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=CLOSED, grasp_node=0):
     """Use the real grasp selector with a stationary pad frame and a synthetic cloth mesh."""
 
     points = torch.tensor([points], dtype=torch.float)
@@ -140,7 +140,9 @@ def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.
             close_command_expr={"finger": CLOSED},
             finger_joint_name="finger",
             finger_pad_half_width=0.0125,
-            finger_pad_half_length=0.0085,
+            finger_pad_half_length=0.019,
+            gap_curve=ROBOTIQ_GAP_CURVE,
+            pad_path_direction=1.0,
             finger_gap_margin=0.003,
             grasp_min_nodes=2,
         ),
@@ -247,12 +249,10 @@ def test_closing_rewards_are_limited_to_their_stages():
         assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == float(stage == 1)
 
 
-def test_closing_reward_without_raised_nodes_or_attachment_constraint():
+def test_closing_reward_without_raised_nodes():
     env, command, term = _grasp_reward_env([[0.0, 0.0, 0.0], [0.005, 0.0, 0.0]], raised=None)
     assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
-    # without the lock constraint, the grasp node must lie between the pads
-    term.constraint = None
-    assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
+    # the lock must select the grasp node: moved out of the pad box it pays nothing
     env.scene["deformable"].data.nodal_pos_w.torch[0, 0, 0] = 0.04
     assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
     assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 1.0
@@ -587,6 +587,63 @@ def test_goal_distance_measures_the_goal_object_if_set():
     cfg.goal_object_name = "cube"
     expected = torch.tensor([0.22, 0.01]).norm().unsqueeze(0)
     assert torch.allclose(cloth_goal_xy_distance(env, target, cfg), expected)
+
+
+def test_pad_gap_and_shift_follow_the_curved_pad_path():
+    from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.geometry import (
+        joint_from_pad_gap,
+        pad_gap_from_joint,
+        pad_shift_from_joint,
+    )
+
+    q = torch.tensor([OPEN, HALFWAY, CLOSED])
+    gap = pad_gap_from_joint(q, ROBOTIQ_GAP_CURVE)
+    # about 87 mm open and 2 mm closed (measured in the simulator: 86.9 and 2.1 mm)
+    assert abs(gap[0].item() - 0.0871) < 1e-3 and abs(gap[2].item() - 0.0021) < 5e-4
+    assert torch.all(gap[:-1] > gap[1:])
+    assert torch.allclose(joint_from_pad_gap(gap, ROBOTIQ_GAP_CURVE), q, atol=1e-4)
+    # the pads move 13.5 mm towards the fingertips while closing (measured: tip z 148.4 -> 161.9 mm)
+    shift = pad_shift_from_joint(q, ROBOTIQ_GAP_CURVE, CLOSED, 1.0)
+    assert abs(shift[2].item()) < 1e-9 and abs(shift[0].item() + 0.0135) < 5e-4
+    assert torch.all(shift[:-1] < shift[1:])
+
+
+def test_pad_box_moves_with_the_open_pads():
+    # a node 8 mm towards the hand of the closed pad's center: inside the open box (centered 13.5 mm behind), outside
+    # a closed one that is only 8.5 mm long
+    env, command, _ = _grasp_reward_env([[0.0, 0.0, -0.025]], opening=OPEN)
+    nodes = env.scene["deformable"].data.nodal_pos_w.torch
+    assert pad_box_mask(env, command.cfg, nodes)[0, 0]
+    env.scene["robot"].data.joint_pos.torch[:] = CLOSED
+    assert not pad_box_mask(env, command.cfg, nodes)[0, 0]
+
+
+def test_squeeze_relaxes_as_the_open_pads_leave_the_pinch():
+    from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.geometry import (
+        joint_from_pad_gap,
+    )
+    from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.grasp_action import ClothGraspAction
+
+    action = ClothGraspAction.__new__(ClothGraspAction)
+    pinch = 0.008
+    action._pinch_gap = pinch
+    action.cfg = SimpleNamespace(gap_curve=ROBOTIQ_GAP_CURVE, release_gap=0.002)
+    action._finger_id = 0
+    # grasped at a gap of 5 mm, which is below the pinch gap: the lock holds that gap
+    held = joint_from_pad_gap(torch.tensor([0.005]), ROBOTIQ_GAP_CURVE)
+    action._held_joint = held.unsqueeze(1)
+    action._closed = torch.tensor([False])
+    action._asset = SimpleNamespace(data=SimpleNamespace(joint_pos=SimpleNamespace(torch=held.unsqueeze(1).clone())))
+    assert torch.allclose(action._hold_gap(), torch.tensor([0.005]))
+    assert action._squeeze_ceiling().item() == 1.0
+    # opening by half the release gap relaxes the squeeze half way, a full release gap releases it
+    for opened, ceiling in [(0.001, 0.5), (0.002, 0.0), (0.004, 0.0)]:
+        joint_pos = joint_from_pad_gap(torch.tensor([0.005 + opened]), ROBOTIQ_GAP_CURVE).unsqueeze(1)
+        action._asset.data.joint_pos.torch = joint_pos
+        assert abs(action._squeeze_ceiling().item() - ceiling) < 1e-3
+    # a closed command keeps the full squeeze however far the pads are
+    action._closed = torch.tensor([True])
+    assert action._squeeze_ceiling().item() == 1.0
 
 
 def test_contact_latch_marks_only_touching_monitored_pairs():

@@ -81,7 +81,7 @@ parser.add_argument("--seed", type=int, default=defaults.seed, help="Seed of the
 parser.add_argument(
     "--grasp_height",
     type=float,
-    default=0.0095,
+    default=0.0205,
     help="End-effector height commanded for the squeeze [m], at least the action's floor.",
 )
 add_launcher_args(parser)
@@ -115,7 +115,6 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
     # the training physics and terminations; the success termination ends successful rollouts
-    env_cfg.actions.gripper_action.attach = True
     if not isinstance(env_cfg.actions.arm_action, TopDownDeltaEEActionCfg):
         raise SystemExit("The state machine commands the delta end-effector action: use the 'ee_delta' actions preset.")
     # turn the hand faster than the task's yaw scale allows (changes the action mapping only, not the states)
@@ -139,7 +138,7 @@ def main():
             unwrapped.device,
             hover_height=command.cfg.approach_radius - HOVER_MARGIN,
             grasp_height=max(args_cli.grasp_height, arm_cfg.z_min),
-            drag_height=0.02,
+            drag_height=0.031,
             drag_speed=0.08,
             goal_tolerance=min(0.02, command.cfg.success_radius),
             wrist_limits=arm_cfg.wrist_joint_limits,

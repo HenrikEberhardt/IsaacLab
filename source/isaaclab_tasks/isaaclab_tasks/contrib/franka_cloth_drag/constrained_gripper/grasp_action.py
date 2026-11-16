@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Gripper action term of the constrained gripper: the Franka fingers plus the lock of the pinched cloth nodes."""
+"""Gripper action term of the constrained gripper: the Robotiq fingers plus the lock of the pinched cloth nodes."""
 
 from __future__ import annotations
 
@@ -16,6 +16,8 @@ import isaaclab.utils.math as math_utils
 
 from ..mdp.actions import RateLimitedBinaryJointPositionAction
 from .constraint import ClothGraspConstraint
+from .geometry import joint_from_pad_gap, pad_gap_from_joint
+from .robotiq import robotiq_collision_corners
 
 if TYPE_CHECKING:
     from isaaclab.assets import DeformableObject
@@ -25,17 +27,16 @@ if TYPE_CHECKING:
 
 
 class ClothGraspAction(RateLimitedBinaryJointPositionAction):
-    """Rate-limited gripper that locks selected cloth nodes to the EE frame after the fingers settle."""
+    """Latched, rate-limited gripper that locks the pinched cloth nodes to the EE frame once the fingers settle.
+
+    The lock lets go when the gripper is commanded open and its pads have moved ``release_gap`` apart from the pinch.
+    """
 
     cfg: ClothGraspActionCfg
 
     def __init__(self, cfg: ClothGraspActionCfg, env: ManagerBasedRLEnv):
-        """Initialize the gripper command and optional cloth grasp constraint."""
+        """Initialize the gripper command, the cloth lock and the collider boxes for the contact clearance."""
         super().__init__(cfg, env)
-        self._closed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self.constraint: ClothGraspConstraint | None = None
-        if not cfg.attach:
-            return
         command_cfg = env.command_manager.get_term(cfg.command_name).cfg
         self._cloth: DeformableObject = env.scene[command_cfg.object_name]
         self._ee_frame = env.scene[command_cfg.ee_frame_name]
@@ -44,7 +45,8 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
         if layer_half_thickness is None:
             material = getattr(self._cloth.cfg.spawn, "physics_material", None)
             layer_half_thickness = getattr(material, "particle_radius", 0.002)
-        self._pinch_opening = 2.0 * layer_half_thickness
+        # gap [m] the pinch squeezes the pads to, at most
+        self._pinch_gap = 4.0 * layer_half_thickness
         self.constraint = ClothGraspConstraint(
             env,
             command_cfg,
@@ -53,10 +55,18 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
             squeeze_lift=cfg.squeeze_lift,
             squeeze_steps=cfg.squeeze_steps * env.cfg.decimation,
         )
+        self._closed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._grasp_tried = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
-        self._held_opening = torch.zeros(self.num_envs, self._num_joints, device=self.device)
+        # finger joint angle [rad] at the last grasp attempt
+        self._held_joint = torch.zeros(self.num_envs, self._num_joints, device=self.device)
         self._any_active = False
         self._targets_dirty = True
+        # box of every gripper collider in its body's frame [m], to keep cloth clear of them
+        corners = robotiq_collision_corners()
+        self._collider_body_ids = self._asset.find_bodies(list(corners), preserve_order=True)[0]
+        points = [torch.tensor(corner, device=self.device) for corner in corners.values()]
+        self._collider_lower = torch.stack([point.amin(dim=0) for point in points])
+        self._collider_upper = torch.stack([point.amax(dim=0) for point in points])
 
     @property
     def closed(self) -> torch.Tensor:
@@ -66,23 +76,17 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
     @property
     def is_grasping(self) -> torch.Tensor:
         """Whether each gripper holds cloth nodes locked to the EE frame. Shape is (num_envs,)."""
-        if self.constraint is None:
-            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         return self.constraint.active
 
     @property
     def grasp_tried(self) -> torch.Tensor:
         """Whether the current close has attempted the lock (it locked, or found too few nodes); cleared when the
         gripper reopens. Shape is (num_envs,)."""
-        if self.constraint is None:
-            return torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         return self._grasp_tried
 
     @property
     def num_grasped(self) -> torch.Tensor:
         """Number of cloth nodes locked to the EE frame. Shape is (num_envs,)."""
-        if self.constraint is None:
-            return torch.zeros(self.num_envs, dtype=torch.long, device=self.device)
         return self.constraint.num_grasped
 
     def process_actions(self, actions: torch.Tensor):
@@ -90,27 +94,24 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
         super().process_actions(actions)
         action = self._raw_actions[:, 0]
         threshold = self.cfg.latch_threshold
-        if threshold is None:
-            self._closed = action < 0.0
-        else:
-            self._closed = torch.where(action < -threshold, True, torch.where(action > threshold, False, self._closed))
-            self._processed_actions = torch.where(self._closed.unsqueeze(1), self._close_command, self._open_command)
-            if self.cfg.clip is not None:
-                self._processed_actions = torch.clamp(
-                    self._processed_actions, min=self._clip[:, :, 0], max=self._clip[:, :, 1]
-                )
-        if self.constraint is None:
-            return
+        self._closed = torch.where(action < -threshold, True, torch.where(action > threshold, False, self._closed))
+        self._processed_actions = torch.where(self._closed.unsqueeze(1), self._close_command, self._open_command)
+        if self.cfg.clip is not None:
+            self._processed_actions = torch.clamp(
+                self._processed_actions, min=self._clip[:, :, 0], max=self._clip[:, :, 1]
+            )
         constraint = self.constraint
         close = self._closed
         joint_pos = self._asset.data.joint_pos.torch
-        opening = joint_pos[:, self._finger_id]
+        gap = self._pad_gap()
+        held_gap = pad_gap_from_joint(self._held_joint[:, 0], self.cfg.gap_curve)
 
-        released = constraint.active & ~close & (constraint.squeeze_progress <= 0.0)
+        # commanded open and the pads have left the pinch: the lock lets go
+        released = constraint.active & ~close & (gap - self._hold_gap() >= self.cfg.release_gap)
         if released.any():
             constraint.deactivate(released.nonzero(as_tuple=False).squeeze(-1))
             self._targets_dirty = True
-        opened = ~close & ~constraint.active & (opening >= self._held_opening[:, 0] + self.cfg.release_travel)
+        opened = ~close & ~constraint.active & (gap >= held_gap + self.cfg.release_travel)
         self._grasp_tried &= ~(released | opened)
 
         ramp_done = torch.all((self._target - self._close_command).abs() <= 1e-6, dim=1)
@@ -119,12 +120,13 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
         if grasping.any():
             grasp_ids = grasping.nonzero(as_tuple=False).squeeze(-1)
             self._grasp_tried[grasp_ids] = True
-            self._held_opening[grasp_ids] = joint_pos[grasp_ids][:, self._torch_joint_ids]
+            self._held_joint[grasp_ids] = joint_pos[grasp_ids][:, self._torch_joint_ids]
             holding_ids = constraint.activate(grasp_ids)
-            self._target[holding_ids] = self._held_opening[holding_ids]
+            self._target[holding_ids] = self._held_joint[holding_ids]
 
+        # a closed gripper holds the pinch; an open one follows the open command and the lock waits for the release
         self._processed_actions = torch.where(
-            constraint.active.unsqueeze(-1), self._hold_target(), self._processed_actions
+            (constraint.active & close).unsqueeze(-1), self._hold_target(), self._processed_actions
         )
 
         clearing = constraint.contacts_disabled & ~constraint.active
@@ -134,52 +136,57 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
 
         self._any_active = bool(constraint.active.any())
 
+    def _pad_gap(self) -> torch.Tensor:
+        """Measured distance [m] between the pad faces, shape [num_envs]."""
+        return pad_gap_from_joint(self._asset.data.joint_pos.torch[:, self._finger_id], self.cfg.gap_curve)
+
+    def _hold_gap(self) -> torch.Tensor:
+        """Distance [m] between the pad faces while the lock holds the pinch, shape [num_envs]."""
+        return pad_gap_from_joint(self._held_joint[:, 0], self.cfg.gap_curve).clamp(max=self._pinch_gap)
+
     def _hold_target(self) -> torch.Tensor:
-        """Interpolate finger targets with the squeeze progress [m], shape [num_envs, num_joints]."""
+        """Finger joint targets [rad] between the grasp and the pinch gap by the squeeze progress, [num_envs, 1]."""
         alpha = self.constraint.squeeze_progress.unsqueeze(-1)
-        pinched = self._held_opening.clamp(max=self._pinch_opening)
-        return self._held_opening + alpha * (pinched - self._held_opening)
+        held_gap = pad_gap_from_joint(self._held_joint, self.cfg.gap_curve)
+        gap = held_gap + alpha * (self._hold_gap().unsqueeze(-1) - held_gap)
+        return joint_from_pad_gap(gap, self.cfg.gap_curve)
+
+    def _squeeze_ceiling(self) -> torch.Tensor:
+        """Highest squeeze progress [0, 1] each gripper allows: full while closed, relaxing as the pads open."""
+        relaxed = (1.0 - (self._pad_gap() - self._hold_gap()) / self.cfg.release_gap).clamp(0.0, 1.0)
+        return torch.where(self._closed, torch.ones_like(relaxed), relaxed)
 
     def _clear_of_cloth(self, env_ids: torch.Tensor) -> torch.Tensor:
-        """Check cloth-node clearance from the pads, finger gap and hand, shape [len(env_ids)]."""
-        ee_pos_w = self._ee_frame.data.target_pos_w.torch[env_ids, 0]
-        ee_quat_w = self._ee_frame.data.target_quat_w.torch[env_ids, 0]
+        """Whether every cloth node is ``contact_clearance`` away from every gripper collider, shape [len(env_ids)]."""
         nodal_pos_w = self._cloth.data.nodal_pos_w.torch[env_ids]
-        ee_quat_w = ee_quat_w.unsqueeze(1).expand(-1, nodal_pos_w.shape[1], -1)
-        rel = math_utils.quat_apply_inverse(ee_quat_w, nodal_pos_w - ee_pos_w.unsqueeze(1))
-        cfg = self.cfg
-        margin = cfg.contact_clearance
-        hand = cfg.contact_hand_half_extents
-        opening = self._asset.data.joint_pos.torch[env_ids, self._finger_id].unsqueeze(1)
-        near_pads = (
-            (rel[..., 0].abs() <= cfg.contact_pad_half_width + margin)
-            & (rel[..., 1].abs() <= opening + cfg.contact_pad_thickness + margin)
-            & (rel[..., 2].abs() <= cfg.contact_pad_half_length + margin)
+        body_pos_w = self._asset.data.body_link_pos_w.torch[env_ids][:, self._collider_body_ids]
+        body_quat_w = self._asset.data.body_link_quat_w.torch[env_ids][:, self._collider_body_ids]
+        num_envs, num_nodes, num_bodies = len(env_ids), nodal_pos_w.shape[1], len(self._collider_body_ids)
+        # nodes in the frame of every body: [num_envs, num_nodes, num_bodies, 3]
+        rel_w = nodal_pos_w.unsqueeze(2) - body_pos_w.unsqueeze(1)
+        quat = body_quat_w.unsqueeze(1).expand(-1, num_nodes, -1, -1)
+        rel = math_utils.quat_apply_inverse(quat.reshape(-1, 4), rel_w.reshape(-1, 3)).view(
+            num_envs, num_nodes, num_bodies, 3
         )
-        near_hand = (
-            (rel[..., 0].abs() <= hand[0] + margin)
-            & (rel[..., 1].abs() <= hand[1] + margin)
-            & ((rel[..., 2] - cfg.contact_hand_center_z).abs() <= hand[2] + margin)
-        )
-        return ~(near_pads | near_hand).any(dim=1)
+        margin = self.cfg.contact_clearance
+        inside = ((rel >= self._collider_lower - margin) & (rel <= self._collider_upper + margin)).all(dim=-1)
+        return ~inside.any(dim=(1, 2))
 
     def apply_actions(self):
         """Advance the fingers and squeeze, then update attached cloth-node targets."""
         super().apply_actions()
-        if self.constraint is not None and (self._any_active or self._targets_dirty):
-            self.constraint.advance_squeeze(self._closed)
+        if self._any_active or self._targets_dirty:
+            self.constraint.advance_squeeze(self._squeeze_ceiling())
             self._cloth.write_nodal_kinematic_target_to_sim_index(self.constraint.kinematic_targets())
             self._targets_dirty = False
 
     def get_grasp_state(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
         """Return copies of the gripper and grasp state of the given environments, see :meth:`set_grasp_state`."""
-        if self.constraint is None:
-            raise RuntimeError("The grasp state needs the lock constraint (attach=True).")
         state = {
             "closed": self._closed[env_ids].clone(),
             "finger_target": self._target[env_ids].clone(),
             "grasp_tried": self._grasp_tried[env_ids].clone(),
-            "held_opening": self._held_opening[env_ids].clone(),
+            "held_finger_pos": self._held_joint[env_ids].clone(),
         }
         return state | self.constraint.get_state(env_ids)
 
@@ -194,14 +201,12 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
             env_ids: The environments, shape [N].
             state: The state of :meth:`get_grasp_state`, each entry with the environments as first dimension.
         """
-        if self.constraint is None:
-            raise RuntimeError("The grasp state needs the lock constraint (attach=True).")
         closed = state["closed"]
         self._closed[env_ids] = closed
         self._raw_actions[env_ids, 0] = torch.where(closed, -1.0, 1.0)
         self._target[env_ids] = state["finger_target"]
         self._grasp_tried[env_ids] = state["grasp_tried"]
-        self._held_opening[env_ids] = state["held_opening"]
+        self._held_joint[env_ids] = state["held_finger_pos"]
         self.constraint.set_state(env_ids, state)
         self._any_active = bool(self.constraint.active.any())
         nodal_pos_w = self._cloth.data.nodal_pos_w.torch[env_ids]
@@ -214,8 +219,6 @@ class ClothGraspAction(RateLimitedBinaryJointPositionAction):
         """Reset selected grippers, release attached nodes and restore cloth contacts."""
         super().reset(env_ids)
         self._closed[slice(None) if env_ids is None else env_ids] = False
-        if self.constraint is None:
-            return
         if env_ids is None:
             env_ids = torch.arange(self.num_envs, device=self.device)
         else:

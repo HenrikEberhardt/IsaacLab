@@ -29,9 +29,10 @@ so it matches the user's permission allow-rules and no prompt blocks the night.
 3. **Yield** when the watcher reports `contention`: kill that run of ours, log it, relaunch later.
 4. **Git:** commits only on `autotune/<night>` and detached variant commits tagged
    `autotune-<night>-<id>`. Never commit on another branch, never merge into it, never push.
-5. **Fixed run protocol:** seed 42 for every run (never vary seeds), full iteration count for every run
-   (no early stop of a healthy run), `num_envs` and everything else frozen stays as is. Only crashed,
-   stalled, non-finite or contended runs are ended.
+5. **Fixed run protocol:** seed 42 for every run (never vary seeds), equal environment transitions for every run,
+   `num_envs` and everything else frozen stays as is. Vary the per-run iteration count only to compensate for a
+   changed `num_steps_per_env`; never early-stop a healthy run. Only crashed, stalled, non-finite or contended runs
+   are ended.
 6. **Scope:** observations and actions never change; `check_guardrails.py` enforces the allowlist in
    `agents/tuner.md`. A variant that fails it is dropped, not forced through.
 7. The stop time does not stop the loop. Runs and generations continue until the user stops the skill.
@@ -69,14 +70,15 @@ prompt. Run the evaluator and the tuner in the foreground; one evaluator per fin
 
 ## Launch
 
-`$A launch --run-id <id> --ref <tag|commit> --slug <slug> --hypothesis "<text>"` (run in background; it
+`$A launch --run-id <id> --ref <tag|commit> --slug <slug> --hypothesis "<text>" [--iterations <count>]` (run in background; it
 takes 5-15 min). It checks machine load, picks a free GPU, checks guardrails, runs a 5-iteration smoke
 run, re-checks the GPU, starts the tmux session, keeps the variant checked out until iteration 1, and
 switches back to the night branch. Exit codes: 3 no free GPU (keep the variant queued), 4 machine busy,
 5 smoke failed (triage; fix via tuner or drop), 6 guardrail violation (drop), 7 run did not start.
 Launch variants one at a time; never edit the working tree while a launch is running.
 
-Run ids: `g<generation><slot>`. A generation is one tuner call; its variants run in parallel when GPUs
+Use `--iterations` when a variant changes `num_steps_per_env`, choosing the count that keeps the night's baseline
+transition budget fixed. Run ids are `g<generation><slot>`. A generation is one tuner call; its variants run in parallel when GPUs
 allow, otherwise queue them in `journal.md` and launch them as GPUs free up.
 
 ## Loop
