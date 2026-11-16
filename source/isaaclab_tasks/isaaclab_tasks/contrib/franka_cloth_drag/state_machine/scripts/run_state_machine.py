@@ -126,7 +126,6 @@ def main():
     keep_requested_visualizers(env_cfg, args_cli.visualizer)
 
     with launch_simulation(env_cfg, args_cli):
-        from isaaclab_tasks.contrib.franka_cloth_drag.mdp.actions import PAD_HALF_WIDTH, PAD_THICKNESS
         from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import ClothDragStage
 
         env = gym.make(args_cli.task, cfg=env_cfg)
@@ -248,9 +247,9 @@ def main():
                     ee_frame.data.target_quat_w.torch[:, 0],
                     cloth.data.nodal_pos_w.torch,
                     robot.data.joint_pos.torch[:, finger_joint_id],
-                    PAD_HALF_WIDTH,
-                    PAD_THICKNESS,
-                    command.cfg.finger_pad_half_length,
+                    gripper.cfg.contact_pad_half_width,
+                    gripper.cfg.contact_pad_thickness,
+                    gripper.cfg.finger_pad_half_length,
                     layer_half_thickness,
                 )
                 for env_id in touched.nonzero(as_tuple=False).squeeze(-1).tolist():

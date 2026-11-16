@@ -38,7 +38,7 @@ GRASP_STATE_KEYS = (
     "squeeze_progress",
     "contacts_disabled",
 )
-"""Entries of :meth:`~..mdp.actions.ClothGraspAction.get_grasp_state` that a reset state stores."""
+"""Entries of :meth:`~..constrained_gripper.grasp_action.ClothGraspAction.get_grasp_state` that a reset state stores."""
 
 
 def restore_physical(
@@ -97,9 +97,10 @@ def restore_task_state(
 ) -> None:
     """Continue the task state of the bank rows ``rows`` in the environments ``env_ids``, after the manager resets.
 
-    Restores the gripper and grasp state (:meth:`~..mdp.actions.ClothGraspAction.set_grasp_state`), the target and the
-    stage (:meth:`~..mdp.commands.ClothTargetCommand.set_restored`), and the gripper entry of the action buffers, so the
-    first observation's last action and the first action rate describe the stored gripper command.
+    Restores the gripper and grasp state (:meth:`~..constrained_gripper.grasp_action.ClothGraspAction.set_grasp_state`),
+    the target and the stage (:meth:`~..mdp.commands.ClothTargetCommand.set_restored`), and the gripper entry of the
+    action buffers, so the first observation's last action and the first action rate describe the stored gripper
+    command.
 
     Args:
         env: The environment.

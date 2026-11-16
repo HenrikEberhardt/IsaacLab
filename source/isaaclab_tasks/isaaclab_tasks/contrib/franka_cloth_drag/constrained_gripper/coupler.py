@@ -63,10 +63,7 @@ def _latch_touching_pairs(
     num_pairs: int,
     latch: wp.array2d(dtype=wp.int32),
 ):
-    """Latch every monitored shape pair whose contact is touching in the given body poses.
-
-    Bit ``2 i`` of a shape's group mask marks the first side of monitored pair ``i``, bit ``2 i + 1`` the second.
-    """
+    """Latch every monitored pair (shape group bits ``2 i`` / ``2 i + 1``) whose contact touches in ``body_q``."""
     tid = wp.tid()
     if tid >= contact_count[0]:
         return
@@ -103,7 +100,7 @@ def _latch_touching_pairs(
 
 
 def _shapes_matching(pattern: str, shape_labels, shape_body, body_labels) -> np.ndarray:
-    """Ids of the shapes whose label, or whose body's label, matches the regex ``pattern`` in full."""
+    """Return the ids of the shapes whose label, or whose body's label, fully matches ``pattern``."""
     regex = re.compile(pattern)
     return np.array(
         [
@@ -120,29 +117,15 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     The class name must start with ``Newton``: Isaac Lab picks the asset backend from the physics manager's name.
 
-    It adds five things to :class:`~isaaclab_contrib.coupling.coupler.NewtonCouplerManager`:
+    Additions to :class:`~isaaclab_contrib.coupling.coupler.NewtonCouplerManager`:
 
-    * VBD integrates rigid bodies, such as the cube on the cloth, in world coordinates and writes only ``body_q`` and
-      ``body_qd``, while Isaac Lab reads a floating body's root pose and velocity from its free joint's ``joint_q`` and
-      ``joint_qd``. After each substep, this manager runs Newton's inverse kinematics on the articulations whose
-      joints a VBD entry owns, so Isaac Lab sees their motion.
-    * The coupler's solver views keep their own copies of per-particle properties and never refresh them, so a node
-      made kinematic at runtime through
-      :meth:`~isaaclab.assets.DeformableObject.write_nodal_kinematic_target_to_sim_index` would stay dynamic in VBD.
-      Before each substep, this manager copies the active flag and inverse mass of the particles each entry owns from
-      the model into that entry's view.
-    * :meth:`set_proxy_particle_contacts` switches the contacts between the proxied gripper and the cloth per
-      environment, so a gripper holding locked nodes does not press against them.
-    * Before building the solver, it restores :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.rest_angle_scale` of the
-      bending rest angles that the model builder computed from the spawned cloth and the Newton deformable asset
-      zeroed, so the wrinkles of the spawned cloth stay partly set.
-    * :meth:`set_cloth_rest` changes the cloth rest shape (bending rest angles and lengths, triangle rest shapes and
-      areas) at runtime in the model and the solver views.
-    * Before the model is finalized, it excludes the shape pairs of
-      :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.collision_filter_pairs` from collision in every world.
-    * After each substep, it latches per world whether the shape pairs of
-      :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.monitored_contacts` touch, from the contacts the proxy pipelines
-      detected and the body poses at the end of the substep, see :meth:`contact_latch`.
+    * Inverse kinematics after each substep, so Isaac Lab sees the motion of VBD-integrated bodies (the cube).
+    * Copy of the particle activity into the solver views before each substep, so locked nodes stay kinematic in VBD.
+    * :meth:`set_proxy_particle_contacts`: switch the gripper-cloth contacts per environment.
+    * Restore of a share (``rest_angle_scale``) of the spawned cloth's bending rest angles.
+    * :meth:`get_cloth_rest` / :meth:`set_cloth_rest`: read and change the cloth rest shape at runtime.
+    * ``collision_filter_pairs``: shape pairs that never collide.
+    * ``monitored_contacts``: per-world touch latch of shape pairs, see :meth:`contact_latch`.
     """
 
     _vbd_articulation_mask: wp.array | None = None
@@ -187,8 +170,7 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _build_solver(cls, model: Model, solver_cfg: CouplerCfg) -> None:
-        """Restore the scaled cloth rest angles, build the coupled solver, and record the entries that own particles
-        and the articulations that VBD owns."""
+        """Restore the cloth rest angles, build the coupled solver and record the particle entries and VBD bodies."""
         cls._restore_rest_angles(model, getattr(solver_cfg, "rest_angle_scale", 0.0))
         super()._build_solver(model, solver_cfg)
         cls._particle_entries = [
@@ -213,7 +195,7 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _build_contact_monitor(cls, model: Model, solver_cfg: CouplerCfg) -> None:
-        """Mark the shapes of the monitored pairs and allocate the per-world latch, before any graph capture."""
+        """Mark the shapes of the monitored pairs and allocate the per-world latch before any graph capture."""
         monitored = getattr(solver_cfg, "monitored_contacts", {})
         cls._contact_names = list(monitored)
         cls._contact_buffers = None
@@ -250,8 +232,7 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
     def _step_solver(
         cls, state_0: State, state_1: State, control: Control, contacts: Contacts | None, substep_dt: float
     ) -> None:
-        """Sync the particle activity into the solver views, run one coupled substep, then derive the joint
-        coordinates of the VBD-owned articulations from their body state."""
+        """Sync the particle activity, run one coupled substep, then update VBD bodies and the contact latch."""
         model = NewtonManager._model
         for entry in cls._particle_entries:
             wp.launch(
@@ -274,11 +255,7 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _latch_contacts(cls, model: Model, state: State) -> None:
-        """Latch the monitored pairs that touch at the end of the substep.
-
-        The proxy pipelines detect contacts at the start of the substep within their detection gap; the gap of every
-        detected contact is evaluated again with the body poses of ``state``, the final poses of both bodies.
-        """
+        """Latch the monitored pairs whose detected contacts still touch with the body poses of ``state``."""
         if cls._contact_buffers is None:
             solver = NewtonManager._solver
             proxies = PhysicsManager._cfg.solver_cfg.proxies
@@ -313,39 +290,19 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def contact_latch(cls, name: str) -> torch.Tensor:
-        """Whether the monitored pair ``name`` touched in a substep since its last :meth:`clear_contact_latch`.
-
-        Args:
-            name: Key of :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.monitored_contacts`.
-
-        Returns:
-            One flag per world (environment), shape [num_worlds].
-        """
+        """Return per world whether the monitored pair ``name`` touched since its last :meth:`clear_contact_latch`."""
         if name not in cls._contact_names:
             raise KeyError(f"Contact pair '{name}' is not monitored; monitored: {cls._contact_names}.")
         return wp.to_torch(cls._contact_latch)[:, cls._contact_names.index(name)].bool()
 
     @classmethod
     def clear_contact_latch(cls, name: str) -> None:
-        """Clear the touch flags of the monitored pair ``name`` in every world.
-
-        Args:
-            name: Key of :attr:`~.coupler_cfg.ClothGraspCouplerProxyCfg.monitored_contacts`.
-        """
+        """Clear the touch flags of the monitored pair ``name`` in every world."""
         wp.to_torch(cls._contact_latch)[:, cls._contact_names.index(name)] = 0
 
     @classmethod
     def set_proxy_particle_contacts(cls, world_ids: Sequence[int], enabled: bool) -> None:
-        """Enable or disable contacts between the proxied rigid bodies and the particles of the given worlds.
-
-        Disabling them makes the proxied gripper a virtual one for the cloth. A grasp that locks cloth nodes to the
-        gripper needs this: the gripper's contacts with the immovable locked nodes would otherwise fight the lock and
-        destabilize the lagged coupling. The proxied bodies keep colliding with other rigid bodies.
-
-        Args:
-            world_ids: Worlds (environments) to change.
-            enabled: Whether the proxied bodies collide with particles.
-        """
+        """Enable or disable the contacts between the proxied gripper and the cloth particles of the given worlds."""
         worlds = np.asarray(world_ids, dtype=np.int64).reshape(-1)
         collide_particles = int(ShapeFlags.COLLIDE_PARTICLES)
         for entry, default_flags in zip(cls._particle_entries, cls._default_shape_flags):
@@ -366,39 +323,18 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def get_cloth_rest(cls, name: str, ids: torch.Tensor) -> torch.Tensor:
-        """Rest values the cloth solver uses for the given model edges or triangles.
-
-        Args:
-            name: One of :attr:`CLOTH_REST_ARRAYS`.
-            ids: Model edge ids (``edge_*``) or triangle ids (``tri_*``), any shape.
-
-        Returns:
-            A copy of the values, shape ``ids.shape`` plus ``(2, 2)`` for ``tri_poses``.
-        """
+        """Return a copy of the rest values ``name`` the cloth solver uses for the given edge or triangle ids."""
         return wp.to_torch(cls._rest_arrays(name)[-1])[ids].clone()
 
     @classmethod
     def set_cloth_rest(cls, name: str, ids: torch.Tensor, values: torch.Tensor) -> None:
-        """Set rest values of the given model edges or triangles at runtime.
-
-        The solver views keep their own copies of model arrays, made when the solver was built, so writing the model
-        alone would not reach the cloth solver. This writes the model and every view that owns particles.
-
-        Args:
-            name: One of :attr:`CLOTH_REST_ARRAYS`: bending rest angles [rad], bending edge rest lengths [m],
-                inverse triangle rest matrices [1/m], or triangle rest areas [m^2].
-            ids: Model edge ids (``edge_*``) or triangle ids (``tri_*``), any shape.
-            values: Rest values, shape ``ids.shape`` plus ``(2, 2)`` for ``tri_poses``.
-        """
+        """Write the rest values ``name`` of the given edge or triangle ids into the model and every solver view."""
         for array in cls._rest_arrays(name):
             wp.to_torch(array)[ids] = values
 
     @classmethod
     def _rest_arrays(cls, name: str) -> list[wp.array]:
-        """The named array of the model and of the particle-owning solver views, without duplicates.
-
-        The model comes first, so the last array is the one a cloth solver reads.
-        """
+        """Return the named array of the model, then of each particle-owning solver view, without duplicates."""
         if name not in cls.CLOTH_REST_ARRAYS:
             raise ValueError(f"Unknown cloth rest array '{name}', expected one of {cls.CLOTH_REST_ARRAYS}.")
         model_array = getattr(NewtonManager._model, name)
@@ -412,8 +348,7 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _solver_specific_clear(cls) -> None:
-        """Release the articulation mask, the particle entries and the contact monitor with the rest of the solver
-        state."""
+        """Release the articulation mask, particle entries and contact monitor with the rest of the solver state."""
         super()._solver_specific_clear()
         cls._vbd_articulation_mask = None
         cls._particle_entries = []

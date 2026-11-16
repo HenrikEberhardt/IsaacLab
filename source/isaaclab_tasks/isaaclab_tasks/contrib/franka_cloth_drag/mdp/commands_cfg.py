@@ -37,10 +37,11 @@ class ClothTargetCommandCfg(CommandTermCfg):
       (:attr:`~.commands.ClothTargetCommand.grasp_node_id`): the node raised by the reset event
       :attr:`raised_nodes_event` closest to the segment from the central node to the target.
     * DRAG: the gripper holds the cloth by nodes locked to the EE frame that include a raised node, see
-      :func:`~.stages.gripper_holds_raised_node` and :class:`~.actions.ClothGraspAction`. The nodes lock once the
-      closing fingers have come to rest with at least :attr:`grasp_min_nodes` nodes selected; a lock without a raised
-      node (e.g. a pinch of the edge) stays in the earlier stage. Without raised nodes any lock counts. A gripper that
-      does not lock nodes (``attach`` False) never reaches DRAG.
+      :func:`~.stages.gripper_holds_raised_node` and :class:`~..constrained_gripper.grasp_action.ClothGraspAction`. The
+      nodes lock once the closing fingers have come to rest with at least
+      :attr:`~..constrained_gripper.grasp_action_cfg.ClothGraspActionCfg.grasp_min_nodes` nodes selected; a lock without
+      a raised node (e.g. a pinch of the edge) stays in the earlier stage. Without raised nodes any lock counts. A
+      gripper that does not lock nodes (``attach`` False) never reaches DRAG.
     * GOAL: DRAG, and the cloth's central node is within :attr:`success_radius` + :attr:`goal_zone_margin` of the
       target.
 
@@ -103,10 +104,8 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Name of the frame transformer whose first target is the EE frame, centered between the finger pads."""
 
     gripper_action_name: str = "gripper_action"
-    """Name of the :class:`~.actions.ClothGraspAction` term; a negative action closes the gripper."""
-
-    finger_joint_name: str = "panda_finger_joint1"
-    """Name of the actuated finger joint, whose position is the half gap between the finger pads."""
+    """Name of the :class:`~..constrained_gripper.grasp_action.ClothGraspAction` term; a negative action closes the
+    gripper. Its configuration holds the gripper settings (finger joint, pad box, ``grasp_min_nodes``)."""
 
     approach_radius: float = 0.05
     """Distance of the EE frame origin to the grasp node below which APPROACH turns into GRASP [m].
@@ -118,31 +117,6 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Name of the reset event term whose ``raised_node_ids`` are the raised nodes, see
     :class:`~.events.ResetClothWithRaisedNodes`. None, a missing term, or a term without raised nodes => the grasp
     node is the node a few centimeters from the central node towards the target, and any lock counts as a grasp."""
-
-    grasp_min_nodes: int = 1
-    """Number of cloth nodes the gripper must lock to hold the cloth.
-
-    The count is of the selected nodes: those in the pad box plus every node of an edge or triangle whose center lies
-    in it (:meth:`~.cloth_grasp.ClothGraspConstraint.select`). A grasp with fewer selected nodes locks nothing, so the
-    stage stays in GRASP. A lock counts for DRAG only if a raised node is among the locked nodes.
-    """
-
-    finger_pad_half_width: float = 0.0125
-    """Half width of the finger pads along the hand's x-axis [m].
-
-    Wider than the physical pad (about 8.5 mm), so at least one node of the coarse cloth mesh (25 mm node spacing) can
-    fall between the pads.
-    """
-
-    finger_pad_half_length: float = 0.0085
-    """Half length of the finger pads along the hand's z-axis, centered on the EE frame origin [m].
-
-    The menagerie Panda pads span about ±8.5 mm around the fingertip point, so cloth lying under the closed fingertips
-    (at least a particle radius below the pad) stays outside.
-    """
-
-    finger_gap_margin: float = 0.003
-    """Tolerance added to the gap between the finger pads [m]."""
 
     goal_zone_margin: float = 0.05
     """Margin added to :attr:`success_radius` for the planar distance below which DRAG turns into GOAL [m]."""

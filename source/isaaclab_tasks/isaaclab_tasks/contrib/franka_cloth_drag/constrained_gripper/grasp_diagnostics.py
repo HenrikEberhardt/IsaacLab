@@ -12,22 +12,21 @@ from typing import TYPE_CHECKING
 
 import torch
 
-from .stages import (
+from ..mdp.stages import (
     START_STAGE_NAMES,
     ClothDragStage,
     ee_grasp_node_distance,
     grasp_node_capturable,
     grasp_node_pos_w,
-    gripper_closing,
-    gripper_holds_cloth,
     gripper_holds_raised_node,
 )
+from .geometry import gripper_closing, gripper_holds_cloth
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
     from isaaclab.sensors import FrameTransformer
 
-    from .commands_cfg import ClothTargetCommandCfg
+    from ..mdp.commands_cfg import ClothTargetCommandCfg
 
 GRASP_OUTCOMES = ("right_lock", "wrong_lock", "closed_no_lock", "never_closed")
 """Outcome classes of an episode, see :class:`GraspDiagnostics`."""
@@ -59,11 +58,11 @@ class GraspDiagnostics:
     """Grasp events of every episode, logged at its end under ``Grasp/*``.
 
     Only episodes that start without a lock, in APPROACH or GRASP, are counted. A lock is right when it holds a raised
-    node (the condition of DRAG, see :func:`~.stages.gripper_holds_raised_node`) and wrong otherwise, e.g. flat cloth
-    next to the raised node. A close is the gripper command switching to closed; a lock attempt is the gripper trying
-    to lock once the fingers settled (:attr:`~.actions.ClothGraspAction.grasp_tried`), which forms a lock only with at
-    least ``grasp_min_nodes`` nodes between the pads. Events are read once per environment step, after the physics,
-    so values "at" an attempt or lock are one control step after the gripper tried.
+    node (the condition of DRAG, see :func:`~..mdp.stages.gripper_holds_raised_node`) and wrong otherwise, e.g. flat
+    cloth next to the raised node. A close is the gripper command switching to closed; a lock attempt is the gripper
+    trying to lock once the fingers settled (:attr:`~.grasp_action.ClothGraspAction.grasp_tried`), which forms a lock
+    only with at least ``grasp_min_nodes`` nodes between the pads. Events are read once per environment step, after the
+    physics, so values "at" an attempt or lock are one control step after the gripper tried.
 
     Logged keys, each left out when no event of its kind ended in the step:
 
@@ -76,7 +75,8 @@ class GraspDiagnostics:
     * ``close_ee_node_distance_mm``, ``attempt_ee_node_distance_mm``: distance of the EE frame origin to the grasp node
       at the close and at the attempt [mm].
     * ``close_node_between_pads``, ``attempt_node_between_pads``: share of the closes and attempts with the grasp node
-      between the pads, as the lock selects nodes (:func:`~.stages.grasp_node_capturable` without the minimum count).
+      between the pads, as the lock selects nodes (:func:`~..mdp.stages.grasp_node_capturable` without the minimum
+      count).
     * ``close_ee_travel_mm``, ``close_node_travel_mm``: distance the EE frame origin and the grasp node moved from the
       close to its attempt [mm]. Large EE travel with the node not between the pads at the attempt is a sweep past it.
     * ``right_lock_nodes``, ``wrong_lock_nodes``: number of locked nodes of right and wrong locks.
@@ -200,7 +200,7 @@ class GraspDiagnostics:
 
         Args:
             env_ids: The environments.
-            start_stage: :class:`~.stages.ClothDragStage` index the finished episodes started in, shape [N].
+            start_stage: :class:`~..mdp.stages.ClothDragStage` index the finished episodes started in, shape [N].
             time_to_drag: Episode time at which the finished episodes first reached DRAG, negative if never [s],
                 shape [N].
 

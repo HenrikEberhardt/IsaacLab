@@ -164,7 +164,7 @@ class ClothRaisedNodes:
     nodes of every environment are kept, sorted, in :attr:`raised_node_ids`.
 
     The rest values do not change under a planar motion of the cloth. The cloth must be the only particle body of each
-    environment, and its physics manager must provide ``set_cloth_rest`` (see :mod:`..coupler`).
+    environment, and its physics manager must provide ``set_cloth_rest`` (see :mod:`..constrained_gripper.coupler`).
 
     An environment has one instance: the cloth reset event :class:`ResetClothWithRaisedNodes` of the default resets, or
     the bank reset event of a strategy without that event.

@@ -19,7 +19,6 @@ from isaaclab.utils import configclass
 
 if TYPE_CHECKING:
     from .actions import (
-        ClothGraspAction,
         LimitedRelativeJointPositionAction,
         RateLimitedBinaryJointPositionAction,
         TopDownDeltaEEAction,
@@ -90,42 +89,3 @@ class RateLimitedBinaryJointPositionActionCfg(BinaryJointPositionActionCfg):
 
     joint_vel_factor: float | None = None
     """Fraction of the hardware joint velocity limit the target moves at."""
-
-
-@configclass
-class ClothGraspActionCfg(RateLimitedBinaryJointPositionActionCfg):
-    """Configuration for the constraint-based cloth gripper."""
-
-    class_type: type[ClothGraspAction] | str = "{DIR}.actions:ClothGraspAction"
-
-    attach: bool = True
-    """Whether to attach grasped cloth nodes. False uses friction alone."""
-
-    command_name: str = "cloth_target"
-    """Name of the :class:`~.commands.ClothTargetCommand` term whose pad geometry and ``grasp_min_nodes`` the grasp
-    uses."""
-
-    latch_threshold: float | None = None
-    """Action threshold: close below its negative, open above it, otherwise retain the command.
-    """
-
-    settle_speed: float = 0.005
-    """Maximum finger speed [m/s] counted as settled when attempting a grasp."""
-
-    release_travel: float = 0.002
-    """Opening distance [m] that the gripper has to make after a failed grip before rearming the grasp."""
-
-    layer_half_thickness: float | None = None
-    """Half thickness of one cloth layer [m]. Defaults to None, in which case the cloth's particle radius is used.
-    """
-
-    squeeze_lift: float = 0.0
-    """Distance by which the grasped nodes are lifted along the EE frame's -z axis while squeezed, epsilon of Nayak et
-    al. [m]."""
-
-    squeeze_steps: int = 5
-    """Number of environment steps over which the press of the fold and the fingers ramp in after the grasp, and back
-    out before the release when the gripper is commanded open."""
-
-    contact_clearance: float = 0.01
-    """Cloth-node clearance [m] required to restore gripper contacts after release."""

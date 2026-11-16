@@ -46,7 +46,7 @@ from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyMappingCfg
 from isaaclab_tasks.utils import PresetCfg
 
 from ... import mdp, reset_strategies
-from ...coupler_cfg import ClothGraspCouplerProxyCfg
+from ...constrained_gripper import ClothGraspActionCfg, ClothGraspCouplerProxyCfg
 
 ##
 #################### Pre-defined configs ####################
@@ -308,7 +308,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
 ##
 
 # ------------------- Action Terms -------------------
-GRIPPER_ACTION_CFG = mdp.ClothGraspActionCfg(
+GRIPPER_ACTION_CFG = ClothGraspActionCfg(
     # Binary gripper action: open <0 or close >0 (e.g sign from distance)
     asset_name="robot",
     joint_names=["panda_finger_joint1"],
@@ -320,6 +320,7 @@ GRIPPER_ACTION_CFG = mdp.ClothGraspActionCfg(
     # Grasping parameters
     release_travel=0.002,  # reopen after failed grasp to retry
     squeeze_steps=5,  # Squeezing Model
+    grasp_min_nodes=2,  # GRASP -> DRAG: a grasp locking at least this many nodes to the EE, one of them raised
 )
 
 
@@ -536,7 +537,6 @@ class CommandsCfg:
         debug_vis=True,  # Target marker
         # Task stage transitions
         approach_radius=0.04,  # APPROACH -> GRASP: EE frame closer than [m] to a raised node (any node if none)
-        grasp_min_nodes=2,  # GRASP -> DRAG: a grasp locking at least this many nodes to the EE, one of them raised
         goal_zone_margin=0.06,  # DRAG -> GOAL: center node closer than success_radius + this (0.10 m) to the target
         # Success per start stage (Metrics/cloth_target/task_success_<stage>_*), also used by the adaptive resets
         success_window_steps=480,  # averaging window (24 x 20 iterations), longer than an episode (300 steps)
@@ -611,7 +611,7 @@ class UniformResetsCfg:
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
         bank_path="logs/reset_banks/bank_v8.pt",  # approach 8000, grasp 1000, drag 100, goal 100
-        start_stage_ratios={"approach": 0.4125, "grasp": 0.4125, "drag": 0.075, "goal": 0.10},
+        start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
     )
@@ -623,7 +623,7 @@ class AdaptiveResetsCfg:
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
         bank_path="logs/reset_banks/bank_v9_focus.pt",  # approach 8000, grasp 2000, drag 1000, goal 1000
-        start_stage_ratios={"approach": 0.40, "grasp": 0.50, "drag": 0.075, "goal": 0.10},
+        start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
         min_stage_ratios={"grasp": 0.15, "drag": 0.05, "goal": 0.05},
         # Ratio Changing Variables
         ratio_shift_success_range=(0.70, 0.95),
@@ -824,7 +824,7 @@ class CurriculumCfg:
 
 @configclass
 class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
-    """Manager-based RL environment: Franka Panda dragging a cloth across the table."""
+    """Manager-based RL environment"""
 
     # Scene settings
     scene: FrankaClothDragSceneCfg = FrankaClothDragSceneCfg(num_envs=2048, env_spacing=2.2, replicate_physics=True)
@@ -856,8 +856,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         ]
 
         # Curriculum settings
-        if self.curriculum is not None and self.curriculum.observation_hiding is not None:
-            self.curriculum.observation_hiding.params["initial_progress"] = 0.0
+        self.curriculum.observation_hiding.params["initial_progress"] = 0.0
 
         # Reset Strategie settings
         self.events = DefaultResetsCfg()

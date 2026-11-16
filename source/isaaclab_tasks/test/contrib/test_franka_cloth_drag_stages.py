@@ -19,8 +19,9 @@ from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_en
     RewardsCfg,
     TerminationsCfg,
 )
+from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.constraint import ClothGraspConstraint
+from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.geometry import pad_box_mask
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp import rewards as rewards_module
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp.cloth_grasp import ClothGraspConstraint
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     ClothDistanceProgress,
     GripperCloseProgress,
@@ -32,11 +33,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.mdp.rewards import (
     gripper_closed_off_grasp_node,
     gripper_closed_on_grasp_node,
 )
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import (
-    cloth_goal_xy_distance,
-    gripper_holds_raised_node,
-    pad_box_mask,
-)
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.stages import cloth_goal_xy_distance, gripper_holds_raised_node
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp.terminations import bank_start_advanced
 
 NUM_NODES = 6
@@ -118,11 +115,6 @@ def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.
         ee_frame_name="ee_frame",
         asset_name="robot",
         object_name="deformable",
-        finger_joint_name="finger",
-        finger_pad_half_width=0.0125,
-        finger_pad_half_length=0.0085,
-        finger_gap_margin=0.003,
-        grasp_min_nodes=2,
     )
     frame = SimpleNamespace(
         data=SimpleNamespace(
@@ -143,7 +135,15 @@ def _grasp_reward_env(points, edges=(), triangles=(), raised=((0,),), opening=0.
     constraint.active = torch.tensor([False])
     constraint.grasped = torch.zeros(1, points.shape[1], dtype=torch.bool)
     term = SimpleNamespace(
-        cfg=SimpleNamespace(open_command_expr={"finger": OPEN}, close_command_expr={"finger": CLOSED}),
+        cfg=SimpleNamespace(
+            open_command_expr={"finger": OPEN},
+            close_command_expr={"finger": CLOSED},
+            finger_joint_name="finger",
+            finger_pad_half_width=0.0125,
+            finger_pad_half_length=0.0085,
+            finger_gap_margin=0.003,
+            grasp_min_nodes=2,
+        ),
         closed=torch.tensor([True]),
         constraint=constraint,
         is_grasping=constraint.active,
@@ -187,7 +187,7 @@ def test_closing_reward_requires_minimum_count_and_the_selected_grasp_node():
     assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 1.0
     command.grasp_node_id[:] = 1
     assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 1.0
-    command.cfg.grasp_min_nodes = 3
+    term.cfg.grasp_min_nodes = 3
     assert gripper_closed_on_grasp_node(env, ["grasp"]).item() == 0.0
     # the penalty only asks whether the grasp node is between the pads, not whether the lock would form
     assert gripper_closed_off_grasp_node(env, ["grasp"]).item() == 0.0
@@ -592,7 +592,7 @@ def test_goal_distance_measures_the_goal_object_if_set():
 def test_contact_latch_marks_only_touching_monitored_pairs():
     import warp as wp
 
-    from isaaclab_tasks.contrib.franka_cloth_drag.coupler import _latch_touching_pairs
+    from isaaclab_tasks.contrib.franka_cloth_drag.constrained_gripper.coupler import _latch_touching_pairs
 
     # shapes: world 0 gripper 0, cube 1, table 2 (static); world 1 gripper 3, cube 4; bodies 0, 1, -, 2, 3
     shape_body = [0, 1, -1, 2, 3]

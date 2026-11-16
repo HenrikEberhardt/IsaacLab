@@ -16,7 +16,6 @@ __all__ = [
     "cloth_held",
     "cloth_drag_success_bonus",
     "cloth_drag_termination_penalty",
-    "ClothGraspActionCfg",
     "ClothPointsInEEFrame",
     "ClothTargetCommandCfg",
     "ActionRateCurriculum",
@@ -87,7 +86,6 @@ from isaaclab.envs.mdp import *  # noqa: F401, F403
 from isaaclab_tasks.core.lift.mdp import *  # noqa: F401, F403
 
 from .actions_cfg import (
-    ClothGraspActionCfg,
     LimitedRelativeJointPositionActionCfg,
     RateLimitedBinaryJointPositionActionCfg,
     TopDownDeltaEEActionCfg,

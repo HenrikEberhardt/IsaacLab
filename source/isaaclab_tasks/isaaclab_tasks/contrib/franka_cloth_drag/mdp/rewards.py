@@ -21,6 +21,7 @@ import torch
 
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 
+from ..constrained_gripper.geometry import gripper_cfg, gripper_closing, gripper_closure, nodes_in_grasp
 from .frames import (
     cloth_center_pos_b,
     cloth_center_vel_b,
@@ -35,9 +36,6 @@ from .stages import (
     ee_cloth_distance,
     ee_grasp_node_distance,
     grasp_node_capturable,
-    gripper_closing,
-    gripper_closure,
-    nodes_in_grasp,
 )
 
 if TYPE_CHECKING:
@@ -220,8 +218,9 @@ def cloth_between_fingers(
 ) -> torch.Tensor:
     """Reward cloth nodes between the finger pads, linear up to ``num_nodes_full`` nodes.
 
-    The nodes are counted like the lock of the grasp counts them, see :func:`~.stages.nodes_in_grasp`.
-    Set ``saturate`` False to stop paying after the active stages instead of paying the maximum.
+    The nodes are counted like the lock of the grasp counts them, see
+    :func:`~..constrained_gripper.geometry.nodes_in_grasp`. Set ``saturate`` False to stop paying after the active
+    stages instead of paying the maximum.
     """
     command = _command(env, command_name)
     reward = (nodes_in_grasp(env, command.cfg).float() / num_nodes_full).clamp(max=1.0)
@@ -256,13 +255,15 @@ def gripper_closed_on_grasp_node(
     picks at least ``grasp_min_nodes`` nodes with the grasp node among them, or an active lock holds it. The pad box
     bounds the EE height above the node by the pad half length. It never saturates into later stages.
 
-    Only a close before its lock attempt pays (:attr:`~.actions.ClothGraspAction.grasp_tried`): once the fingers
-    settle, the lock either forms or finds too few nodes, and a gripper held closed after a failed attempt earns
-    nothing until it reopens and closes again.
+    Only a close before its lock attempt pays
+    (:attr:`~..constrained_gripper.grasp_action.ClothGraspAction.grasp_tried`): once the fingers settle, the lock either
+    forms or finds too few nodes, and a gripper held closed after a failed attempt earns nothing until it reopens and
+    closes again.
 
     Without ``num_nodes_full`` the reward is one while closing captures the grasp node. With it, the reward grows with
-    the number of nodes the grasp would lock (:func:`~.stages.nodes_in_grasp`), ``min(n, num_nodes_full) /
-    num_nodes_full``: a larger pinch pays more, and the cap keeps pushing the cloth into a heap from paying extra.
+    the number of nodes the grasp would lock (:func:`~..constrained_gripper.geometry.nodes_in_grasp`),
+    ``min(n, num_nodes_full) / num_nodes_full``: a larger pinch pays more, and the cap keeps pushing the cloth into a
+    heap from paying extra.
 
     Args:
         env: The environment.
@@ -311,12 +312,13 @@ def gripper_closed_off_grasp_node(
 def gripper_closed_on_cloth(
     env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target"
 ) -> torch.Tensor:
-    """Return one when the gripper closes with at least the command's ``grasp_min_nodes`` nodes between the pads.
+    """Return one when the gripper closes with at least the gripper's ``grasp_min_nodes`` nodes between the pads.
 
-    The nodes are counted like the lock of the grasp counts them, see :func:`~.stages.nodes_in_grasp`.
+    The nodes are counted like the lock of the grasp counts them, see
+    :func:`~..constrained_gripper.geometry.nodes_in_grasp`.
     """
     command = _command(env, command_name)
-    on_cloth = nodes_in_grasp(env, command.cfg) >= command.cfg.grasp_min_nodes
+    on_cloth = nodes_in_grasp(env, command.cfg) >= gripper_cfg(env, command.cfg).grasp_min_nodes
     reward = (gripper_closing(env, command.cfg) & on_cloth).float()
     return _stage_gate(reward, command.stage, stages, saturate=True)
 
@@ -326,7 +328,8 @@ def gripper_closed_on_nothing(
 ) -> torch.Tensor:
     """Return one when the gripper closes without any cloth node between the pads. A penalty: it never saturates.
 
-    The nodes are counted like the lock of the grasp counts them, see :func:`~.stages.nodes_in_grasp`.
+    The nodes are counted like the lock of the grasp counts them, see
+    :func:`~..constrained_gripper.geometry.nodes_in_grasp`.
     """
     command = _command(env, command_name)
     empty = nodes_in_grasp(env, command.cfg) == 0
@@ -725,10 +728,10 @@ class ClothDistanceProgress(ManagerTermBase):
 class GripperCloseProgress(ManagerTermBase):
     """Signed progress of closing the gripper on the grasp node, in the active stages.
 
-    The tracked quantity is the measured closure (:func:`~.stages.gripper_closure`). With ``num_nodes_full`` it is
-    multiplied by ``min(n, num_nodes_full) / num_nodes_full`` for the ``n`` nodes the grasp would lock
-    (:func:`~.stages.nodes_in_grasp`): a larger pinch pays more, and the cap keeps pushing the cloth into a heap from
-    paying extra.
+    The tracked quantity is the measured closure (:func:`~..constrained_gripper.geometry.gripper_closure`). With
+    ``num_nodes_full`` it is multiplied by ``min(n, num_nodes_full) / num_nodes_full`` for the ``n`` nodes the grasp
+    would lock (:func:`~..constrained_gripper.geometry.nodes_in_grasp`): a larger pinch pays more, and the cap keeps
+    pushing the cloth into a heap from paying extra.
 
     Only steps in the active stages on which closing captures the grasp node
     (:func:`~.stages.grasp_node_capturable`) sample it. The first sample of an episode establishes a reference. Other

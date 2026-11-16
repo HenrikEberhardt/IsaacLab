@@ -17,8 +17,8 @@ from isaaclab.managers import CommandTerm, SceneEntityCfg
 from isaaclab.markers import VisualizationMarkers
 from isaaclab.utils.math import combine_frame_transforms
 
+from ..constrained_gripper.grasp_diagnostics import GraspDiagnostics
 from .frames import cloth_center_pos_b, points_to_base, raised_node_ids
-from .grasp_diagnostics import GraspDiagnostics
 from .stages import (
     START_STAGE_NAMES,
     ClothDragStage,
@@ -120,8 +120,8 @@ class ClothTargetCommand(CommandTerm):
       finished episodes per stage they started in (:attr:`start_stage`), and the share that reached the stage after it,
       see :class:`StartStageSuccess`.
 
-    The grasp diagnostics of :class:`~.grasp_diagnostics.GraspDiagnostics` are logged under ``Grasp/*``, their own
-    section in the training logs.
+    The grasp diagnostics of :class:`~..constrained_gripper.grasp_diagnostics.GraspDiagnostics` are logged under
+    ``Grasp/*``, their own section in the training logs.
 
     With :attr:`ClothTargetCommandCfg.goal_object_name` set, also:
 

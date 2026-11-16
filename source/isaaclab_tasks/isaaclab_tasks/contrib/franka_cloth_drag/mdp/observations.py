@@ -43,7 +43,8 @@ if TYPE_CHECKING:
     from isaaclab.managers import ObservationTermCfg
     from isaaclab.sensors import FrameTransformer
 
-    from .actions import ClothGraspAction, LimitedRelativeJointPositionAction, TopDownDeltaEEAction
+    from ..constrained_gripper.grasp_action import ClothGraspAction
+    from .actions import LimitedRelativeJointPositionAction, TopDownDeltaEEAction
 
 
 def joint_pos_ratio(env: ManagerBasedRLEnv, action_name: str, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -114,7 +115,8 @@ def cloth_grasped(
     """One while the gripper holds cloth nodes locked to the hand, else minus one, shape [num_envs, 1].
 
     Privileged: the real Franka Hand's ``is_grasped`` flag cannot tell thin cloth from an empty close, because
-    ``grasp(width=0)`` also counts the closed fingers as grasped. See :class:`~.actions.ClothGraspAction`.
+    ``grasp(width=0)`` also counts the closed fingers as grasped. See
+    :class:`~..constrained_gripper.grasp_action.ClothGraspAction`.
 
     With ``hide_curriculum``, the flag is zero in the episodes the curriculum term of that name hides it in
     (:attr:`~.curriculums.ObservationHidingCurriculum.hidden`), distinct from both grasp states. Without that term,
@@ -135,7 +137,8 @@ def cloth_grasped(
 
 
 def grasped_node_ratio(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
-    """Share of the cloth nodes locked to the hand, shape [num_envs, 1]. See :class:`~.actions.ClothGraspAction`.
+    """Share of the cloth nodes locked to the hand, shape [num_envs, 1]. See
+    :class:`~..constrained_gripper.grasp_action.ClothGraspAction`.
 
     Args:
         env: The environment.
