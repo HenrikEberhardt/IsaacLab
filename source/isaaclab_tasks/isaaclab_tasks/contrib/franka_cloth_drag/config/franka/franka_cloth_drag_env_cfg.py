@@ -622,8 +622,8 @@ class AdaptiveResetsCfg:
     """Bank resets whose start-stage ratios adapt to training success."""
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_v8.pt",
-        start_stage_ratios={"approach": 0.40, "grasp": 0.50, "drag": 0.075, "goal": 0.075},
+        bank_path="logs/reset_banks/bank_v9_focus.pt",  # approach 8000, grasp 2000, drag 1000, goal 1000
+        start_stage_ratios={"approach": 0.40, "grasp": 0.50, "drag": 0.075, "goal": 0.10},
         min_stage_ratios={"grasp": 0.15, "drag": 0.05, "goal": 0.05},
         # Ratio Changing Variables
         ratio_shift_success_range=(0.70, 0.95),
@@ -757,6 +757,11 @@ class TerminationsCfg:
     # Episode timeout
     time_out = DoneTerm(func=mdp.time_out, time_out=True)
 
+    # Grasp bank starts end as a truncation (value bootstrapped) once they lock a raised node (reach DRAG)
+    bank_start_advanced = DoneTerm(
+        func=mdp.bank_start_advanced, params={"start_stages": ("grasp",), "steps_after_entry": 0}, time_out=True
+    )
+
     # Cloth fallen of table
     cloth_out_of_bounds = DoneTerm(
         func=mdp.deformable_outside_bounds,
@@ -854,5 +859,5 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         if self.curriculum is not None and self.curriculum.observation_hiding is not None:
             self.curriculum.observation_hiding.params["initial_progress"] = 0.0
 
-        # Reset to Task beginning
+        # Reset Strategie settings
         self.events = DefaultResetsCfg()

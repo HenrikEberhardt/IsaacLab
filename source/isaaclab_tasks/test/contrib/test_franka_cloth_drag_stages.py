@@ -428,9 +428,16 @@ def test_stage_progress_telescopes_from_the_start_stage():
 
 def test_bank_start_advanced_ends_only_grasp_and_drag_starts_past_their_stage():
     # starts: approach, grasp, grasp, drag, goal
-    command = SimpleNamespace(start_stage=torch.tensor([0, 1, 1, 2, 3]), stage=torch.tensor([3, 1, 2, 3, 3]))
-    env = SimpleNamespace(command_manager=SimpleNamespace(get_term=lambda name: command))
+    command = SimpleNamespace(
+        start_stage=torch.tensor([0, 1, 1, 2, 3]),
+        stage=torch.tensor([3, 1, 2, 3, 3]),
+        time_in_stage=torch.tensor([0.0, 0.0, 0.0, 0.5, 0.0]),
+    )
+    env = SimpleNamespace(step_dt=0.5, command_manager=SimpleNamespace(get_term=lambda name: command))
     assert bank_start_advanced(env).tolist() == [False, False, True, True, False]
+    # grasp starts only; and only one step after the entry
+    assert bank_start_advanced(env, start_stages=("grasp",)).tolist() == [False, False, True, False, False]
+    assert bank_start_advanced(env, steps_after_entry=1).tolist() == [False, False, False, True, False]
 
 
 def test_termination_penalty_counts_each_terminated_episode_once_over_the_step():

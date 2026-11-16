@@ -55,15 +55,38 @@ def physics_contact(env: ManagerBasedRLEnv, contact_name: str) -> torch.Tensor:
     return touched
 
 
-def bank_start_advanced(env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:
-    """End an episode that started in the GRASP or DRAG stage of a reset bank once it reaches the next stage.
+def bank_start_advanced(
+    env: ManagerBasedRLEnv,
+    start_stages: tuple[str, ...] = ("grasp", "drag"),
+    steps_after_entry: int = 0,
+    command_name: str = "cloth_target",
+) -> torch.Tensor:
+    """End an episode that started in one of ``start_stages`` of a reset bank once it reaches the next stage.
 
     Use as a truncation (``time_out=True``) so the value of the reached stage is bootstrapped: bank starts become short,
     stage-local episodes and the critic chains the stages. Approach and goal starts are never ended by it.
+
+    The time-out bootstrap uses the value of the state before the last action. With ``steps_after_entry`` zero that
+    state is the one before the stage entry, whose value already anticipates the reward paid for the entry; one or more
+    steps end the episode only that many steps after the entry, so the bootstrapped state lies past it.
+
+    Args:
+        env: The environment.
+        start_stages: Bank start stages whose episodes are ended, out of ``"grasp"`` and ``"drag"``.
+        steps_after_entry: Environment steps the episode keeps running in the reached stage before it ends.
+        command_name: Name of the cloth target command.
     """
-    from .stages import ClothDragStage
+    from .stages import START_STAGE_NAMES, ClothDragStage
 
     command = env.command_manager.get_term(command_name)
     start = command.start_stage
-    bank_start = (start == int(ClothDragStage.GRASP)) | (start == int(ClothDragStage.DRAG))
-    return bank_start & (command.stage > start)
+    bank_start = torch.zeros_like(start, dtype=torch.bool)
+    for name in start_stages:
+        stage_id = START_STAGE_NAMES.index(name)
+        if stage_id not in (int(ClothDragStage.GRASP), int(ClothDragStage.DRAG)):
+            raise ValueError(f"start_stages must be out of 'grasp' and 'drag', got {start_stages}.")
+        bank_start |= start == stage_id
+    advanced = bank_start & (command.stage > start)
+    if steps_after_entry > 0:
+        advanced &= command.time_in_stage >= (steps_after_entry - 0.5) * env.step_dt
+    return advanced
