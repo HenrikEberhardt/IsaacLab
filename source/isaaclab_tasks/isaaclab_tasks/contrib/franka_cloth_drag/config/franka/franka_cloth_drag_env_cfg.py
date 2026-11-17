@@ -671,7 +671,7 @@ class AdaptiveResetsCfg:
         ratio_max_shift_per_step=0.0016,
         ratio_hold_steps=300,
         # Frontier Sampling
-        use_frontier_sampling=False,
+        use_frontier_sampling=True,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
         frontier_stages=("grasp", "drag", "goal"),
     )
