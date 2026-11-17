@@ -67,10 +67,9 @@ class ResetFromBankCfg(EventTermCfg):
 
     ratio_shift_success_range: tuple[float, float] = (0.80, 0.92)
     """Success (low, high) of a stage between which it hands over its ratio: all of it is kept below ``low``, only the
-    minimum from ``high``. The success of a stage in :attr:`frontier_stages` with frontier sampling is the mean of its
-    states' frontier success estimates (every state weighted equally, unvisited states count as failed); otherwise it
-    is the smoothed share of the episodes started in the stage that reach the next one (the task success for the goal
-    stage). Used with :attr:`min_stage_ratios`."""
+    minimum from ``high``. Success is the smoothed share of episodes started in the stage that reach the next one (the
+    task success for the goal stage), independently of per-state frontier sampling. Used with
+    :attr:`min_stage_ratios`."""
 
     ratio_max_shift_per_step: float = 0.0008
     """Largest change of any stage's ratio per environment step (0.02 per iteration at 24 steps/iteration), so a

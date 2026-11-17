@@ -42,11 +42,12 @@ import gymnasium as gym
 from isaaclab.app import add_launcher_args, launch_simulation
 
 import isaaclab_tasks  # noqa: F401
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownDeltaEEActionCfg
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownStabilizedDeltaEEActionCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import ResetBankGenerationCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
     ClothDragSmRunner,
     DragClothSm,
+    configure_state_machine_osc,
     make_sm_profile,
 )
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
@@ -106,9 +107,10 @@ def main():
     env_cfg.seed = args_cli.seed
     env_cfg.sim.visualizer_cfgs = []
     args_cli.visualizer = None
+    configure_state_machine_osc(env_cfg)
     # the training physics and terminations; the success termination ends successful rollouts
-    if not isinstance(env_cfg.actions.arm_action, TopDownDeltaEEActionCfg):
-        raise SystemExit("The state machine commands the delta end-effector action: use the 'ee_delta' actions preset.")
+    if not isinstance(env_cfg.actions.arm_action, TopDownStabilizedDeltaEEActionCfg):
+        raise SystemExit("Reset-bank generation requires the state-machine roll/pitch-stabilized arm action.")
 
     with launch_simulation(env_cfg, args_cli):
         from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import ResetBankBuilder, add_bank_term

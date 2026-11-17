@@ -10,11 +10,14 @@ import math
 import pytest
 import torch
 
+from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import FrankaClothDragEnvCfg
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownStabilizedDeltaEEActionCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
     ClothDragSmCfg,
     ClothDragSmObservation,
     DragClothSm,
     DragSmState,
+    configure_state_machine_osc,
     ee_down_tilt,
     feasible_yaw_step,
     limit_arm_action,
@@ -140,3 +143,22 @@ def test_arm_action_limit_uniformly_scales_each_row():
 def test_arm_action_limit_setting_is_checked(limit):
     with pytest.raises(ValueError, match="arm_action_limit"):
         ClothDragSmCfg(arm_action_limit=limit)
+
+
+def test_state_machine_osc_configuration_is_isolated_and_keeps_the_actuator():
+    env_cfg = FrankaClothDragEnvCfg()
+    env_cfg.actions = env_cfg.actions.default
+    original_action = env_cfg.actions.arm_action
+    original_actuator = env_cfg.scene.robot.actuators["panda_arm"]
+
+    configure_state_machine_osc(env_cfg)
+
+    action = env_cfg.actions.arm_action
+    actuator = env_cfg.scene.robot.actuators["panda_arm"]
+    assert isinstance(action, TopDownStabilizedDeltaEEActionCfg)
+    assert actuator is original_actuator
+    assert action.scale_trans == original_action.scale_trans
+    assert action.scale_rot == original_action.scale_rot
+    assert action.controller == original_action.controller
+    assert action.tilt_stiffness > 0.0
+    assert 0.0 < action.tilt_effort_limit_factor < 1.0

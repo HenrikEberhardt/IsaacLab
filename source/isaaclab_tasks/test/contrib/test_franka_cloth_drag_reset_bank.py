@@ -186,6 +186,7 @@ def test_frontier_uses_linearly_weighted_recent_outcomes():
 def test_frontier_beta_weights_peak_at_the_target_and_stay_positive():
     sampler = ResetStateFrontierSampler(3, "cpu", FrontierSamplerCfg(target_success_estimate=0.5))
     sampler.success_rate[:] = torch.tensor([0.0, 0.5, 1.0])
+    sampler.history_size[:] = 1
     weights = sampler.sampling_weights()
     assert weights[1] > weights[0]
     assert weights[1] > weights[2]
@@ -198,6 +199,23 @@ def test_frontier_beta_weights_peak_at_the_target_and_stay_positive():
     assert metrics["frontier_hard_fraction"] == pytest.approx(1.0 / 3.0)
     assert metrics["frontier_medium_fraction"] == pytest.approx(1.0 / 3.0)
     assert metrics["frontier_solved_fraction"] == pytest.approx(1.0 / 3.0)
+    assert metrics["frontier_unvisited_fraction"] == 0.0
+    assert metrics["frontier_partial_history_fraction"] == 1.0
+    assert metrics["frontier_full_history_fraction"] == 0.0
+
+
+def test_frontier_prioritizes_unvisited_states_at_the_target():
+    sampler = ResetStateFrontierSampler(3, "cpu", FrontierSamplerCfg(target_success_estimate=0.5))
+    sampler.success_rate[:] = torch.tensor([0.0, 0.5, 0.0])
+    sampler.history_size[:] = torch.tensor([0, 1, 1])
+
+    weights = sampler.sampling_weights()
+
+    assert weights[0] == pytest.approx(float(weights[1]))
+    assert weights[0] > weights[2]
+    metrics = sampler.metrics(torch.arange(3))
+    assert metrics["frontier_success_mean"] == pytest.approx(0.25)
+    assert metrics["frontier_unvisited_fraction"] == pytest.approx(1.0 / 3.0)
 
 
 @pytest.mark.parametrize(
@@ -316,11 +334,13 @@ class _Command:
 def _fake_env(success, log_dir=None, window_steps=480):
     """A fake environment whose finished episodes' outcome is set in ``success`` and the command's
     ``time_to_stage``."""
+    num = len(success)
     command = _Command(success, window_steps)
     return SimpleNamespace(
-        num_envs=len(success),
+        num_envs=num,
         device="cpu",
         common_step_counter=0,
+        episode_length_buf=torch.ones(num),
         extras={},
         cfg=SimpleNamespace(log_dir=log_dir),
         command_manager=SimpleNamespace(get_term=lambda name: command),
@@ -365,7 +385,9 @@ def _rates(source, suffix, task, stage):
 
 def _without_state_logs(log):
     """Remove per-state diagnostics when a test targets only the per-source log contract."""
-    return {key: value for key, value in log.items() if "state_visit_fraction" not in key}
+    return {
+        key: value for key, value in log.items() if "state_visit_fraction" not in key and "timestep_share" not in key
+    }
 
 
 def test_reset_logs_success_per_start_stage(monkeypatch):
@@ -415,6 +437,8 @@ def test_default_starts_log_the_same_success_keys(monkeypatch, with_bank_term):
     command = env.command_manager.get_term("cloth_target")
     command.time_to_stage[:, 1] = torch.tensor([1.0, 2.0, -1.0, 3.0])
     log = _reset(term, env, torch.arange(4), step=5)
+    if with_bank_term:
+        log = _without_state_logs(log)
     rates = _rates("approach", "raw", 0.5, 0.75) | _rates("approach", "smoothed", 0.5, 0.75)
     assert log == (APPROACH_ONLY_SHARES | rates if with_bank_term else rates)
 
@@ -475,6 +499,31 @@ def test_reset_counts_visits_per_stored_state(monkeypatch):
     assert term.state_visit_count.tolist() == [0]
 
 
+def test_reset_logs_timestep_share_of_finished_start_stages(monkeypatch):
+    term, env = _reset_term(monkeypatch, _bank([0, 1, 2, 3]), torch.zeros(4))
+    all_envs = torch.arange(4)
+    term.force_rows(all_envs, all_envs)
+    _reset(term, env, all_envs, step=0)
+    env.episode_length_buf[:] = torch.tensor([8, 4, 2, 2])
+
+    log = _reset(term, env, all_envs, step=1)
+
+    assert log["Reset/timestep_share_approach_raw"] == 0.5
+    assert log["Reset/timestep_share_grasp_raw"] == 0.25
+    assert log["Reset/timestep_share_drag_raw"] == 0.125
+    assert log["Reset/timestep_share_goal_raw"] == 0.125
+
+
+def test_timestep_share_tolerates_generation_term_without_bank(monkeypatch):
+    term, _ = _reset_term(monkeypatch, None, torch.zeros(2))
+    assert term._timestep_share_log(torch.tensor([0, 1]), torch.tensor([2.0, 3.0])) == {
+        "Reset/timestep_share_approach_raw": 1.0,
+        "Reset/timestep_share_grasp_raw": 0.0,
+        "Reset/timestep_share_drag_raw": 0.0,
+        "Reset/timestep_share_goal_raw": 0.0,
+    }
+
+
 def test_frontier_tracks_next_stage_outcomes_and_logs_visits(monkeypatch, tmp_path):
     bank = _bank([1, 1, 2, 3])
     bank.save(tmp_path / "bank.pt")
@@ -508,6 +557,9 @@ def test_frontier_tracks_next_stage_outcomes_and_logs_visits(monkeypatch, tmp_pa
     assert log["Reset/frontier_hard_fraction_grasp"] == pytest.approx(0.5)
     assert log["Reset/frontier_medium_fraction_grasp"] == 0.0
     assert log["Reset/frontier_solved_fraction_grasp"] == pytest.approx(0.5)
+    assert log["Reset/frontier_unvisited_fraction_grasp"] == 0.0
+    assert log["Reset/frontier_partial_history_fraction_grasp"] == 1.0
+    assert log["Reset/frontier_full_history_fraction_grasp"] == 0.0
     assert log["Reset/frontier_effective_pool_fraction_grasp"] == pytest.approx(1.0)
     assert log["Reset/frontier_top_1_percent_mass_grasp"] == pytest.approx(0.5)
 
@@ -581,8 +633,9 @@ def test_reset_exports_state_statistics_periodically(monkeypatch, tmp_path):
     assert snapshot["frontier"] is None
 
 
+@pytest.mark.parametrize("use_frontier", [False, True])
 @pytest.mark.parametrize("max_shift, handed_over", [(1.0, [0.35, 0.45, 0.15, 0.05]), (0.01, [0.31, 0.45, 0.15, 0.09])])
-def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path, max_shift, handed_over):
+def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path, use_frontier, max_shift, handed_over):
     success = torch.ones(4)
     bank = _bank([0, 1, 2, 3])
     bank.save(tmp_path / "bank.pt")
@@ -593,6 +646,7 @@ def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path, max_
         bank_path=str(tmp_path / "bank.pt"),
         start_stage_ratios={"approach": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
         min_stage_ratios={"grasp": 0.05, "drag": 0.05, "goal": 0.05},
+        use_frontier_sampling=use_frontier,
         ratio_shift_success_range=(0.85, 0.97),
         ratio_max_shift_per_step=max_shift,
         window_steps=3,
@@ -600,7 +654,7 @@ def test_adaptive_shares_follow_the_smoothed_success(monkeypatch, tmp_path, max_
     )
     drawn = []
 
-    def record_shares(_, shares, num):
+    def record_shares(_, shares, num, weights=None):
         drawn.append(shares.tolist())
         return torch.full((num,), -1)
 
@@ -721,7 +775,7 @@ def test_focus_settings_are_checked(monkeypatch, tmp_path):
     build(("goal", "drag", "grasp", "approach"))
 
 
-def test_handover_reads_the_per_state_frontier_success(monkeypatch, tmp_path):
+def test_handover_uses_stage_success_independently_of_frontier(monkeypatch, tmp_path):
     # two grasp states (rows 1, 2) and two drag states (rows 3, 4); only grasp is a frontier stage
     bank = _bank([0, 1, 1, 2, 2])
     bank.save(tmp_path / "bank.pt")
@@ -735,12 +789,12 @@ def test_handover_reads_the_per_state_frontier_success(monkeypatch, tmp_path):
         use_frontier_sampling=True,
         frontier_stages=("grasp",),
     )
-    # grasp states: one solved, one failed, so the per-state mean is 0.5 whatever the episode window says
+    # The frontier can disagree with aggregate stage success without changing cross-stage ratio adaptation.
     term._frontier.record(torch.tensor([1, 2]), torch.tensor([True, False]))
     window = torch.zeros(3, 4, dtype=torch.float64)
     window[0, 1:3], window[2, 1:3] = 10.0, torch.tensor([10.0, 3.0])  # grasp window 1.0, drag window 0.3
     term._adapt_ratios(0, window)
-    assert term._stage_success[1].item() == pytest.approx(0.5)
+    assert term._stage_success[1].item() == pytest.approx(1.0)
     assert term._stage_success[2].item() == pytest.approx(0.3)
 
 
@@ -791,7 +845,7 @@ def test_quotas_split_evenly_over_all_stages():
         ResetBankGenerationCfg(stage_quotas={"approach": 10, "grasp": 10})
     with pytest.raises(ValueError, match="at least one"):
         ResetBankGenerationCfg(stage_quotas=quotas | {"drag": 0})
-    assert ResetBankGenerationCfg().max_ee_down_tilt_deg == 0.5
+    assert ResetBankGenerationCfg().max_ee_down_tilt_deg == 1.0
     with pytest.raises(ValueError, match="max_ee_down_tilt_deg"):
         ResetBankGenerationCfg(max_ee_down_tilt_deg=-0.1)
 

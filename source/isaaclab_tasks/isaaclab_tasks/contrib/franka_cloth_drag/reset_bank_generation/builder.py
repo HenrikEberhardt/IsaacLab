@@ -84,7 +84,7 @@ class ResetBankGenerationCfg:
     max_cube_tilt_deg: float = 20.0
     """Largest cube tilt from upright [deg] while a candidate is held."""
 
-    max_ee_down_tilt_deg: float = 0.5
+    max_ee_down_tilt_deg: float = 1.0
     """Largest end-effector tilt from base-frame down [deg] while a restored candidate is held."""
 
     candidate_margin: float = 1.5

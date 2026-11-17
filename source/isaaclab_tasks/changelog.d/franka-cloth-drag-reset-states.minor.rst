@@ -6,8 +6,8 @@ Added
   reset events; ``env.events=uniform_resets`` starts every episode from a stored reset state, drawn with fixed stage
   ratios; ``env.events=adaptive_resets`` draws the same states, but a solved grasp, drag or goal stage hands its
   ratio of the resets over to the approach stage, down to a minimum ratio; the approach stage never gives up ratio
-  (``handover_stage_ratios``). A stage's success is the mean of its states' frontier estimates with frontier sampling,
-  else the smoothed share of its episodes that reach the next stage (logged as ``Reset/handover_success_<stage>``).
+  (``handover_stage_ratios``). A stage's success is the smoothed share of its episodes that reach the next stage,
+  independently of per-state frontier sampling (logged as ``Reset/handover_success_<stage>``).
   The ratios hold their start values for the first ``ratio_hold_steps`` environment steps and change by at most
   ``ratio_max_shift_per_step`` per step. Play mode always uses the default resets.
 * Added the offline bank of reset states behind the uniform and adaptive resets: approach (the task start, or any
@@ -24,8 +24,10 @@ Added
   (``env.events.reset_from_bank.use_frontier_sampling=true``). It keeps the stage ratios and samples independently
   inside the states of every stage of ``frontier_stages`` (grasp, drag and goal by default; the others are drawn
   uniformly) with an SGS beta kernel over a four-rollout, linearly weighted next-stage-success history
-  (``FrontierSamplerCfg``). It also logs per-stage visit-frequency and frontier diagnostics and includes the frontier
-  history, estimates, weights and probabilities in the periodic per-state snapshots.
+  (``FrontierSamplerCfg``). Unvisited states sample at the target success estimate until their first outcome. It also
+  logs per-stage visit-frequency, frontier-history coverage, frontier diagnostics and the share of finished episode
+  timesteps from every start stage, and includes the frontier history, estimates, weights and probabilities in the
+  periodic per-state snapshots.
 * Added the success of the finished episodes per stage they started in to the metrics of the cloth target command,
   under every reset strategy: ``Metrics/cloth_target/task_success_<stage>_raw`` and
   ``Metrics/cloth_target/stage_success_<stage>_raw`` (the share that reached the stage after the start stage, the
@@ -52,6 +54,9 @@ Added
 
 Changed
 ^^^^^^^
+
+* Lowered the adaptive reset floors to 10 % grasp, 1 % drag and 1 % goal, and selected the frontier-sized reset bank
+  with 8000 approach, 1000 grasp, 100 drag and 100 goal states.
 
 * Removed the ``pen_drop`` reward term from ``IsaacContrib-Drag-Cloth-Franka``. With default resets the one-time drop
   cost made the policy stop just short of the lock. Drop/re-grasp laps still earn nothing, because the progress terms

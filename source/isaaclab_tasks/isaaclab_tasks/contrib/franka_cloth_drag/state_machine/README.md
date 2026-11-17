@@ -10,6 +10,10 @@ scripts/run_state_machine.py
         +--> cloth_drag_sm_cfg.py       define profiles and parameters of SM
         +--> cloth_drag_sm.py           state transitions and target commands
         +--> cloth_drag_sm_runner.py    environment state -> controller -> actions
+        +--> osc_control.py             enable bounded roll/pitch stabilization
+                                           |
+                                           +--> mdp/actions.py
+                                                delta IK + roll/pitch torque feedback
 ```
 
 The controller follows this sequence:
@@ -23,7 +27,8 @@ PREGRASP -> HOVER -> DESCEND -> GRASP -> DRAG -> HOLD
 There is one grasp attempt per rollout. A failed grasp or stalled drag enters `FAILED` and waits for the environment
 to reset. These controller phases are motion steps; they are separate from the task's four progress stages.
 Every arm command is uniformly scaled to keep its largest normalized component at or below `0.85`; the task's action
-scales and IK settings remain unchanged.
+scales and IK settings remain unchanged. The state-machine tools add bounded operational-space roll/pitch feedback to
+the IK action. This correction uses at most 25% of each joint's effort limit and is not enabled for policy training.
 
 ## Profiles
 
@@ -51,7 +56,7 @@ uv run python source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag/sta
 Open `http://localhost:8760` while the process is running.
 The diagnostics print EE-frame down-tilt statistics every 30 controller steps; `0 deg` means that the gripper points
 straight down, independently of its yaw.
-Reset-bank generation captures only states within `0.5 deg` of down, and validation checks the limit again after
+Reset-bank generation captures only states within `1.0 deg` of down, and validation checks the limit again after
 restoration and throughout the hold.
 
 ## Command-line flags

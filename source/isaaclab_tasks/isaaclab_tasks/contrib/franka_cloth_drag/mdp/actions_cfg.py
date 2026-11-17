@@ -22,6 +22,7 @@ if TYPE_CHECKING:
         LimitedRelativeJointPositionAction,
         RateLimitedBinaryJointPositionAction,
         TopDownDeltaEEAction,
+        TopDownStabilizedDeltaEEAction,
     )
 
 
@@ -79,6 +80,22 @@ class TopDownDeltaEEActionCfg(DifferentialInverseKinematicsActionCfg):
 
     joint_range_margin: float | None = None
     """Margin inside hard joint limits [rad]. The IK step scales uniformly to keep targets inside this range."""
+
+
+@configclass
+class TopDownStabilizedDeltaEEActionCfg(TopDownDeltaEEActionCfg):
+    """Top-down delta-IK action with bounded operational-space roll/pitch stabilization."""
+
+    class_type: type[TopDownStabilizedDeltaEEAction] | str = "{DIR}.actions:TopDownStabilizedDeltaEEAction"
+
+    tilt_stiffness: float = 150.0
+    """Operational-space roll/pitch stiffness [N·m/rad]."""
+
+    tilt_damping: float = 25.0
+    """Operational-space roll/pitch damping [N·m·s/rad]."""
+
+    tilt_effort_limit_factor: float = 0.25
+    """Largest stabilizing torque per joint as a fraction of its effort limit."""
 
 
 @configclass

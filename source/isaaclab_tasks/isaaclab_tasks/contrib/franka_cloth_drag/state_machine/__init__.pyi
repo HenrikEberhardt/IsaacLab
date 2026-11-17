@@ -27,6 +27,7 @@ __all__ = [
     "keep_requested_visualizers",
     "limit_arm_action",
     "make_sm_profile",
+    "configure_state_machine_osc",
     "pad_cloth_gaps",
     "planar_heading",
     "sample_sm_params",
@@ -62,3 +63,4 @@ from .cloth_drag_sm_cfg import (
 )
 from .cloth_drag_sm_runner import ClothDragSmRunner, feasible_yaw_step, limit_arm_action
 from .diagnostics import ClothDragSmDiagnostics, ee_down_tilt, pad_cloth_gaps
+from .osc_control import configure_state_machine_osc

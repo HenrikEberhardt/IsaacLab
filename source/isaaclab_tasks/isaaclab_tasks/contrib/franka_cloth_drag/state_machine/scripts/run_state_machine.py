@@ -16,12 +16,13 @@ from isaaclab.app import add_launcher_args, launch_simulation
 
 import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import DefaultResetsCfg
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownDeltaEEActionCfg
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownStabilizedDeltaEEActionCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
     PROFILE_NAMES,
     ClothDragSmDiagnostics,
     ClothDragSmRunner,
     DragClothSm,
+    configure_state_machine_osc,
     make_sm_profile,
     sample_sm_params,
 )
@@ -50,6 +51,7 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
     env_cfg.events = DefaultResetsCfg()
+    configure_state_machine_osc(env_cfg)
     env_cfg.sim.visualizer_cfgs = [
         ViserVisualizerCfg(
             eye=(3.68, -3.18, 7.59),
@@ -58,8 +60,8 @@ def main():
             port=VISER_PORT,
         )
     ]
-    if not isinstance(env_cfg.actions.arm_action, TopDownDeltaEEActionCfg):
-        raise SystemExit("The state machine requires the ee_delta action preset.")
+    if not isinstance(env_cfg.actions.arm_action, TopDownStabilizedDeltaEEActionCfg):
+        raise SystemExit("The state machine requires its roll/pitch-stabilized arm action.")
 
     sm_cfg, randomization = make_sm_profile(args_cli.profile)
     with launch_simulation(env_cfg, args_cli):

@@ -23,6 +23,7 @@ __all__ = [
     "LimitedRelativeJointPositionActionCfg",
     "RateLimitedBinaryJointPositionActionCfg",
     "TopDownDeltaEEActionCfg",
+    "TopDownStabilizedDeltaEEActionCfg",
     "cloth_between_fingers",
     "cloth_center_pos_b",
     "cloth_center_vel_b",
@@ -89,6 +90,7 @@ from .actions_cfg import (
     LimitedRelativeJointPositionActionCfg,
     RateLimitedBinaryJointPositionActionCfg,
     TopDownDeltaEEActionCfg,
+    TopDownStabilizedDeltaEEActionCfg,
 )
 from .commands_cfg import ClothTargetCommandCfg
 from .curriculums import ActionRateCurriculum, ObservationHidingCurriculum

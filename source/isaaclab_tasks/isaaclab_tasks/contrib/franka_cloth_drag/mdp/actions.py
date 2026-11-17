@@ -28,6 +28,7 @@ if TYPE_CHECKING:
         LimitedRelativeJointPositionActionCfg,
         RateLimitedBinaryJointPositionActionCfg,
         TopDownDeltaEEActionCfg,
+        TopDownStabilizedDeltaEEActionCfg,
     )
 
 TOP_DOWN_QUAT = (1.0, 0.0, 0.0, 0.0)
@@ -180,6 +181,44 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
             ratio = torch.maximum(ratio, step.abs() / room.clamp(min=1e-9))
         ratio = ratio.amax(dim=1, keepdim=True)
         self._asset.set_joint_position_target_index(target=joint_pos + step / ratio, joint_ids=self._joint_ids)
+
+
+class TopDownStabilizedDeltaEEAction(TopDownDeltaEEAction):
+    """Delta-IK action reinforced by a bounded roll/pitch operational-space torque."""
+
+    cfg: TopDownStabilizedDeltaEEActionCfg
+
+    def __init__(self, cfg: TopDownStabilizedDeltaEEActionCfg, env: ManagerBasedEnv):
+        """Initialize the tilt-feedback gains and per-joint stabilizing torque bound."""
+        super().__init__(cfg, env)
+        if cfg.tilt_stiffness < 0.0 or cfg.tilt_damping < 0.0:
+            raise ValueError("Tilt stiffness and damping must be non-negative.")
+        if not 0.0 <= cfg.tilt_effort_limit_factor <= 1.0:
+            raise ValueError("tilt_effort_limit_factor must lie in [0, 1].")
+        self._tilt_stiffness = torch.full((self.num_envs, 1), cfg.tilt_stiffness, device=self.device)
+        self._tilt_damping = torch.full((self.num_envs, 1), cfg.tilt_damping, device=self.device)
+        effort_limits = self._asset.data.joint_effort_limits.torch[:, self._joint_ids]
+        self._tilt_effort_limits = cfg.tilt_effort_limit_factor * effort_limits
+
+    def apply_actions(self):
+        """Apply the IK position target and a bounded torque that corrects actual roll/pitch error."""
+        super().apply_actions()
+        ee_pos, ee_quat = self._compute_frame_pose()
+        jacobian = self._compute_frame_jacobian()
+        joint_vel = self._asset.data.joint_vel.torch[:, self._joint_ids]
+        angular_vel = (jacobian[:, 3:, :] @ joint_vel.unsqueeze(-1)).squeeze(-1)
+        _, orientation_error = math_utils.compute_pose_error(
+            ee_pos,
+            ee_quat,
+            self._ik_controller.ee_pos_des,
+            self._ik_controller.ee_quat_des,
+            rot_error_type="axis_angle",
+        )
+        correction = torch.zeros_like(orientation_error)
+        correction[:, :2] = self._tilt_stiffness * orientation_error[:, :2] - self._tilt_damping * angular_vel[:, :2]
+        effort = (jacobian[:, 3:, :].transpose(1, 2) @ correction.unsqueeze(-1)).squeeze(-1)
+        effort = torch.clamp(effort, -self._tilt_effort_limits, self._tilt_effort_limits)
+        self._asset.set_joint_effort_target_index(target=effort, joint_ids=self._joint_ids)
 
 
 class RateLimitedBinaryJointPositionAction(BinaryJointPositionAction):

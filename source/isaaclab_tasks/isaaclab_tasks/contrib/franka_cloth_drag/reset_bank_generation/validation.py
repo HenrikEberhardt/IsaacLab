@@ -39,7 +39,7 @@ class ResetStateValidator:
         max_node_speed: float,
         max_cube_tilt_deg: float,
         cube_name: str | None = "cube",
-        max_ee_down_tilt_deg: float = 0.5,
+        max_ee_down_tilt_deg: float = 1.0,
     ):
         """Look up the task terms.
 

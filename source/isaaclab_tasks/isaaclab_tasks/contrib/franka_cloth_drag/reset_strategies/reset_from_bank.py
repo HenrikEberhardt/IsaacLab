@@ -47,12 +47,12 @@ class ResetFromBank(ManagerTermBase):
 
     With ``min_stage_ratios``, the ratios adapt to the success of the stages: ``start_stage_ratios`` are the ratios at
     the start of training, and a solved grasp, drag or goal stage hands its ratio over to the approach stage, down to
-    its minimum (see :func:`~.stage_ratios.handover_stage_ratios`). The success of a stage of ``frontier_stages`` with
-    frontier sampling is the mean of its states' frontier estimates; otherwise it is the smoothed stage success of the
-    episodes that started in it (the share that reached the next stage), which the cloth target command logs
-    (:class:`~..mdp.commands.StartStageSuccess`). The ratios keep their start values for the first
-    ``ratio_hold_steps`` environment steps and change by at most ``ratio_max_shift_per_step`` per step; the success
-    each stage is handed over by is logged as ``Reset/handover_success_<stage>``.
+    its minimum (see :func:`~.stage_ratios.handover_stage_ratios`). Stage ratios use the smoothed success of the
+    episodes that started in each stage (the share that reached the next stage), which the cloth target command logs
+    (:class:`~..mdp.commands.StartStageSuccess`); frontier estimates only select states inside the chosen stage. The
+    ratios keep their start values for the first ``ratio_hold_steps`` environment steps and change by at most
+    ``ratio_max_shift_per_step`` per step; the success each stage is handed over by is logged as
+    ``Reset/handover_success_<stage>``.
 
     With ``use_frontier_sampling``, the states of the ``frontier_stages`` are not drawn uniformly but by an SGS beta
     kernel over a linearly weighted history of their recent next-stage outcomes.
@@ -66,8 +66,9 @@ class ResetFromBank(ManagerTermBase):
     restores only the rows given with :meth:`force_rows` and leaves the other environments as the default resets made
     them (row -1, source ``default``).
 
-    The term logs the share of each stage among the episodes that start now (``Reset/share_<stage>_raw``) and how often
-    the stored states of every stage were visited, and saves snapshots of the visit counts and frontier data under the
+    The term logs the share of each stage among the episodes that start now (``Reset/share_<stage>_raw``), the share
+    of finished episode timesteps that came from each start stage (``Reset/timestep_share_<stage>_raw``), and how often
+    the stored states of every stage were visited. It saves snapshots of the visit counts and frontier data under the
     run's ``reset_state_success`` directory every ``state_success_export_interval_steps``.
     """
 
@@ -219,6 +220,7 @@ class ResetFromBank(ManagerTermBase):
             self._fingerprint_checked = True
         command = env.command_manager.get_term(self.cfg.command_name)
         finished = self.rows[env_ids]
+        finished_lengths = env.episode_length_buf[env_ids].float().clone()
         # the reset at the start of training ends no episode; the command reset clears the outcome later in this reset
         ended = env.common_step_counter > 0
         if ended:
@@ -243,13 +245,27 @@ class ResetFromBank(ManagerTermBase):
         self._pending[env_ids] = stored
         if stored.any():
             restore_physical(env, self.bank, rows[stored], env_ids[stored])
-        self._log = self._share_log(rows) | self._state_log() | self._handover_log() if ended else {}
+        self._log = (
+            self._share_log(rows)
+            | self._timestep_share_log(finished, finished_lengths)
+            | self._state_log()
+            | self._handover_log()
+            if ended
+            else {}
+        )
 
     def _share_log(self, rows: torch.Tensor) -> dict[str, float]:
         """Share of each stage among the episodes that start from the given bank rows."""
         num = len(START_STAGE_NAMES)
         shares = (torch.bincount(self._source(rows), minlength=num) / max(len(rows), 1)).tolist()
         return {f"Reset/share_{name}_raw": share for name, share in zip(START_STAGE_NAMES, shares)}
+
+    def _timestep_share_log(self, rows: torch.Tensor, episode_lengths: torch.Tensor) -> dict[str, float]:
+        """Share of finished episode timesteps contributed by every start stage."""
+        num = len(START_STAGE_NAMES)
+        timesteps = torch.bincount(self._source(rows), weights=episode_lengths, minlength=num)
+        shares = (timesteps / timesteps.sum().clamp(min=1.0)).tolist()
+        return {f"Reset/timestep_share_{name}_raw": share for name, share in zip(START_STAGE_NAMES, shares)}
 
     def _state_log(self) -> dict[str, float]:
         """Visit fractions and, with frontier sampling, frontier diagnostics of the stored states of every stage."""
@@ -336,10 +352,9 @@ class ResetFromBank(ManagerTermBase):
     def _adapt_ratios(self, step: int, window_totals: torch.Tensor) -> None:
         """Move the ratios of the resets towards the handover of the solved stages, once the hold has ended.
 
-        The success of a stage of ``frontier_stages`` with frontier sampling is the mean of its states' frontier
-        estimates, which weights every state equally and is not swung by a batch of late timeouts. Every other stage
-        uses the smoothed stage success over the command's window; a stage without an episode in the window keeps its
-        last value, so a stage that handed over all its ratio stays solved.
+        Every stage uses its smoothed success over the command's window. A stage without an episode in the window
+        keeps its last value, so a stage that handed over all its ratio stays solved. Per-state frontier estimates are
+        deliberately independent and only affect sampling inside the selected stage.
 
         Args:
             step: The environment step.
@@ -347,12 +362,8 @@ class ResetFromBank(ManagerTermBase):
                 window (rows 0 to 2), up to the last reset, shape [3, 4].
         """
         counts, successes = window_totals[0].tolist(), window_totals[2].tolist()
-        for stage_id, stage in enumerate(START_STAGE_NAMES):
-            if self._frontier is not None and stage in self.cfg.frontier_stages:
-                rows = self._stage_rows[stage]
-                if rows.numel() > 0:
-                    self._stage_success[stage_id] = self._frontier.success_rate[rows].mean().item()
-            elif counts[stage_id] > 0:
+        for stage_id in range(len(START_STAGE_NAMES)):
+            if counts[stage_id] > 0:
                 self._stage_success[stage_id] = successes[stage_id] / counts[stage_id]
         if step < self.cfg.ratio_hold_steps:
             return
@@ -407,7 +418,7 @@ class ResetFromBank(ManagerTermBase):
         """Stage each bank row starts in, an index into :data:`~..mdp.stages.START_STAGE_NAMES`; 0 for -1."""
         source = torch.zeros_like(rows)
         stored = rows >= 0
-        if stored.any():
+        if self.bank is not None and stored.any():
             source[stored] = self.bank.stage[rows[stored]].to(rows.dtype)
         return source
 

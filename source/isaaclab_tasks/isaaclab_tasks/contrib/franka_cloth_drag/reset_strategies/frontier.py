@@ -120,7 +120,9 @@ class ResetStateFrontierSampler:
     def sampling_weights(self) -> torch.Tensor:
         """Return positive SGS beta-kernel weights for every reset state."""
         target = self.cfg.target_success_estimate
-        rate = self.success_rate
+        # Unknown states need an outcome before they can join the frontier. Treat them as being at the target only for
+        # sampling, so they are explored promptly without polluting their measured success estimate.
+        rate = torch.where(self.history_size > 0, self.success_rate, target)
         weights = (rate + self.cfg.epsilon).pow(self.cfg.kappa * target)
         weights *= (1.0 - rate + self.cfg.epsilon).pow(self.cfg.kappa * (1.0 - target))
         weights.clamp_min_(self.cfg.epsilon).add_(self.cfg.epsilon)
@@ -128,16 +130,27 @@ class ResetStateFrontierSampler:
 
     def metrics(self, rows: torch.Tensor) -> dict[str, torch.Tensor]:
         """Return frontier success and probability-concentration metrics for one stage buffer."""
-        success = self.success_rate[rows]
+        history_size = self.history_size[rows]
+        observed = history_size > 0
+        success = self.success_rate[rows][observed]
+        zero = self.success_rate.new_zeros(())
+        has_observations = success.numel() > 0
         weights = self.sampling_weights()[rows]
         probabilities = weights / weights.sum()
         top_count = max(1, math.ceil(0.01 * len(rows)))
         return {
-            "frontier_success_mean": success.mean(),
-            "frontier_success_median": success.median(),
-            "frontier_hard_fraction": (success < 0.25).float().mean(),
-            "frontier_medium_fraction": ((success >= 0.25) & (success <= 0.75)).float().mean(),
-            "frontier_solved_fraction": (success > 0.75).float().mean(),
+            "frontier_success_mean": success.mean() if has_observations else zero,
+            "frontier_success_median": success.median() if has_observations else zero,
+            "frontier_hard_fraction": (success < 0.25).float().mean() if has_observations else zero,
+            "frontier_medium_fraction": (
+                ((success >= 0.25) & (success <= 0.75)).float().mean() if has_observations else zero
+            ),
+            "frontier_solved_fraction": (success > 0.75).float().mean() if has_observations else zero,
+            "frontier_unvisited_fraction": (~observed).float().mean(),
+            "frontier_partial_history_fraction": (
+                ((history_size > 0) & (history_size < self.cfg.window_size)).float().mean()
+            ),
+            "frontier_full_history_fraction": (history_size == self.cfg.window_size).float().mean(),
             "frontier_effective_pool_fraction": probabilities.square().sum().reciprocal() / len(rows),
             "frontier_top_1_percent_mass": torch.topk(probabilities, top_count, sorted=False).values.sum(),
         }
