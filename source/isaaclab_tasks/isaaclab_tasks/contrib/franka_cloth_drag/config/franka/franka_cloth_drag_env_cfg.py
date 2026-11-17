@@ -528,11 +528,23 @@ class CriticObsCfg(ObsGroup):
 
 
 @configclass
+class StageObsCfg(ObsGroup):
+    """One-hot stage of every environment, for logging only: neither the actor nor the critic reads it."""
+
+    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
+
+    def __post_init__(self) -> None:
+        self.enable_corruption = False
+        self.concatenate_terms = True
+
+
+@configclass
 class ObservationsCfg:
-    """The actor (``policy``) and the privileged critic (``critic``)."""
+    """The actor (``policy``), the privileged critic (``critic``) and the stage for logging (``stage``)."""
 
     policy: ActorObsCfg = ActorObsCfg()
     critic: CriticObsCfg = CriticObsCfg()
+    stage: StageObsCfg = StageObsCfg()
 
 
 # ------------------- Command Terms -------------------
@@ -637,7 +649,7 @@ class UniformResetsCfg:
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
         bank_path="logs/reset_banks/bank_v11_robotiq.pt",  # approach 8000, grasp 1000, drag 100, goal 100
-        start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
+        start_stage_ratios={"approach": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
     )
@@ -652,10 +664,10 @@ class AdaptiveResetsCfg:
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
         bank_path="logs/reset_banks/bank_v11_focus_robotiq.pt",  # approach 8000, grasp 2000, drag 1000, goal 1000
-        start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
+        start_stage_ratios={"approach": 0.25, "grasp": 0.45, "drag": 0.20, "goal": 0.10},
         min_stage_ratios={"grasp": 0.15, "drag": 0.05, "goal": 0.05},
         # Ratio Changing Variables
-        ratio_shift_success_range=(0.775, 0.95),
+        ratio_shift_success_range=(0.875, 0.95),
         ratio_max_shift_per_step=0.0016,
         ratio_hold_steps=300,
         # Frontier Sampling

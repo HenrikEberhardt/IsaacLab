@@ -19,10 +19,11 @@ Changed
 * Changed the Robotiq colliders of ``IsaacContrib-Drag-Cloth-Franka`` to 11 boxes, loaded through
   ``assets/robotiq/franka_panda_robotiq_simplified.usda``: the pads stay exact, and every other gripper collider is
   replaced by an enclosing box per rigid unit (base, inner-finger backing in two boxes, outer finger with outer
-  knuckle, inner knuckle), grown by 2 mm, so the mechanism still touches the cube and cloth wherever it did before.
-  The arm and camera-assembly colliders, which do not participate in task contact, are removed. The simulation runs
-  about 1.5 times faster (982 to about 645 ms per step at 2048 environments). Reset banks made with the previous
-  colliders fail the physics fingerprint check: regenerate them, or allow the settings mismatch.
+  knuckle), grown by 2 mm. The inner knuckles retain their diagonal collider orientation with the same margin. The
+  mechanism still touches the cube and cloth wherever it did before; the arm and camera-assembly colliders, which do
+  not participate in task contact, are removed. The simulation runs about 1.5 times faster (982 to about 645 ms per
+  step at 2048 environments). Reset banks made with the previous colliders fail the physics fingerprint check:
+  regenerate them, or allow the settings mismatch.
 * Moved the constraint gripper into ``franka_cloth_drag/constrained_gripper``: the coupler, the lock constraint,
   ``ClothGraspAction`` and its configuration, the gripper helpers of ``mdp.stages`` and the grasp diagnostics. The
   settings ``grasp_min_nodes``, ``finger_joint_name``, ``finger_pad_half_width``, ``finger_pad_half_length`` and

@@ -13,8 +13,12 @@ from rsl_rl.algorithms import PPO
 from rsl_rl.models import MLPModel
 from tensordict import TensorDict
 
-from isaaclab_tasks.contrib.franka_cloth_drag.distributions import SigmoidBoundedGaussianDistribution
-from isaaclab_tasks.contrib.franka_cloth_drag.ppo import KLMetricsPPO
+from isaaclab_tasks.contrib.franka_cloth_drag.action_distribution.distributions import (
+    SigmoidBoundedGaussianDistribution,
+    SigmoidBoundedHeteroscedasticGaussianDistribution,
+)
+from isaaclab_tasks.contrib.franka_cloth_drag.action_distribution.models import DetachedStdMLPModel
+from isaaclab_tasks.contrib.franka_cloth_drag.action_distribution.ppo import ACTION_DIM_NAMES, KLMetricsPPO
 
 STD_MIN = 0.05
 STD_MAX = 1.0
@@ -146,3 +150,118 @@ def test_ppo_adds_mean_and_max_kl_to_loss_metrics(monkeypatch):
     assert metrics["value"] == 2.0
     assert metrics["kl_mean"] == pytest.approx(0.5)
     assert metrics["kl_max"] == pytest.approx(0.9)
+
+
+def _detached_model(obs: TensorDict, std_type: str = "log", detach: bool = True) -> DetachedStdMLPModel:
+    distribution_cfg = {
+        "class_name": SigmoidBoundedHeteroscedasticGaussianDistribution,
+        "init_std": INIT_STD,
+        "std_range": (STD_MIN, STD_MAX),
+        "std_type": std_type,
+    }
+    return DetachedStdMLPModel(
+        obs,
+        {"actor": ["policy"]},
+        "actor",
+        NUM_ACTIONS,
+        hidden_dims=[16, 16],
+        distribution_cfg=distribution_cfg,
+        detach_std_features=detach,
+    )
+
+
+@pytest.mark.parametrize("std_type", ["scalar", "log"])
+def test_heteroscedastic_std_starts_equal_everywhere_and_then_differs_by_state(std_type):
+    """The std head starts at the configured value in every state and can then learn to depend on the state."""
+    obs = _obs()
+    model = _detached_model(obs, std_type)
+    model(obs, stochastic_output=True)
+    torch.testing.assert_close(model.output_std, torch.full((len(obs), NUM_ACTIONS), INIT_STD))
+
+    with torch.no_grad():
+        model.std_head.weight.normal_()
+    model(obs, stochastic_output=True)
+    assert not torch.allclose(model.output_std[0], model.output_std[1])
+    assert (model.output_std >= STD_MIN).all() and (model.output_std <= STD_MAX).all()
+
+
+def test_log_sigmoid_std_is_geometric_between_the_bounds():
+    """The log parameterization bounds the std in log space, and the linear one keeps its previous formula."""
+    raw = torch.tensor([[-50.0, 0.0, 50.0]])
+    for std_type, middle in (("log", (STD_MIN * STD_MAX) ** 0.5), ("scalar", 0.5 * (STD_MIN + STD_MAX))):
+        distribution = SigmoidBoundedHeteroscedasticGaussianDistribution(
+            3, init_std=0.3, std_range=(STD_MIN, STD_MAX), std_type=std_type
+        )
+        distribution.update(torch.zeros(1, 3), raw)
+        torch.testing.assert_close(distribution.std, torch.tensor([[STD_MIN, middle, STD_MAX]]))
+
+
+def test_global_distribution_rejects_log_std_type_and_model_rejects_global_distribution():
+    """Only the heteroscedastic distribution supports the log type, and the detached model needs it."""
+    with pytest.raises(ValueError):
+        SigmoidBoundedGaussianDistribution(NUM_ACTIONS, init_std=INIT_STD, std_type="log")
+    obs = _obs()
+    with pytest.raises(TypeError):
+        DetachedStdMLPModel(
+            obs,
+            {"actor": ["policy"]},
+            "actor",
+            NUM_ACTIONS,
+            hidden_dims=[16],
+            distribution_cfg={"class_name": SigmoidBoundedGaussianDistribution, "init_std": INIT_STD},
+        )
+
+
+@pytest.mark.parametrize("detach", [True, False])
+def test_std_head_gradient_reaches_the_hidden_layers_only_without_detaching(detach):
+    """Entropy and log-probability gradients of the std reach the head, and the trunk only when not detached."""
+    obs = _obs()
+    model = _detached_model(obs, detach=detach)
+    with torch.no_grad():
+        model.std_head.weight.normal_()
+    # the mean is held fixed through a zero output layer, so any trunk gradient can only come from the std
+    with torch.no_grad():
+        model.mlp[-1].weight.zero_()
+        model.mlp[-1].bias.zero_()
+    action = model(obs, stochastic_output=True).detach()
+    (model.get_output_log_prob(action).sum() + model.output_entropy.sum()).backward()
+
+    assert model.std_head.weight.grad.abs().sum() > 0.0
+    trunk_grad = sum(
+        p.grad.abs().sum() for layer in list(model.mlp)[:-1] for p in layer.parameters() if p.grad is not None
+    )
+    assert (trunk_grad > 0.0) == (not detach)
+
+
+def test_exported_policy_is_the_mean_network():
+    """The JIT export holds the mean network only and returns the deterministic action."""
+    obs = _obs()
+    model = _detached_model(obs)
+    with torch.no_grad():
+        model.std_head.weight.normal_()
+    exported = model.as_jit()
+    torch.testing.assert_close(exported(obs["policy"]), model(obs))
+    assert not any(name.startswith("std_head") for name, _ in exported.named_parameters())
+
+
+def test_ppo_logs_the_mean_std_per_visited_stage(monkeypatch):
+    """The std of the sampled states is averaged per stage and action dimension, and cleared after the update."""
+    distribution = SigmoidBoundedGaussianDistribution(NUM_ACTIONS, init_std=INIT_STD, std_range=(STD_MIN, STD_MAX))
+    std = torch.tensor([[0.1] * NUM_ACTIONS, [0.3] * NUM_ACTIONS, [0.5] * NUM_ACTIONS])
+    actor = SimpleNamespace(distribution=distribution, output_std=std)
+    algorithm = object.__new__(KLMetricsPPO)
+    algorithm._raw_actor = actor
+    algorithm.is_multi_gpu = False
+    monkeypatch.setattr(PPO, "act", lambda _algorithm, obs: torch.zeros(len(obs), NUM_ACTIONS))
+    monkeypatch.setattr(PPO, "update", lambda _algorithm: {})
+
+    stage = torch.nn.functional.one_hot(torch.tensor([0, 0, 2]), num_classes=4).float()
+    obs = TensorDict({"policy": torch.zeros(3, POLICY_DIM), "stage": stage}, batch_size=[3])
+    algorithm.act(obs)
+    metrics = algorithm.update()
+
+    for name in ACTION_DIM_NAMES:
+        assert metrics[f"std_approach_{name}"] == pytest.approx(0.2)
+        assert metrics[f"std_drag_{name}"] == pytest.approx(0.5)
+        assert f"std_grasp_{name}" not in metrics
+    assert not any(key.startswith("std_") for key in algorithm.update())

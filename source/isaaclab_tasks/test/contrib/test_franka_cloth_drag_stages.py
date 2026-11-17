@@ -54,7 +54,9 @@ def test_action_regularization_and_clip_configuration():
     assert not hasattr(curriculum, "action_magnitude")
     assert not hasattr(curriculum, "action_rate")
     assert runner.clip_actions is None
-    assert runner.algorithm.class_name == "isaaclab_tasks.contrib.franka_cloth_drag.ppo:KLMetricsPPO"
+    assert (
+        runner.algorithm.class_name == "isaaclab_tasks.contrib.franka_cloth_drag.action_distribution.ppo:KLMetricsPPO"
+    )
 
 
 def test_stage_and_grasp_flag_are_hidden_by_the_same_curriculum_term():

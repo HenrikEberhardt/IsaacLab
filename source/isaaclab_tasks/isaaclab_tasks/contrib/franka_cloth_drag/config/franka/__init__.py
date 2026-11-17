@@ -19,5 +19,6 @@ gym.register(
         "env_cfg_entry_point": f"{__name__}.franka_cloth_drag_env_cfg:FrankaClothDragEnvCfg",
         "default_agent": "rsl_rl",
         "rsl_rl_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaClothDragPPORunnerCfg",
+        "rsl_rl_detached_std_cfg_entry_point": f"{agents.__name__}.rsl_rl_ppo_cfg:FrankaClothDragDetachedStdPPORunnerCfg",
     },
 )

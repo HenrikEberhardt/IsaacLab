@@ -7,30 +7,15 @@
 
 from isaaclab.utils import configclass
 
-from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg, RslRlPpoAlgorithmCfg
+from isaaclab_rl.rsl_rl import RslRlMLPModelCfg, RslRlOnPolicyRunnerCfg
 
-
-@configclass
-class BoundedGaussianDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
-    """Gaussian with one smoothly bounded, learned standard deviation per action dimension."""
-
-    class_name: str = "isaaclab_tasks.contrib.franka_cloth_drag.distributions:SigmoidBoundedGaussianDistribution"
-
-    std_range: tuple[float, float] = (0.05, 1.0)
-    """Bounds (min, max) of the standard deviation."""
-
-    mean_bound: float = 1.0
-    """Magnitude of the mean action above which the bounds loss acts."""
-
-    mean_bound_coef: float = 0.0
-    """Weight of the bounds loss pulling the mean action back inside ``mean_bound``. Zero disables it."""
-
-
-@configclass
-class KLMetricsPPOCfg(RslRlPpoAlgorithmCfg):
-    """PPO configuration that logs the adaptive-scheduler KL statistics."""
-
-    class_name: str = "isaaclab_tasks.contrib.franka_cloth_drag.ppo:KLMetricsPPO"
+from ....action_distribution import (
+    ACTION_DIM_NAMES,
+    BoundedGaussianDistributionCfg,
+    BoundedHeteroscedasticGaussianDistributionCfg,
+    DetachedStdMLPModelCfg,
+    KLMetricsPPOCfg,
+)
 
 
 @configclass
@@ -48,7 +33,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
 
     # Action clipping setup
     clip_actions = None
-    action_dim_names = ["dx", "dy", "dz", "dyaw", "gripper"]
+    action_dim_names = list(ACTION_DIM_NAMES)
 
     actor = RslRlMLPModelCfg(
         hidden_dims=[512, 256, 128, 64],
@@ -73,10 +58,28 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         entropy_coef=0.005,
         num_learning_epochs=4,
         num_mini_batches=8,
-        learning_rate=1.0e-3,  # optimizer step size for the actor and critic
+        learning_rate=1.0e-3,
         schedule="adaptive",
         gamma=0.995,
         lam=0.95,
-        desired_kl=0.015,  # target policy-distribution change for the adaptive schedule
+        desired_kl=0.015,
         max_grad_norm=1.0,
+    )
+
+
+@configclass
+class FrankaClothDragDetachedStdPPORunnerCfg(FrankaClothDragPPORunnerCfg):
+    """Cloth drag with a learned, state-dependent action std from a head on detached actor features.
+
+    Differs from :class:`FrankaClothDragPPORunnerCfg` only in the actor's standard deviation.
+    """
+
+    actor = DetachedStdMLPModelCfg(
+        hidden_dims=[512, 256, 128, 64],
+        activation="elu",
+        obs_normalization=True,
+        detach_std_features=True,
+        distribution_cfg=BoundedHeteroscedasticGaussianDistributionCfg(
+            init_std=0.5, std_type="log", std_range=(0.05, 1.0), mean_bound=1.0, mean_bound_coef=0.01
+        ),
     )

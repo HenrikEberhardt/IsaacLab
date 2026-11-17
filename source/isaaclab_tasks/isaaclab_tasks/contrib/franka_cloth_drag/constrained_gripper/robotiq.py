@@ -32,12 +32,14 @@ from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG
 FRANKA_PANDA_ROBOTIQ_USD = str(
     Path(__file__).resolve().parent.parent / "assets" / "robotiq" / "franka_panda_robotiq_simplified.usda"
 )
-"""Panda + Robotiq + coupling + camera mount + OAK with simplified colliders: an override layer on the standalone
-``franka_panda_robotiq_coupled_oak.usdc`` that keeps the pads exact and replaces every other gripper collider by one
-enclosing box per rigid unit (two for the inner-finger backing), grown by 2 mm (11 colliders with the pads), so it
-collides wherever the original colliders do. Every
-Newton shape of an environment is a cloth contact candidate, so each collider costs throughput even where it can never
-touch the cloth; see ``assets/robotiq/README.md``."""
+"""Panda + Robotiq + coupling + visual-only camera assembly with simplified colliders.
+
+The override layer keeps the pads exact, retains a grown oriented box for each inner knuckle, and replaces the other
+gripper mechanism colliders by one enclosing box per rigid unit (two for the inner-finger backing), grown by 2 mm.
+The 11 boxes enclose the original mechanism and coupling colliders; the camera and arm colliders are disabled. Every
+Newton shape of an environment is a cloth contact candidate, so each collider costs throughput even where it cannot
+touch the cloth; see ``assets/robotiq/README.md``.
+"""
 
 FRANKA_PANDA_ROBOTIQ_CFG = FRANKA_PANDA_CFG.replace(
     spawn=FRANKA_PANDA_CFG.spawn.replace(usd_path=FRANKA_PANDA_ROBOTIQ_USD, variants=None),

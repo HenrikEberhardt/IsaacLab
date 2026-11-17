@@ -40,8 +40,9 @@ step time grows with the number of shapes. Measured on 2048 environments (random
 The simplified mechanism colliders are conservative: they contain every original gripper and coupling collider, so
 every mechanism contact of the original colliders also happens with them (extra contacts are accepted). The camera
 mount and housing are intentionally visual-only, like the arm in this task. Only the pads, which grip the cloth,
-stay exact. Each other box encloses original colliders of one rigid unit, as axis-aligned bounds in that unit's body
-frame, grown by 2 mm on every face:
+stay exact. Each other box encloses original colliders of one rigid unit and is grown by 2 mm on every face. The
+merged boxes are axis-aligned in their body's frame; the inner-knuckle boxes retain the original diagonal
+orientation to avoid filling the empty corners of an axis-aligned bound:
 
 | Box | Encloses | Size [mm] |
 |---|---|---|
@@ -50,7 +51,7 @@ frame, grown by 2 mm on every face:
 | `<side>_inner_finger/simplified_collision/backing_upper` | the wide upper backing box | 31.0 x 31.9 x 23.0 |
 | `<side>_inner_finger/simplified_collision/backing_lower` | the two narrow lower backing boxes | 20.8 x 19.8 x 21.9 |
 | `<side>_outer_finger/simplified_collision/outer` | the outer finger's two boxes and the outer knuckle's box (fixed joint) | 31.2 x 59.7 x 64.9 |
-| `<side>_inner_knuckle/simplified_collision/inner_knuckle` | its box | 39.0 x 59.2 x 63.4 |
+| `<side>_inner_knuckle/simplified_collision/inner_knuckle` | its original oriented box | 39.0 x 73.2 x 16.0 |
 
 The backing boxes are not grown on their jaw-side face, so they stay 1.4 mm behind the pads' gripping plane and the
 cloth meets the pads as before. The backing is split in two because one box around all three backing boxes was 31 mm
