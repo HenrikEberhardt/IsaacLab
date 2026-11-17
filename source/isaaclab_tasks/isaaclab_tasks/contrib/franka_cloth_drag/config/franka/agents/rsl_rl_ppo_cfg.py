@@ -71,7 +71,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         use_clipped_value_loss=True,
         clip_param=0.2,
         entropy_coef=0.005,
-        num_learning_epochs=5,
+        num_learning_epochs=4,
         num_mini_batches=8,
         learning_rate=1.0e-3,  # optimizer step size for the actor and critic
         schedule="adaptive",
