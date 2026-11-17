@@ -12,7 +12,9 @@ from typing import TYPE_CHECKING
 
 import torch
 
+from ..mdp.frames import ee_pose_in_base
 from ..mdp.stages import START_STAGE_NAMES
+from ..state_machine import ee_down_tilt
 from .capture import capture_reset_states
 
 if TYPE_CHECKING:
@@ -27,11 +29,18 @@ class ResetStateValidator:
     A state is rejected when its restore does not reproduce the stored state, when a termination other than success
     fires (a gripper-cube contact included), when a state leaves the task stage it was stored in, when a stored grasp is
     lost or its locked nodes change, when a grasp (pre-grasp) state closes or locks, when a cloth node is faster than
-    ``max_node_speed`` or when the cube tilts more than ``max_cube_tilt_deg``. A success ends the check of drag and goal
-    states as valid.
+    ``max_node_speed``, when the cube tilts more than ``max_cube_tilt_deg``, or when the end-effector tilts more than
+    ``max_ee_down_tilt_deg`` from base-frame down. A success ends the check of drag and goal states as valid.
     """
 
-    def __init__(self, env: ManagerBasedRLEnv, max_node_speed: float, max_cube_tilt_deg: float, cube_name="cube"):
+    def __init__(
+        self,
+        env: ManagerBasedRLEnv,
+        max_node_speed: float,
+        max_cube_tilt_deg: float,
+        cube_name: str | None = "cube",
+        max_ee_down_tilt_deg: float = 0.5,
+    ):
         """Look up the task terms.
 
         Args:
@@ -39,17 +48,27 @@ class ResetStateValidator:
             max_node_speed: Fastest cloth node speed [m/s].
             max_cube_tilt_deg: Largest cube tilt from upright [deg].
             cube_name: Scene name of the cube, or None without one.
+            max_ee_down_tilt_deg: Largest end-effector tilt from base-frame down [deg].
         """
         self.env = env
         self.max_node_speed = max_node_speed
         self.min_cube_up = math.cos(math.radians(max_cube_tilt_deg))
+        self.max_ee_down_tilt = math.radians(max_ee_down_tilt_deg)
         self.cube_name = cube_name
         self.command = env.command_manager.get_term("cloth_target")
         self.gripper = env.action_manager.get_term("gripper_action")
         self.failure_terms = [
             name for name in env.termination_manager.active_terms if name not in ("success", "time_out")
         ]
-        self.reasons = ["restore_mismatch", "stage_change", "grasp_changed", "node_speed", "cube_tilt"]
+        self.reasons = [
+            "restore_mismatch",
+            "stage_change",
+            "grasp_changed",
+            "node_speed",
+            "cube_tilt",
+            "ee_not_down_restore",
+            "ee_not_down_hold",
+        ]
         self.reasons += ["success_early", "time_out"] + [f"termination:{name}" for name in self.failure_terms]
         """Rejection reasons; a reason code is its index plus one, zero is no rejection."""
 
@@ -86,6 +105,7 @@ class ResetStateValidator:
         for key in ("raised_node_ids", "stage", "active", "grasped", "closed"):
             mismatch |= (now["task"][key] != stored["task"][key]).reshape(num, -1).any(dim=1)
         self._reject(mismatch, "restore_mismatch")
+        self._check_ee_down("ee_not_down_restore")
 
     def hold_actions(self) -> torch.Tensor:
         """Actions of all environments: zero arm deltas, gripper as stored (others open), shape [num_envs, 5]."""
@@ -106,6 +126,7 @@ class ResetStateValidator:
         for name in self.failure_terms:
             self._reject(self.alive & manager.get_term(name)[ids], f"termination:{name}")
         self._reject(self.alive & truncated[ids], "time_out")
+        self._check_ee_down("ee_not_down_hold")
         if "success" in manager.active_terms:
             success = self.alive & manager.get_term("success")[ids] & (self.reason == 0)
             late = self.start_stage >= START_STAGE_NAMES.index("drag")
@@ -137,3 +158,8 @@ class ResetStateValidator:
     def _reject(self, mask: torch.Tensor, reason: str) -> None:
         """Record ``reason`` for the states of ``mask`` that have no reason yet."""
         self.reason = torch.where(mask & (self.reason == 0), self.reasons.index(reason) + 1, self.reason)
+
+    def _check_ee_down(self, reason: str) -> None:
+        """Reject live states whose end-effector does not point sufficiently down."""
+        tilt = ee_down_tilt(ee_pose_in_base(self.env)[1][self.env_ids])
+        self._reject(self.alive & ~(tilt <= self.max_ee_down_tilt), reason)

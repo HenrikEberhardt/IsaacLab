@@ -5,7 +5,7 @@
 
 """Build a bank of reset states with the randomized state machine.
 
-Rollouts of the state machine (:mod:`..state_machine.cloth_drag_state_machine`) capture candidates in one window per
+Rollouts of the state machine (:mod:`..state_machine.cloth_drag_sm`) capture candidates in one window per
 start stage (:mod:`.capture`), the candidates are validated by replay (:mod:`.validation`), and the valid ones fill
 the bank. Used by ``scripts/generate_reset_bank.py``. See ``implementation_log/reset_states.md``.
 """
@@ -17,7 +17,7 @@ import subprocess
 import time
 from collections import Counter
 from collections.abc import Callable
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from datetime import datetime
 from typing import TYPE_CHECKING
 
@@ -25,6 +25,7 @@ import torch
 
 from ..mdp.stages import START_STAGE_NAMES
 from ..reset_strategies.bank import SCHEMA_VERSION, ResetBank, task_fingerprint
+from ..state_machine import ClothDragSmRandomizationCfg, ee_down_tilt, limit_arm_action, sample_sm_params
 from .capture import capture_reset_states
 from .validation import ResetStateValidator
 
@@ -54,27 +55,8 @@ class ResetBankGenerationCfg:
     validation_steps: int = 30
     """Steps each candidate is held after its restore before it counts as valid."""
 
-    drag_speed_range: tuple[float, float] = (0.05, 0.12)
-    """Range of the drag speed [m/s]."""
-
-    drag_height_range: tuple[float, float] = (0.015, 0.030)
-    """Range of the end-effector height while dragging [m]."""
-
-    yaw_offset_range: tuple[float, float] = (-0.3, 0.3)
-    """Range of the offset added to the grasp yaw [rad]."""
-
-    pregrasp_height_range: tuple[float, float] = (0.005, 0.025)
-    """Range of the height of the pre-grasp pose (grasp states) above the grasped raised node [m]. With
-    :attr:`pregrasp_radius_range`, the pose stays within 3.5 cm of the node, inside the GRASP stage's approach radius
-    (4 cm); states that the tracking error puts outside are not in the GRASP stage and are not captured."""
-
-    pregrasp_radius_range: tuple[float, float] = (0.020, 0.025)
-    """Largest planar offset of the pre-grasp pose from the raised node at the lowest and at the highest pre-grasp
-    height [m]: it grows linearly with the height (a cone, approach from the top), and the offset is drawn biased to the
-    centre (radius uniform, not area)."""
-
-    pregrasp_yaw_error_range: tuple[float, float] = (-0.79, 0.79)
-    """Range of the yaw of the pre-grasp pose relative to the grasp yaw [rad] (±45°)."""
+    sm_randomization: ClothDragSmRandomizationCfg = field(default_factory=ClothDragSmRandomizationCfg)
+    """Per-rollout state-machine randomization."""
 
     pregrasp_max_speed: float = 0.05
     """Fastest end-effector speed of a captured pre-grasp state [m/s]; states are also captured on the way into the
@@ -102,7 +84,10 @@ class ResetBankGenerationCfg:
     max_cube_tilt_deg: float = 20.0
     """Largest cube tilt from upright [deg] while a candidate is held."""
 
-    candidate_margin: float = 1.3
+    max_ee_down_tilt_deg: float = 0.5
+    """Largest end-effector tilt from base-frame down [deg] while a restored candidate is held."""
+
+    candidate_margin: float = 1.5
     """Candidates collected per missing state, on top of the expected rejections."""
 
     max_rounds: int = 20
@@ -126,18 +111,10 @@ class ResetBankGenerationCfg:
             raise ValueError(f"approach_start_share must lie in [0, 1], got {self.approach_start_share}.")
         if self.validation_steps <= 0:
             raise ValueError("validation_steps must be positive.")
-        for name in (
-            "drag_speed_range",
-            "drag_height_range",
-            "yaw_offset_range",
-            "pregrasp_height_range",
-            "pregrasp_radius_range",
-            "pregrasp_yaw_error_range",
-            "goal_distance_window",
-        ):
-            low, high = getattr(self, name)
-            if not low <= high:
-                raise ValueError(f"{name} must be an increasing range, got {(low, high)}.")
+        if self.goal_distance_window[0] > self.goal_distance_window[1]:
+            raise ValueError(f"goal_distance_window must be increasing, got {self.goal_distance_window}.")
+        if not 0.0 <= self.max_ee_down_tilt_deg <= 180.0:
+            raise ValueError(f"max_ee_down_tilt_deg must lie in [0, 180], got {self.max_ee_down_tilt_deg}.")
 
     def quotas(self) -> dict[str, int]:
         """Number of stored states per start stage."""
@@ -175,8 +152,8 @@ class ResetBankBuilder:
 
     Rollouts stream in all environments, started by the task's default reset events: every success hands its captured
     task-start, grasp, drag and goal states to the candidate pool, and every failure is dropped. Each window has
-    one reservoir slot per environment, so the capture time is uniform over the window. Candidates are then restored
-    in chunks of the environments through :class:`~..reset_strategies.ResetFromBank` and checked by
+    one reservoir slot per environment, so the capture time is uniform over its EE-down-aligned steps. Candidates are
+    then restored in chunks of the environments through :class:`~..reset_strategies.ResetFromBank` and checked by
     :class:`~.validation.ResetStateValidator`. Rounds of rollouts and validation alternate until every stage of
     :meth:`ResetBankGenerationCfg.quotas` is full.
     """
@@ -205,7 +182,12 @@ class ResetBankBuilder:
         self.cfg = cfg
         self.command = runner.command
         self.gripper = runner.gripper
-        self.validator = ResetStateValidator(env, cfg.max_node_speed, cfg.max_cube_tilt_deg)
+        self.validator = ResetStateValidator(
+            env,
+            cfg.max_node_speed,
+            cfg.max_cube_tilt_deg,
+            max_ee_down_tilt_deg=cfg.max_ee_down_tilt_deg,
+        )
         self.num_envs, self.device = env.num_envs, env.device
         self._rows = torch.arange(self.num_envs, device=self.device)
         self._generator = torch.Generator(device=self.device)
@@ -292,7 +274,8 @@ class ResetBankBuilder:
             actions = runner.compute().clone()
             if cfg.action_noise_std > 0.0:
                 noise = torch.randn(num_envs, 4, device=device, generator=self._generator) * cfg.action_noise_std
-                actions[:, :4] = (actions[:, :4] + noise).clamp(-1.0, 1.0)
+                actions[:, :4] += noise
+                actions[:, :4] = limit_arm_action(actions[:, :4], self.sm.cfg.arm_action_limit)
             _, _, terminated, truncated, _ = env.step(actions)
             dones = terminated | truncated
             self.stats["rollout_steps"] += 1
@@ -329,8 +312,11 @@ class ResetBankBuilder:
             squeeze_time = torch.where(squeezed, torch.where(squeeze_time < 0.0, episode_time, squeeze_time), -1.0)
             since_squeeze = torch.where(squeezed, episode_time - squeeze_time, math.inf)
             # speed over the step, from the pose the state machine acted on
-            ee_speed = (ee_pose_in_base(env)[0] - runner.ee_pos).norm(dim=-1) / env.step_dt
+            ee_pos, ee_quat = ee_pose_in_base(env)
+            ee_speed = (ee_pos - runner.ee_pos).norm(dim=-1) / env.step_dt
             windows = self._windows(ongoing, step, covered, distance, ee_speed, since_squeeze)
+            tilt_ok = torch.rad2deg(ee_down_tilt(ee_quat)) <= cfg.max_ee_down_tilt_deg
+            windows = [window & tilt_ok for window in windows]
             for stage, eligible in enumerate(windows):
                 seen[stage] += eligible.long()
                 draw = torch.rand(num_envs, device=device, generator=self._generator)
@@ -406,12 +392,11 @@ class ResetBankBuilder:
             since_squeeze: Time since the squeeze completed [s], infinite while not squeezed, shape [N].
         """
         from ..mdp.stages import ClothDragStage
-        from ..state_machine import DragSmState
 
         cfg = self.cfg
         constraint = self.gripper.constraint
         unlocked = ~constraint.active & ~constraint.contacts_disabled
-        holding_pose = (self.sm.sm_state == DragSmState.PREGRASP_HOLD) & (self.sm.sm_wait_time >= cfg.pregrasp_min_hold)
+        holding_pose = self.sm.pregrasp_ready & (self.sm.sm_wait_time >= cfg.pregrasp_min_hold)
         pregrasp = holding_pose & (ee_speed <= cfg.pregrasp_max_speed) & ~self.gripper.closed & unlocked
         # the stage is not monotonic (a failed try can leave the approach radius again): only before the first GRASP
         before_grasp = self.command.time_to_stage[:, int(ClothDragStage.GRASP)] < 0.0
@@ -439,31 +424,10 @@ class ResetBankBuilder:
         cfg, num = self.cfg, len(env_ids)
         if num == 0:
             return
-        self._approach_at_start[env_ids] = self._uniform((0.0, 1.0), num) < cfg.approach_start_share
-        self.sm.set_params(
-            env_ids,
-            drag_height=self._uniform(cfg.drag_height_range, num),
-            drag_speed=self._uniform(cfg.drag_speed_range, num),
-            yaw_offset=self._uniform(cfg.yaw_offset_range, num),
-            pregrasp_offset=self._pregrasp_offsets(num),
-            pregrasp_yaw_error=self._uniform(cfg.pregrasp_yaw_error_range, num),
-        )
-
-    def _pregrasp_offsets(self, num: int) -> torch.Tensor:
-        """Draw pre-grasp positions relative to the grasp node [m], shape [num, 3]: a height in
-        ``pregrasp_height_range``, a planar offset in a cone whose radius grows with the height over
-        ``pregrasp_radius_range``, its radius uniform (biased to the centre) and its direction uniform."""
-        cfg = self.cfg
-        (h_low, h_high), (r_low, r_high) = cfg.pregrasp_height_range, cfg.pregrasp_radius_range
-        height = self._uniform(cfg.pregrasp_height_range, num)
-        share = (height - h_low) / max(h_high - h_low, 1.0e-9)
-        radius = (r_low + (r_high - r_low) * share) * self._uniform((0.0, 1.0), num)
-        angle = self._uniform((0.0, 2.0 * math.pi), num)
-        return torch.stack([radius * torch.cos(angle), radius * torch.sin(angle), height], dim=1)
-
-    def _uniform(self, bounds: tuple[float, float], num: int) -> torch.Tensor:
-        low, high = bounds
-        return low + (high - low) * torch.rand(num, device=self.device, generator=self._generator)
+        draw = torch.rand(num, device=self.device, generator=self._generator)
+        self._approach_at_start[env_ids] = draw < cfg.approach_start_share
+        params = sample_sm_params(self.sm.cfg, cfg.sm_randomization, num, self.device, self._generator)
+        self.sm.set_params(env_ids, params)
 
     def _record_validation(self, candidates, valid, reasons, acceptance) -> None:
         """Add the validation outcome to the statistics and update the acceptance estimates."""

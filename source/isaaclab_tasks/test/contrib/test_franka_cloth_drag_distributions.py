@@ -257,7 +257,9 @@ def test_ppo_logs_the_mean_std_per_visited_stage(monkeypatch):
 
     stage = torch.nn.functional.one_hot(torch.tensor([0, 0, 2]), num_classes=4).float()
     obs = TensorDict({"policy": torch.zeros(3, POLICY_DIM), "stage": stage}, batch_size=[3])
-    algorithm.act(obs)
+    # the runner collects rollouts in inference mode and updates outside of it
+    with torch.inference_mode():
+        algorithm.act(obs)
     metrics = algorithm.update()
 
     for name in ACTION_DIM_NAMES:
@@ -265,3 +267,90 @@ def test_ppo_logs_the_mean_std_per_visited_stage(monkeypatch):
         assert metrics[f"std_drag_{name}"] == pytest.approx(0.5)
         assert f"std_grasp_{name}" not in metrics
     assert not any(key.startswith("std_") for key in algorithm.update())
+
+
+GRIPPER_RANGES = [(STD_MIN, STD_MAX)] * 4 + [(STD_MIN, 0.35)]
+GRIPPER_INITS = [INIT_STD] * 4 + [0.3]
+
+
+@pytest.mark.parametrize(
+    "distribution_class, std_type",
+    [
+        (SigmoidBoundedGaussianDistribution, "scalar"),
+        (SigmoidBoundedHeteroscedasticGaussianDistribution, "scalar"),
+        (SigmoidBoundedHeteroscedasticGaussianDistribution, "log"),
+    ],
+)
+def test_per_dimension_bounds_and_initial_std(distribution_class, std_type):
+    """Each action dimension starts at its own initial std and saturates at its own bounds."""
+    distribution = distribution_class(
+        NUM_ACTIONS,
+        init_std=INIT_STD,
+        std_range=(STD_MIN, STD_MAX),
+        std_type=std_type,
+        std_range_per_dim=GRIPPER_RANGES,
+        init_std_per_dim=GRIPPER_INITS,
+    )
+
+    def std_at(raw: torch.Tensor) -> torch.Tensor:
+        if isinstance(distribution, SigmoidBoundedHeteroscedasticGaussianDistribution):
+            distribution.update(torch.zeros(1, NUM_ACTIONS), raw.unsqueeze(0))
+        else:
+            with torch.no_grad():
+                distribution.std_raw.copy_(raw)
+            distribution.update(torch.zeros(1, NUM_ACTIONS))
+        return distribution.std[0]
+
+    torch.testing.assert_close(std_at(distribution.init_raw.clone()), torch.tensor(GRIPPER_INITS))
+    torch.testing.assert_close(std_at(torch.full((NUM_ACTIONS,), 50.0)), torch.tensor([r[1] for r in GRIPPER_RANGES]))
+    torch.testing.assert_close(std_at(torch.full((NUM_ACTIONS,), -50.0)), torch.tensor([r[0] for r in GRIPPER_RANGES]))
+
+
+def test_detached_model_starts_each_dimension_at_its_initial_std():
+    """The std head bias starts every dimension at its own initial std, in every state."""
+    obs = _obs()
+    distribution_cfg = {
+        "class_name": SigmoidBoundedHeteroscedasticGaussianDistribution,
+        "init_std": INIT_STD,
+        "std_range": (STD_MIN, STD_MAX),
+        "std_type": "log",
+        "std_range_per_dim": GRIPPER_RANGES,
+        "init_std_per_dim": GRIPPER_INITS,
+    }
+    model = DetachedStdMLPModel(
+        obs, {"actor": ["policy"]}, "actor", NUM_ACTIONS, hidden_dims=[16], distribution_cfg=distribution_cfg
+    )
+    model(obs, stochastic_output=True)
+    torch.testing.assert_close(model.output_std, torch.tensor(GRIPPER_INITS).expand(len(obs), -1))
+
+
+@pytest.mark.parametrize(
+    "per_dim",
+    [
+        {"std_range_per_dim": GRIPPER_RANGES[:-1]},  # one entry short
+        {"std_range_per_dim": GRIPPER_RANGES},  # the shared init_std 0.5 lies above the gripper ceiling 0.35
+        {"std_range_per_dim": GRIPPER_RANGES, "init_std_per_dim": [INIT_STD] * 4 + [0.35]},  # init on the ceiling
+    ],
+)
+def test_invalid_per_dimension_std_settings_raise(per_dim):
+    """Per-dimension settings need one entry per action and an initial std strictly inside each range."""
+    with pytest.raises(ValueError):
+        SigmoidBoundedGaussianDistribution(NUM_ACTIONS, init_std=INIT_STD, std_range=(STD_MIN, STD_MAX), **per_dim)
+
+
+def test_checkpoint_without_per_dimension_bounds_loads_strictly():
+    """The bounds are configuration, not state: a checkpoint saved without them loads into a model with them."""
+    obs = _obs()
+    saved = _model(obs).state_dict()
+    distribution_cfg = {
+        "class_name": SigmoidBoundedGaussianDistribution,
+        "init_std": INIT_STD,
+        "std_range": (STD_MIN, STD_MAX),
+        "std_range_per_dim": GRIPPER_RANGES,
+        "init_std_per_dim": GRIPPER_INITS,
+    }
+    model = MLPModel(
+        obs, {"actor": ["policy"]}, "actor", NUM_ACTIONS, hidden_dims=[16], distribution_cfg=distribution_cfg
+    )
+    model.load_state_dict(saved, strict=True)
+    assert not any(key.startswith(("distribution.std_low", "distribution.std_high")) for key in model.state_dict())

@@ -63,7 +63,8 @@ class DetachedStdMLPModel(MLPModel):
         self.detach_std_features = detach_std_features
         self.std_head = nn.Linear(self.mlp[-1].in_features, output_dim)
         nn.init.zeros_(self.std_head.weight)
-        nn.init.constant_(self.std_head.bias, self.distribution.init_raw)
+        with torch.no_grad():
+            self.std_head.bias.copy_(self.distribution.init_raw)
 
     def forward(
         self,

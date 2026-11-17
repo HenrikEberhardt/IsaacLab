@@ -38,7 +38,6 @@ import sys
 from datetime import datetime
 
 import gymnasium as gym
-import warp as wp
 
 from isaaclab.app import add_launcher_args, launch_simulation
 
@@ -46,11 +45,9 @@ import isaaclab_tasks  # noqa: F401
 from isaaclab_tasks.contrib.franka_cloth_drag.mdp import TopDownDeltaEEActionCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import ResetBankGenerationCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import (
-    HOVER_MARGIN,
-    YAW_ACTION_SCALE,
     ClothDragSmRunner,
     DragClothSm,
-    keep_requested_visualizers,
+    make_sm_profile,
 )
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
@@ -78,21 +75,10 @@ parser.add_argument(
     help="Path of the bank (.pt). Defaults to logs/reset_banks/reset_bank_<date>_<time>.pt.",
 )
 parser.add_argument("--seed", type=int, default=defaults.seed, help="Seed of the environment and the randomization.")
-parser.add_argument(
-    "--grasp_height",
-    type=float,
-    default=0.0205,
-    help="End-effector height commanded for the squeeze [m], at least the action's floor.",
-)
 add_launcher_args(parser)
-# the task runs on Newton; let the task pick the device. Without --viz the task's visualizers are dropped (headless);
-# a "none" default would not count as an explicit choice
 parser.set_defaults(device=None)
 args_cli, hydra_args = setup_preset_cli(parser)
 sys.argv = [sys.argv[0]] + hydra_args
-
-# initialize warp
-wp.init()
 
 
 def main():
@@ -102,8 +88,12 @@ def main():
         stage_quotas = {
             name.strip(): int(count) for name, count in (item.split("=") for item in args_cli.stage_quotas.split(","))
         }
+    sm_cfg, sm_randomization = make_sm_profile("randomized")
     generation_cfg = ResetBankGenerationCfg(
-        num_states=args_cli.num_states, stage_quotas=stage_quotas, seed=args_cli.seed
+        num_states=args_cli.num_states,
+        stage_quotas=stage_quotas,
+        seed=args_cli.seed,
+        sm_randomization=sm_randomization,
     )
     output = args_cli.output or f"logs/reset_banks/reset_bank_{datetime.now():%Y-%m-%d_%H-%M-%S}.pt"
 
@@ -114,12 +104,11 @@ def main():
     args_cli.device = env_cfg.sim.device
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
+    env_cfg.sim.visualizer_cfgs = []
+    args_cli.visualizer = None
     # the training physics and terminations; the success termination ends successful rollouts
     if not isinstance(env_cfg.actions.arm_action, TopDownDeltaEEActionCfg):
         raise SystemExit("The state machine commands the delta end-effector action: use the 'ee_delta' actions preset.")
-    # turn the hand faster than the task's yaw scale allows (changes the action mapping only, not the states)
-    env_cfg.actions.arm_action.scale_rot = YAW_ACTION_SCALE
-    keep_requested_visualizers(env_cfg, args_cli.visualizer)
 
     with launch_simulation(env_cfg, args_cli):
         from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import ResetBankBuilder, add_bank_term
@@ -130,19 +119,11 @@ def main():
         unwrapped = env.unwrapped
         unwrapped.reset(seed=args_cli.seed)
 
-        command = unwrapped.command_manager.get_term("cloth_target")
-        arm_cfg = unwrapped.action_manager.get_term("arm_action").cfg
         drag_sm = DragClothSm(
             unwrapped.step_dt,
             unwrapped.num_envs,
             unwrapped.device,
-            hover_height=command.cfg.approach_radius - HOVER_MARGIN,
-            grasp_height=max(args_cli.grasp_height, arm_cfg.z_min),
-            drag_height=0.031,
-            drag_speed=0.08,
-            goal_tolerance=min(0.02, command.cfg.success_radius),
-            wrist_limits=arm_cfg.wrist_joint_limits,
-            pregrasp_hold=True,
+            sm_cfg,
         )
         runner = ClothDragSmRunner(unwrapped, drag_sm)
         bank_term = unwrapped.event_manager.get_term_cfg("reset_from_bank").func

@@ -29,6 +29,14 @@ class BoundedGaussianDistributionCfg(RslRlMLPModelCfg.GaussianDistributionCfg):
     mean_bound_coef: float = 0.0
     """Weight of the bounds loss pulling the mean action back inside ``mean_bound``. Zero disables it."""
 
+    std_range_per_dim: list[tuple[float, float]] | None = None
+    """Bounds (min, max) of the standard deviation per action dimension, replacing ``std_range``. None uses
+    ``std_range`` for every dimension."""
+
+    init_std_per_dim: list[float] | None = None
+    """Initial standard deviation per action dimension, replacing ``init_std``. None uses ``init_std`` for every
+    dimension."""
+
 
 @configclass
 class BoundedHeteroscedasticGaussianDistributionCfg(BoundedGaussianDistributionCfg):

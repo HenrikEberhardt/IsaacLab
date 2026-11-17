@@ -46,6 +46,7 @@ from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.stage_ratios impo
     limit_ratio_shift,
     sample_reset_rows,
 )
+from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import ClothDragSmCfg, sample_sm_params
 
 FINGERPRINT = {
     "num_nodes": 2,
@@ -790,6 +791,9 @@ def test_quotas_split_evenly_over_all_stages():
         ResetBankGenerationCfg(stage_quotas={"approach": 10, "grasp": 10})
     with pytest.raises(ValueError, match="at least one"):
         ResetBankGenerationCfg(stage_quotas=quotas | {"drag": 0})
+    assert ResetBankGenerationCfg().max_ee_down_tilt_deg == 0.5
+    with pytest.raises(ValueError, match="max_ee_down_tilt_deg"):
+        ResetBankGenerationCfg(max_ee_down_tilt_deg=-0.1)
 
 
 def test_capture_windows():
@@ -801,9 +805,8 @@ def test_capture_windows():
     collector = ResetBankBuilder.__new__(ResetBankBuilder)
     collector.cfg = ResetBankGenerationCfg(pregrasp_min_hold=0.2, pregrasp_max_speed=0.01)
     collector._approach_at_start = torch.ones(15, dtype=torch.bool)
-    hold, other = 8, 4  # DragSmState.PREGRASP_HOLD, DRAG_CLOTH
     collector.sm = SimpleNamespace(
-        sm_state=torch.tensor([hold, 0, hold, hold, hold] + [other] * 6 + [0, hold, other, other]),
+        pregrasp_ready=torch.tensor([True, False, True, True, True] + [False] * 6 + [False, True, False, False]),
         sm_wait_time=torch.tensor([0.3, 0.0, 0.1, 0.3, 0.3] + [0.0] * 6 + [0.0, 0.3, 0.0, 0.0]),
     )
     locked = torch.tensor([False] * 5 + [True] * 6 + [False, False, True, True])
@@ -847,12 +850,13 @@ def test_capture_windows():
 
 
 def test_pregrasp_offsets_fill_a_cone_biased_to_the_centre():
-    collector = ResetBankBuilder.__new__(ResetBankBuilder)
-    collector.cfg = ResetBankGenerationCfg()
-    collector.device = "cpu"
-    collector._generator = torch.Generator().manual_seed(0)
-    offsets = collector._pregrasp_offsets(4000)
-    (h_low, h_high), (r_low, r_high) = collector.cfg.pregrasp_height_range, collector.cfg.pregrasp_radius_range
+    randomization = ResetBankGenerationCfg().sm_randomization
+    params = sample_sm_params(ClothDragSmCfg(), randomization, 4000, "cpu", torch.Generator().manual_seed(0))
+    offsets = params.pregrasp_offset
+    (h_low, h_high), (r_low, r_high) = (
+        randomization.pregrasp_height_range,
+        randomization.pregrasp_radius_range,
+    )
     height, radius = offsets[:, 2], offsets[:, :2].norm(dim=1)
     assert ((height >= h_low) & (height <= h_high)).all()
     r_max = r_low + (r_high - r_low) * (height - h_low) / (h_high - h_low)

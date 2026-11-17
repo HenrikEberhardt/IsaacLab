@@ -580,6 +580,7 @@ FRONTIER_SAMPLER_CFG = reset_strategies.FrontierSamplerCfg(
     # Weighted Moving Average Success Estimate
     window_size=4,
     weight_increment=1.0,
+    
     # Beta Sampling Variables
     target_success_estimate=0.5,
     kappa=1.0,
@@ -667,7 +668,7 @@ class AdaptiveResetsCfg:
         start_stage_ratios={"approach": 0.25, "grasp": 0.45, "drag": 0.20, "goal": 0.10},
         min_stage_ratios={"grasp": 0.15, "drag": 0.05, "goal": 0.05},
         # Ratio Changing Variables
-        ratio_shift_success_range=(0.875, 0.95),
+        ratio_shift_success_range=(0.90, 0.95),
         ratio_max_shift_per_step=0.0016,
         ratio_hold_steps=300,
         # Frontier Sampling
@@ -699,9 +700,10 @@ class RewardsCfg:
         params={"stages": ["approach", "grasp"], "distance_scale": 0.1, "target_height": 0.05},
         weight=1.0,
     )
-    # Penalty for closing the gripper if the target node is not between the pads
+    # Penalty per second for closing the gripper if the target node is not between the pads. Kept low: at -1 every
+    # exploratory close cost more than a rarely completed on-node close paid, so the policy learned never to close
     pen_close_off_node = RewTerm(
-        func=mdp.gripper_closed_off_grasp_node, params={"stages": ["approach", "grasp"]}, weight=-1.0
+        func=mdp.gripper_closed_off_grasp_node, params={"stages": ["approach", "grasp"]}, weight=-0.25
     )
 
     # -------------- Grasp --------------

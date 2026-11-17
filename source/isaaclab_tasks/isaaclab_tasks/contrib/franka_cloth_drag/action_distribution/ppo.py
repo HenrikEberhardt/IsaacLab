@@ -69,5 +69,6 @@ class KLMetricsPPO(PPO):
             if visited[stage]:
                 for dim, dim_name in enumerate(ACTION_DIM_NAMES):
                     loss_dict[f"std_{name}_{dim_name}"] = mean[stage, dim].item()
-        self._std_sum.zero_()
-        self._std_count.zero_()
+        # Rebuilt by the next rollout: they are inference tensors, which cannot be updated in place outside of it
+        self._std_sum = None
+        self._std_count = None

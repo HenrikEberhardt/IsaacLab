@@ -17,7 +17,7 @@ Episode button skips to the next stored states.
 
     GEN=source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag/reset_bank_generation/scripts
 
-    # Four environments in the Viser web viewer on port 8751; open http://localhost:8751.
+    # Four environments in the Viser web viewer on port 8760; open http://localhost:8760.
     uv run python $GEN/inspect_reset_bank.py --bank logs/reset_banks/debug.pt
 
     # Only the drag states, once.
@@ -41,7 +41,6 @@ from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import (
     ResetBankGenerationCfg,
     ResetStateValidator,
 )
-from isaaclab_tasks.contrib.franka_cloth_drag.state_machine import keep_requested_visualizers
 from isaaclab_tasks.utils import resolve_task_config, setup_preset_cli
 
 defaults = ResetBankGenerationCfg()
@@ -59,7 +58,6 @@ parser.add_argument(
 )
 parser.add_argument("--hold_steps", type=int, default=90, help="Steps each state is held.")
 parser.add_argument("--num_cycles", type=int, default=None, help="Passes over the states. Defaults to endless.")
-parser.add_argument("--viser_port", type=int, default=8751, help="TCP port of the Viser web viewer.")
 parser.add_argument(
     "--allow_settings_mismatch", action="store_true", help="Load a bank made with other physics or task settings."
 )
@@ -86,17 +84,11 @@ def main():
         env_cfg.sim.device = args_cli.device
     args_cli.device = env_cfg.sim.device
     env_cfg.scene.num_envs = args_cli.num_envs
+    args_cli.visualizer = ["viser"]
     # a held state may reach the target: let it hold there instead of resetting
     env_cfg.terminations.success = None
     env_cfg.rewards.success = None
-    keep_requested_visualizers(env_cfg, args_cli.visualizer)
-    if args_cli.visualizer is not None and "viser" in args_cli.visualizer:
-        viser_cfgs = [cfg for cfg in env_cfg.sim.visualizer_cfgs if cfg.visualizer_type == "viser"]
-        if viser_cfgs:
-            for cfg in viser_cfgs:
-                cfg.port = args_cli.viser_port
-        else:
-            env_cfg.sim.visualizer_cfgs.append(ViserVisualizerCfg(port=args_cli.viser_port))
+    env_cfg.sim.visualizer_cfgs = [ViserVisualizerCfg(port=8760)]
 
     with launch_simulation(env_cfg, args_cli):
         from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import UniformResetsCfg
