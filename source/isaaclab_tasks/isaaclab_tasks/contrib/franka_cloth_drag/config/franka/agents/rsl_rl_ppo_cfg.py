@@ -77,6 +77,6 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         schedule="adaptive",
         gamma=0.995,
         lam=0.95,
-        desired_kl=0.01,  # target policy-distribution change for the adaptive schedule
+        desired_kl=0.015,  # target policy-distribution change for the adaptive schedule
         max_grad_norm=1.0,
     )
