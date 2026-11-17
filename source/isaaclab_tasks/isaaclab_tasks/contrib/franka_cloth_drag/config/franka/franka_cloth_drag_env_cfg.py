@@ -160,7 +160,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         init_state=ArticulationCfg.InitialStateCfg(
             pos=(0.0, 0.0, 0.0),
             rot=(0.0, 0.0, 0.0, 1.0),
-            joint_pos={  # Head down home position
+            joint_pos={  # Home position with head facing down
                 "panda_joint1": 0.0,
                 "panda_joint2": -0.110,
                 "panda_joint3": 0.0,
@@ -174,7 +174,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             articulation_props=NewtonArticulationCfg(self_collision_enabled=False),
             rigid_props=[MujocoRigidBodyCfg(gravcomp=1.0)],
             physics_material=RigidBodyMaterialBaseCfg(
-                dynamic_friction=1.5,  # friction of the franka colliders
+                dynamic_friction=1.5,  # Friction of the Franka Colliders
             ),
         ),
     )
@@ -189,7 +189,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                     "panda_link4/panda_link5/panda_link6/panda_link7/robotiq_mount/Robotiq/base_link"
                 ),
                 name="end_effector",
-                offset=OffsetCfg(pos=(0.0, 0.0, 0.1429)),  # centered between the closed pads
+                offset=OffsetCfg(pos=(0.0, 0.0, 0.1429)),  # centered between the closed finger pads
             ),
         ],
     )
@@ -206,7 +206,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             deformable_props=NewtonDeformableBodyPropertiesCfg(),
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.95, 0.85, 0.1)),
             physics_material=NewtonSurfaceDeformableBodyMaterialCfg(
-                density=0.2,  # areal density [kg/m^2], real cotton 0.12-0.3
+                density=0.2,  # areal density [kg/m^2]
                 particle_radius=0.002,
                 tri_ke=1e2,  # 5e2
                 tri_ka=2e3,  # 5e2
@@ -222,7 +222,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Cube",
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.62, 0.0, 0.005 + 0.004 + 0.5 * 0.04)),
         spawn=sim_utils.CuboidCfg(
-            size=(0.04, 0.04, 0.04),  # edge length [m]
+            size=(0.04, 0.04, 0.04),  # [m]
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.3, 0.9)),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.1),  # [kg]
@@ -284,7 +284,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                     "panda_joint6": 25.0,
                     "panda_joint7": 15.0,
                 },
-                armature={  # inertias of the joints
+                armature={  # inertias / delay of the joints
                     "panda_joint[1-2]": 0.6057,
                     "panda_joint[3-4]": 0.4625,
                     "panda_joint[5-7]": 0.2055,
