@@ -357,8 +357,8 @@ class ResetBankBuilder:
 
     def _squeezed(self) -> torch.Tensor:
         """Whether the gripper holds locked nodes with the squeeze complete, shape [num_envs]."""
-        constraint = self.gripper.constraint
-        return constraint.active & constraint.contacts_disabled & (constraint.squeeze_progress >= 1.0)
+        node_lock = self.gripper.node_lock
+        return node_lock.active & node_lock.contacts_disabled & (node_lock.squeeze_progress >= 1.0)
 
     def _windows(
         self,
@@ -394,8 +394,8 @@ class ResetBankBuilder:
         from ..mdp.stages import ClothDragStage
 
         cfg = self.cfg
-        constraint = self.gripper.constraint
-        unlocked = ~constraint.active & ~constraint.contacts_disabled
+        node_lock = self.gripper.node_lock
+        unlocked = ~node_lock.active & ~node_lock.contacts_disabled
         holding_pose = self.sm.pregrasp_ready & (self.sm.sm_wait_time >= cfg.pregrasp_min_hold)
         pregrasp = holding_pose & (ee_speed <= cfg.pregrasp_max_speed) & ~self.gripper.closed & unlocked
         # the stage is not monotonic (a failed try can leave the approach radius again): only before the first GRASP

@@ -36,6 +36,15 @@ class FrontierSamplerCfg:
     epsilon: float = 1.0e-4
     """Positive beta-weight floor that prevents reset-state starvation."""
 
+    min_history: int = 2
+    """Outcomes required before a state participates in SGS; zero selects the legacy target prior."""
+
+    coverage_mix_max: float = 0.25
+    """Largest share reserved for states with fewer than :attr:`min_history` outcomes."""
+
+    coverage_mix_min: float = 0.02
+    """Smallest coverage share, retained after every state has enough outcomes."""
+
     def __post_init__(self) -> None:
         """Validate configuration values."""
         self.validate_values()
@@ -54,10 +63,20 @@ class FrontierSamplerCfg:
             raise ValueError("target_success_estimate must lie strictly between zero and one.")
         if self.kappa <= 0.0:
             raise ValueError("kappa must be positive.")
-        if self.temperature < 1.0:
-            raise ValueError("temperature must be at least one.")
+        if self.temperature <= 0.0:
+            raise ValueError("temperature must be positive.")
         if self.epsilon <= 0.0:
             raise ValueError("epsilon must be positive.")
+        if isinstance(self.min_history, bool) or not isinstance(self.min_history, int) or self.min_history < 0:
+            raise ValueError("min_history must be a non-negative integer.")
+        if self.min_history > self.window_size:
+            raise ValueError("min_history must not exceed window_size.")
+        for name in ("coverage_mix_min", "coverage_mix_max"):
+            value = getattr(self, name)
+            if isinstance(value, bool) or not math.isfinite(float(value)) or not 0.0 <= value <= 1.0:
+                raise ValueError(f"{name} must lie in [0, 1].")
+        if self.coverage_mix_min > self.coverage_mix_max:
+            raise ValueError("coverage_mix_min must not exceed coverage_mix_max.")
 
 
 class ResetStateFrontierSampler:
@@ -118,11 +137,13 @@ class ResetStateFrontierSampler:
         self._refresh_success_rates(unique_rows)
 
     def sampling_weights(self) -> torch.Tensor:
-        """Return positive SGS beta-kernel weights for every reset state."""
+        """Return positive beta-kernel weights, independently of coverage eligibility."""
         target = self.cfg.target_success_estimate
-        # Unknown states need an outcome before they can join the frontier. Treat them as being at the target only for
-        # sampling, so they are explored promptly without polluting their measured success estimate.
-        rate = torch.where(self.history_size > 0, self.success_rate, target)
+        rate = (
+            torch.where(self.history_size > 0, self.success_rate, target)
+            if self.cfg.min_history == 0
+            else self.success_rate
+        )
         weights = (rate + self.cfg.epsilon).pow(self.cfg.kappa * target)
         weights *= (1.0 - rate + self.cfg.epsilon).pow(self.cfg.kappa * (1.0 - target))
         weights.clamp_min_(self.cfg.epsilon).add_(self.cfg.epsilon)
@@ -132,11 +153,11 @@ class ResetStateFrontierSampler:
         """Return frontier success and probability-concentration metrics for one stage buffer."""
         history_size = self.history_size[rows]
         observed = history_size > 0
-        success = self.success_rate[rows][observed]
+        eligible = history_size >= self.cfg.min_history
+        success = self.success_rate[rows][eligible]
         zero = self.success_rate.new_zeros(())
         has_observations = success.numel() > 0
-        weights = self.sampling_weights()[rows]
-        probabilities = weights / weights.sum()
+        probabilities = self.probabilities(rows)
         top_count = max(1, math.ceil(0.01 * len(rows)))
         return {
             "frontier_success_mean": success.mean() if has_observations else zero,
@@ -147,6 +168,11 @@ class ResetStateFrontierSampler:
             ),
             "frontier_solved_fraction": (success > 0.75).float().mean() if has_observations else zero,
             "frontier_unvisited_fraction": (~observed).float().mean(),
+            "frontier_one_visit_fraction": (history_size == 1).float().mean(),
+            "frontier_under_min_history_fraction": (~eligible).float().mean(),
+            "frontier_eligible_fraction": eligible.float().mean(),
+            "frontier_coverage_mix": self.coverage_mix(rows),
+            "frontier_sgs_mix": 1.0 - self.coverage_mix(rows),
             "frontier_partial_history_fraction": (
                 ((history_size > 0) & (history_size < self.cfg.window_size)).float().mean()
             ),
@@ -156,9 +182,29 @@ class ResetStateFrontierSampler:
         }
 
     def probabilities(self, rows: torch.Tensor) -> torch.Tensor:
-        """Return normalized sampling probabilities for one stage buffer."""
-        weights = self.sampling_weights()[rows]
-        return weights / weights.sum()
+        """Return the normalized coverage/SGS mixture for one stage buffer."""
+        history_size = self.history_size[rows]
+        eligible = history_size >= self.cfg.min_history
+        sgs = self.sampling_weights()[rows] * eligible
+        if not eligible.any():
+            sgs = torch.ones_like(sgs)
+        sgs /= sgs.sum()
+
+        deficit = (self.cfg.min_history - history_size).clamp(min=0).float()
+        coverage = deficit
+        if not (deficit > 0).any():
+            coverage = torch.ones_like(deficit)
+        coverage /= coverage.sum()
+        mix = self.coverage_mix(rows)
+        probabilities = (1.0 - mix) * sgs + mix * coverage
+        probabilities.clamp_min_(torch.finfo(probabilities.dtype).tiny)
+        return probabilities / probabilities.sum()
+
+    def coverage_mix(self, rows: torch.Tensor) -> torch.Tensor:
+        """Return the coverage share for one stage, based on its under-observed fraction."""
+        under_observed = (self.history_size[rows] < self.cfg.min_history).float().mean()
+        span = self.cfg.coverage_mix_max - self.cfg.coverage_mix_min
+        return self.cfg.coverage_mix_min + span * under_observed
 
     def _refresh_success_rates(self, rows: torch.Tensor) -> None:
         """Recompute the weighted estimates of the given rows in chronological history order."""

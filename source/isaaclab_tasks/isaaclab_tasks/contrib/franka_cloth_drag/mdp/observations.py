@@ -24,7 +24,7 @@ import torch
 from isaaclab.managers import ManagerTermBase, SceneEntityCfg
 from isaaclab.utils.math import quat_apply_inverse, quat_inv, quat_mul, quat_unique
 
-from ..constrained_gripper.geometry import pad_gap_from_joint
+from ..constrained_gripper.robotiq import pad_gap_from_joint
 from .frames import (
     cloth_center_pos_b,
     cloth_landmark_ids,
@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from isaaclab.managers import ObservationTermCfg
     from isaaclab.sensors import FrameTransformer
 
-    from ..constrained_gripper.grasp_action import ClothGraspAction
+    from ..constrained_gripper.gripper_action import ConstrainedGripperAction
     from .actions import LimitedRelativeJointPositionAction, TopDownDeltaEEAction
 
 
@@ -103,9 +103,9 @@ def gripper_width(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -
 
     Args:
         env: The environment.
-        action_name: Name of the :class:`~..constrained_gripper.grasp_action.ClothGraspAction` term.
+        action_name: Name of the :class:`~..constrained_gripper.gripper_action.ConstrainedGripperAction` term.
     """
-    action: ClothGraspAction = env.action_manager.get_term(action_name)
+    action: ConstrainedGripperAction = env.action_manager.get_term(action_name)
     robot: Articulation = env.scene[action.cfg.asset_name]
     finger_id = robot.find_joints(action.cfg.finger_joint_name)[0][0]
     angle = robot.data.joint_pos.torch[:, finger_id]
@@ -120,7 +120,7 @@ def cloth_grasped(
 
     Privileged: the real Franka Hand's ``is_grasped`` flag cannot tell thin cloth from an empty close, because
     ``grasp(width=0)`` also counts the closed fingers as grasped. See
-    :class:`~..constrained_gripper.grasp_action.ClothGraspAction`.
+    :class:`~..constrained_gripper.gripper_action.ConstrainedGripperAction`.
 
     With ``hide_curriculum``, the flag is zero in the episodes the curriculum term of that name hides it in
     (:attr:`~.curriculums.ObservationHidingCurriculum.hidden`), distinct from both grasp states. Without that term,
@@ -131,7 +131,7 @@ def cloth_grasped(
         action_name: Name of the cloth grasp action term.
         hide_curriculum: Name of the curriculum term that hides the flag, or None.
     """
-    action: ClothGraspAction = env.action_manager.get_term(action_name)
+    action: ConstrainedGripperAction = env.action_manager.get_term(action_name)
     flag = action.is_grasping.float().unsqueeze(1) * 2.0 - 1.0
     if hide_curriculum is not None:
         hidden = _curriculum_hidden(env, hide_curriculum)
@@ -142,15 +142,14 @@ def cloth_grasped(
 
 def grasped_node_ratio(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
     """Share of the cloth nodes locked to the hand, shape [num_envs, 1]. See
-    :class:`~..constrained_gripper.grasp_action.ClothGraspAction`.
+    :class:`~..constrained_gripper.gripper_action.ConstrainedGripperAction`.
 
     Args:
         env: The environment.
         action_name: Name of the cloth grasp action term.
     """
-    action: ClothGraspAction = env.action_manager.get_term(action_name)
-    num_nodes = action.constraint.grasped.shape[1] if action.constraint is not None else 1
-    return (action.num_grasped.float() / num_nodes).unsqueeze(1)
+    action: ConstrainedGripperAction = env.action_manager.get_term(action_name)
+    return (action.num_grasped.float() / action.node_lock.grasped.shape[1]).unsqueeze(1)
 
 
 def ee_pose_b(

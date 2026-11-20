@@ -334,11 +334,15 @@ class ResetFromBank(ManagerTermBase):
         """Serializable frontier histories, estimates and per-stage sampling probabilities."""
         if self._frontier is None:
             return None
-        sampling_weight = self._frontier.sampling_weights()
+        sampling_weight = self._row_weights()
         sampling_probability = torch.zeros_like(sampling_weight)
-        for rows in self._stage_rows.values():
+        for stage, rows in self._stage_rows.items():
             if rows.numel() > 0:
-                sampling_probability[rows] = self._frontier.probabilities(rows)
+                sampling_probability[rows] = (
+                    self._frontier.probabilities(rows)
+                    if stage in self.cfg.frontier_stages
+                    else torch.full_like(rows, 1.0 / len(rows), dtype=sampling_probability.dtype)
+                )
         return {
             "cfg": self.cfg.frontier_sampling_parameters.to_dict(),
             "history": self._frontier.history.detach().cpu(),
@@ -408,10 +412,10 @@ class ResetFromBank(ManagerTermBase):
 
     def _row_weights(self) -> torch.Tensor:
         """Frontier weights of the stored states of the ``frontier_stages``, 1 for the states of the other stages."""
-        weights = self._frontier.sampling_weights()
+        weights = torch.ones(len(self.bank), device=self.device)
         for stage, rows in self._stage_rows.items():
-            if stage not in self.cfg.frontier_stages:
-                weights[rows] = 1.0
+            if stage in self.cfg.frontier_stages and rows.numel() > 0:
+                weights[rows] = self._frontier.probabilities(rows)
         return weights
 
     def _source(self, rows: torch.Tensor) -> torch.Tensor:

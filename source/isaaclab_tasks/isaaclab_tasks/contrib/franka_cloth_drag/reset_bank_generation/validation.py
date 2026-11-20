@@ -136,11 +136,11 @@ class ResetStateValidator:
         # the environments that did not end show the state that followed the stored one: every state keeps the stage
         # it was stored in, drag and goal states their grasp, pre-grasp states stay open and unlocked
         self._reject(self.alive & (self.command.stage[ids] != self.start_stage), "stage_change")
-        constraint = self.gripper.constraint
-        locked = constraint.grasped[ids] & constraint.active[ids].unsqueeze(1)
-        changed = self.holds & ((locked != self.grasped).any(dim=1) | ~constraint.active[ids])
+        node_lock = self.gripper.node_lock
+        locked = node_lock.grasped[ids] & node_lock.active[ids].unsqueeze(1)
+        changed = self.holds & ((locked != self.grasped).any(dim=1) | ~node_lock.active[ids])
         pregrasp = self.start_stage == START_STAGE_NAMES.index("grasp")
-        changed |= pregrasp & (constraint.active[ids] | self.gripper.closed[ids])
+        changed |= pregrasp & (node_lock.active[ids] | self.gripper.closed[ids])
         self._reject(self.alive & changed, "grasp_changed")
         node_speed = env.scene["deformable"].data.nodal_vel_w.torch[ids].norm(dim=-1).amax(dim=1)
         self._reject(self.alive & ~(node_speed <= self.max_node_speed), "node_speed")

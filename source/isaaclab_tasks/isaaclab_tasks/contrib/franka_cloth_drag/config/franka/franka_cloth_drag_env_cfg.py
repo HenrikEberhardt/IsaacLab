@@ -46,15 +46,15 @@ from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyMappingCfg
 from isaaclab_tasks.utils import PresetCfg
 
 from ... import mdp, reset_strategies
-from ...constrained_gripper import ClothGraspActionCfg, ClothGraspCouplerProxyCfg
+from ...constrained_gripper import ConstrainedGripperActionCfg, RobotiqGripperActuatorCfg
 from ...constrained_gripper.robotiq import (
     FRANKA_PANDA_ROBOTIQ_CFG,
     ROBOTIQ_DRIVE_EFFORT,
     ROBOTIQ_DRIVE_JOINT,
     ROBOTIQ_SPEED,
-    RobotiqGripperActuatorCfg,
     stiffen_robotiq_mimics,
 )
+from ...physics import ClothDragCouplerCfg
 
 ##
 #################### Pre-defined configs ####################
@@ -77,9 +77,9 @@ ROBOTIQ_BODIES = (
 
 @configclass
 class PhysicsCfg(NewtonCfg):
-    """MJWarp robot and VBD cloth with the constraint-grasp proxy coupler."""
+    """MJWarp robot and VBD cloth with the cloth-drag proxy coupler."""
 
-    solver_cfg = ClothGraspCouplerProxyCfg(
+    solver_cfg = ClothDragCouplerCfg(
         entries=[
             CouplerEntryCfg(
                 name="rigid",
@@ -324,7 +324,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
 ##
 
 # ------------------- Action Terms -------------------
-GRIPPER_ACTION_CFG = ClothGraspActionCfg(
+GRIPPER_ACTION_CFG = ConstrainedGripperActionCfg(
     # Binary gripper action: close below -latch_threshold, open above it, else keep the last command
     asset_name="robot",
     joint_names=[ROBOTIQ_DRIVE_JOINT],
@@ -582,9 +582,12 @@ FRONTIER_SAMPLER_CFG = reset_strategies.FrontierSamplerCfg(
     weight_increment=1.0,
     # Beta Sampling Variables
     target_success_estimate=0.5,
-    kappa=1.0,
+    kappa=1.0,  # small kappa = uniform, large = focus near target_success
     temperature=2.0,
-    epsilon=1.0e-4,
+    epsilon=1.0e-4,  # ensure 0 and 1 probability can also be drawn
+    min_history=2,
+    coverage_mix_max=0.25,
+    coverage_mix_min=0.02,
 )
 
 

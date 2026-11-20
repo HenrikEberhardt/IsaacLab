@@ -3,10 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Newton coupler manager that supports locking cloth nodes to the gripper.
-
-Adapted from ``NewtonClothCubeCouplerManager`` on the ``non-prehensile-cloth`` branch.
-"""
+"""Newton coupler manager of the Franka cloth dragging task."""
 
 from __future__ import annotations
 
@@ -112,20 +109,19 @@ def _shapes_matching(pattern: str, shape_labels, shape_body, body_labels) -> np.
     )
 
 
-class NewtonClothGraspCouplerManager(NewtonCouplerManager):
-    """Coupler manager for a gripper that grasps cloth by locking cloth nodes to it.
+class NewtonClothDragCouplerManager(NewtonCouplerManager):
+    """Coupler manager of the cloth dragging task.
 
     The class name must start with ``Newton``: Isaac Lab picks the asset backend from the physics manager's name.
 
     Additions to :class:`~isaaclab_contrib.coupling.coupler.NewtonCouplerManager`:
 
-    * Inverse kinematics after each substep, so Isaac Lab sees the motion of VBD-integrated bodies (the cube).
-    * Copy of the particle activity into the solver views before each substep, so locked nodes stay kinematic in VBD.
-    * :meth:`set_proxy_particle_contacts`: switch the gripper-cloth contacts per environment.
-    * Restore of a share (``rest_angle_scale``) of the spawned cloth's bending rest angles.
-    * :meth:`get_cloth_rest` / :meth:`set_cloth_rest`: read and change the cloth rest shape at runtime.
+    * Gripper lock: the particle activity is copied into the solver views before each substep, so locked cloth nodes
+      stay kinematic in VBD; :meth:`set_proxy_particle_contacts` switches the gripper-cloth contacts per environment.
+    * Cube: inverse kinematics after each substep, so Isaac Lab sees the motion of VBD-integrated bodies.
     * ``collision_filter_pairs``: shape pairs that never collide.
     * ``monitored_contacts``: per-world touch latch of shape pairs, see :meth:`contact_latch`.
+    * :meth:`get_cloth_rest` / :meth:`set_cloth_rest`: read and change the cloth rest shape at runtime.
     """
 
     _vbd_articulation_mask: wp.array | None = None
@@ -170,8 +166,7 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
 
     @classmethod
     def _build_solver(cls, model: Model, solver_cfg: CouplerCfg) -> None:
-        """Restore the cloth rest angles, build the coupled solver and record the particle entries and VBD bodies."""
-        cls._restore_rest_angles(model, getattr(solver_cfg, "rest_angle_scale", 0.0))
+        """Build the coupled solver and record the particle entries, the VBD bodies and the monitored contacts."""
         super()._build_solver(model, solver_cfg)
         cls._particle_entries = [
             entry for entry in NewtonManager._solver._entries.values() if entry.particle_indices.shape[0] > 0
@@ -214,19 +209,6 @@ class NewtonClothGraspCouplerManager(NewtonCouplerManager):
                 groups[shapes] |= 1 << (2 * i + side)
         cls._contact_shape_groups = wp.array(groups, dtype=wp.int32, device=model.device)
         cls._contact_latch = wp.zeros((model.world_count, len(monitored)), dtype=wp.int32, device=model.device)
-
-    @staticmethod
-    def _restore_rest_angles(model: Model, scale: float) -> None:
-        """Set the bending rest angles to ``scale`` times those the model builder computed from the spawned meshes."""
-        builder = NewtonManager._builder
-        if scale == 0.0 or builder is None or not model.edge_count:
-            return
-        rest_angles = np.asarray(builder.edge_rest_angle, dtype=np.float32)
-        if rest_angles.shape[0] != model.edge_count:
-            raise RuntimeError(
-                f"Builder has {rest_angles.shape[0]} edge rest angles, but the model has {model.edge_count} edges."
-            )
-        model.edge_rest_angle.assign(scale * rest_angles)
 
     @classmethod
     def _step_solver(

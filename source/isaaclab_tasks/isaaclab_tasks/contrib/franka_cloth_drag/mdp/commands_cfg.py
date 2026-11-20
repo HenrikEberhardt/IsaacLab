@@ -37,10 +37,12 @@ class ClothTargetCommandCfg(CommandTermCfg):
       (:attr:`~.commands.ClothTargetCommand.grasp_node_id`): the node raised by the reset event
       :attr:`raised_nodes_event` closest to the segment from the central node to the target.
     * DRAG: the gripper holds the cloth by nodes locked to the EE frame that include a raised node, see
-      :func:`~.stages.gripper_holds_raised_node` and :class:`~..constrained_gripper.grasp_action.ClothGraspAction`. The
-      nodes lock once the closing fingers have come to rest with at least
-      :attr:`~..constrained_gripper.grasp_action_cfg.ClothGraspActionCfg.grasp_min_nodes` nodes selected; a lock without
-      a raised node (e.g. a pinch of the edge) stays in the earlier stage. Without raised nodes any lock counts.
+      :func:`~.stages.gripper_holds_raised_node` and
+      :class:`~..constrained_gripper.gripper_action.ConstrainedGripperAction`. The nodes lock once the closing fingers
+      have come to rest with at least
+      :attr:`~..constrained_gripper.gripper_action_cfg.ConstrainedGripperActionCfg.grasp_min_nodes` nodes selected; a
+      lock without a raised node (e.g. a pinch of the edge) stays in the earlier stage. Without raised nodes any lock
+      counts.
     * GOAL: DRAG, and the cloth's central node is within :attr:`success_radius` + :attr:`goal_zone_margin` of the
       target.
 
@@ -103,8 +105,8 @@ class ClothTargetCommandCfg(CommandTermCfg):
     """Name of the frame transformer whose first target is the EE frame, centered between the finger pads."""
 
     gripper_action_name: str = "gripper_action"
-    """Name of the :class:`~..constrained_gripper.grasp_action.ClothGraspAction` term; a negative action closes the
-    gripper. Its configuration holds the gripper settings (finger joint, pad box, ``grasp_min_nodes``)."""
+    """Name of the :class:`~..constrained_gripper.gripper_action.ConstrainedGripperAction` term; a negative action
+    closes the gripper. Its configuration holds the gripper settings (finger joint, pad box, ``grasp_min_nodes``)."""
 
     approach_radius: float = 0.05
     """Distance of the EE frame origin to the grasp node below which APPROACH turns into GRASP [m].

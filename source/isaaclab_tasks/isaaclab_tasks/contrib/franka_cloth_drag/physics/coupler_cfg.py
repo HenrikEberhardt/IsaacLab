@@ -14,18 +14,15 @@ from isaaclab.utils import configclass
 from isaaclab_contrib.coupling import CouplerProxyCfg
 
 if TYPE_CHECKING:
-    from .coupler import NewtonClothGraspCouplerManager
+    from .coupler import NewtonClothDragCouplerManager
 
 
 @configclass
-class ClothGraspCouplerProxyCfg(CouplerProxyCfg):
-    """Proxy coupler for the constraint cloth grasp, see :class:`~.coupler.NewtonClothGraspCouplerManager`."""
+class ClothDragCouplerCfg(CouplerProxyCfg):
+    """Proxy coupler of the cloth dragging task, see :class:`~.coupler.NewtonClothDragCouplerManager`."""
 
-    class_type: type[NewtonClothGraspCouplerManager] | str = "{DIR}.coupler:NewtonClothGraspCouplerManager"
+    class_type: type[NewtonClothDragCouplerManager] | str = "{DIR}.coupler:NewtonClothDragCouplerManager"
     """Coupler implementation class."""
-
-    rest_angle_scale: float = 0.0
-    """Share of the spawned cloth's bending rest angles to keep as rest shape; 0.0 is flat."""
 
     collision_filter_pairs: list[tuple[str, str]] = []
     """Pairs of prim-path regexes whose shapes never collide with each other within a world."""

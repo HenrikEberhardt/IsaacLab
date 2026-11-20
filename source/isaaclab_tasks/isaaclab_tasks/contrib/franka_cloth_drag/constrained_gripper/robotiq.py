@@ -4,17 +4,16 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 # Ported from srl-ethz/IsaacLab-Cloth (branch cloth-fold-environments, commit c445370),
-# src/Cloth_Manipulation/assets/robotiq.py and common/gripper_actuator.py, which follow mmichelis/IsaacLab-Soft
-# (branch liftsoft-robotiq, commit 1ee1ab3); see assets/robotiq/README.md. The camera helpers were left out.
+# src/Cloth_Manipulation/assets/robotiq.py, which follows mmichelis/IsaacLab-Soft (branch liftsoft-robotiq,
+# commit 1ee1ab3); see assets/robotiq/README.md. The camera helpers were left out.
 
-"""Franka Panda with a Robotiq 2F-85: the asset, its gap curve, and the delayed finger drive."""
+"""Franka Panda with a Robotiq 2F-85: the asset, its constants, the pad kinematics and the linkage stiffening."""
 
 from __future__ import annotations
 
 import functools
 import itertools
 import math
-from collections.abc import Sequence
 from pathlib import Path
 
 import torch
@@ -22,10 +21,6 @@ import warp as wp
 from isaaclab_newton.physics import NewtonManager
 
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
-
-from isaaclab.actuators import ImplicitActuator, ImplicitActuatorCfg
-from isaaclab.utils import configclass
-from isaaclab.utils.types import ArticulationActions
 
 from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG
 
@@ -54,10 +49,6 @@ FRANKA_PANDA_ROBOTIQ_CFG = FRANKA_PANDA_CFG.replace(
 )
 """Panda arm plus analytical Robotiq, without actuators and finger joint positions; the task assigns the actuators."""
 
-ROBOTIQ_BASE_BODY = "base_link"
-"""The gripper's root body. It is fixed to ``panda_link7`` 125 mm along its z axis with no yaw, so the jaws open along
-the flange's y axis. The coupling's and camera's masses are folded into it."""
-
 ROBOTIQ_BASE_PATH = (
     "Geometry/panda_link0/panda_link1/panda_link2/panda_link3/panda_link4"
     "/panda_link5/panda_link6/panda_link7/robotiq_mount/Robotiq/base_link"
@@ -68,35 +59,31 @@ ROBOTIQ_DRIVE_JOINT = "finger_joint"
 """The single driven joint; mimic constraints make the other five gripper joints follow it, keeping the pads
 parallel."""
 
-ROBOTIQ_OPEN = 0.0
-"""``finger_joint`` angle [rad] of the fully open gripper (about 87 mm between the pad faces)."""
-
-ROBOTIQ_CLOSED = 0.8
-"""``finger_joint`` angle [rad] of the closed gripper, just short of the 0.82 rad limit where the pads meet."""
-
-ROBOTIQ_PAD_BODY_NAMES = ("left_inner_finger", "right_inner_finger")
-"""Bodies that carry the gripping pads."""
-
-ROBOTIQ_PAD_CENTERS = ((0.0, -0.04674, 0.12940), (0.0, 0.04674, 0.12940))
-"""Centres [m] of the thin pad boxes in the frames of :data:`ROBOTIQ_PAD_BODY_NAMES`.
-
-The pad bodies' frames coincide with ``base_link``'s while the gripper is open, so these are also the open pads'
-centres in the ``base_link`` frame. Each pad is 6.5 mm thick, with its gripping face 3.2 mm inward of its centre.
-"""
-
-ROBOTIQ_PAD_HALF_WIDTH = 0.011
-"""Half width of a gripping pad along the base_link x-axis [m]; the pad is 22 mm wide."""
-
-ROBOTIQ_PAD_THICKNESS = 0.0065
-"""Thickness of a gripping pad along the closing direction [m]."""
-
-ROBOTIQ_PAD_HALF_LENGTH = 0.019
-"""Half length of a gripping pad along the base_link z-axis [m]; the pad is 38 mm long."""
-
 ROBOTIQ_GAP_CURVE = (0.0127769, 0.1143161, -0.7077544)
 """``(a, b, c)`` of the gap between the pads' inner faces, ``a - b * sin(q + c)`` [m], over ``finger_joint`` ``q``
 [rad]: the parallel linkage moves the pads on a circle. Fitted to the pad hulls under the asset's forward kinematics
 (0-0.82 rad) to within 0.001 mm."""
+
+
+def pad_gap_from_joint(q: torch.Tensor, curve: tuple[float, float, float]) -> torch.Tensor:
+    """Distance [m] between the pad faces at finger joint angle ``q`` [rad], ``a - b * sin(q + c)``."""
+    a, b, c = curve
+    return a - b * torch.sin(q + c)
+
+
+def joint_from_pad_gap(gap: torch.Tensor, curve: tuple[float, float, float]) -> torch.Tensor:
+    """Finger joint angle [rad] at which the pad faces are ``gap`` [m] apart (inverse of the gap curve)."""
+    a, b, c = curve
+    return torch.asin(((a - gap) / b).clamp(-1.0, 1.0)) - c
+
+
+def pad_shift_from_joint(
+    q: torch.Tensor, curve: tuple[float, float, float], closed_q: float, direction: float
+) -> torch.Tensor:
+    """Position [m] of the pads along the EE frame's z-axis at angle ``q`` [rad], zero when closed at ``closed_q``."""
+    _, b, c = curve
+    return direction * 0.5 * b * (torch.cos(q + c) - torch.cos(torch.as_tensor(closed_q + c, device=q.device)))
+
 
 ROBOTIQ_MAX_SQUEEZE_FORCE = 25.0
 """Maximum pad squeeze force [N]: 25 N open, 19 N near closed (2F-85 range 20-235 N)."""
@@ -188,101 +175,3 @@ def stiffen_robotiq_mimics(env, env_ids) -> None:
     solref, solimp = wp.to_torch(solver.mjw_model.eq_solref), wp.to_torch(solver.mjw_model.eq_solimp)
     solref[mimic] = solref.new_tensor(ROBOTIQ_MIMIC_SOLREF)
     solimp[mimic] = solimp.new_tensor(ROBOTIQ_MIMIC_SOLIMP)
-
-
-class RobotiqGripperActuator(ImplicitActuator):
-    """Robotiq 2F-85: the solver's PD drive tracks a delayed, optionally speed-limited copy of the commanded position.
-
-    The policy commands the gripper fully open or fully closed. The real gripper starts moving some time after the
-    command and then travels at a set speed. This model reproduces that in front of the implicit PD drive:
-
-    * the commanded target is delayed by ``min_delay`` to ``max_delay`` physics steps, sampled per environment at
-      reset. After a reset the delay line is filled with the measured position, so the gripper holds still until the
-      first command comes through;
-    * if ``stroke_time_range`` is set, the drive target moves from its current value towards the delayed command at a
-      constant speed, so that it covers the open-to-closed stroke in ``stroke_time_range`` seconds, sampled per
-      environment at reset. Otherwise the drive gets the delayed command directly, and its effort limit and viscous
-      friction set the speed.
-
-    The PD gains and effort limit stay the drive's own, so the squeeze force on a grasped object is unchanged: once
-    the fingers stop on the object, the drive target still reaches the closed position and the drive saturates at its
-    effort limit. The delay and speed act in the simulator only. The exported policy still outputs the open or
-    closed position, and on the robot the gripper itself adds the delay and the speed limit.
-    """
-
-    cfg: RobotiqGripperActuatorCfg
-
-    def __init__(self, cfg: RobotiqGripperActuatorCfg, *args, **kwargs):
-        super().__init__(cfg, *args, **kwargs)
-        if not 0 <= cfg.min_delay <= cfg.max_delay:
-            raise ValueError(f"Expected 0 <= min_delay <= max_delay, got {cfg.min_delay}, {cfg.max_delay}")
-        if cfg.stroke_time_range is not None:
-            if not 0.0 < cfg.stroke_time_range[0] <= cfg.stroke_time_range[1]:
-                raise ValueError(
-                    f"Expected 0 < stroke_time_range[0] <= stroke_time_range[1], got {cfg.stroke_time_range}"
-                )
-            if cfg.stroke is None or cfg.physics_dt is None:
-                raise ValueError("stroke_time_range needs stroke and physics_dt")
-        shape = (self._num_envs, self.num_joints)
-        self._history = torch.zeros(cfg.max_delay + 1, *shape, device=self._device)
-        self._write_index = 0
-        self._lag = torch.zeros(self._num_envs, dtype=torch.long, device=self._device)
-        self._fresh = torch.ones(self._num_envs, dtype=torch.bool, device=self._device)
-        self._env_index = torch.arange(self._num_envs, device=self._device)
-        # largest drive target change per physics step [rad]; unlimited without a speed limit
-        self._max_step = torch.full(shape, torch.inf, device=self._device)
-        self._drive_target = torch.zeros(shape, device=self._device)
-        self.reset(None)
-
-    def reset(self, env_ids: Sequence[int] | None = None):
-        ids = slice(None) if env_ids is None else env_ids
-        num = self._lag[ids].shape[0]
-        self._lag[ids] = torch.randint(self.cfg.min_delay, self.cfg.max_delay + 1, (num,), device=self._device)
-        self._fresh[ids] = True
-        if self.cfg.stroke_time_range is None:
-            return
-        low, high = self.cfg.stroke_time_range
-        stroke_time = low + (high - low) * torch.rand(num, self.num_joints, device=self._device)
-        self._max_step[ids] = self.cfg.stroke * self.cfg.physics_dt / stroke_time
-
-    def compute(
-        self, control_action: ArticulationActions, joint_pos: torch.Tensor, joint_vel: torch.Tensor
-    ) -> ArticulationActions:
-        # after a reset, the delay line and drive target start from the measured position
-        fresh = self._fresh.view(-1, 1)
-        self._history = torch.where(fresh.unsqueeze(0), joint_pos.unsqueeze(0), self._history)
-        self._drive_target = torch.where(fresh, joint_pos, self._drive_target)
-        self._fresh[:] = False
-
-        self._history[self._write_index] = control_action.joint_positions
-        read_index = (self._write_index - self._lag) % self._history.shape[0]
-        delayed = self._history[read_index, self._env_index]
-        self._write_index = (self._write_index + 1) % self._history.shape[0]
-
-        step = (delayed - self._drive_target).clamp(-self._max_step, self._max_step)
-        self._drive_target = self._drive_target + step
-        control_action.joint_positions = self._drive_target.clone()
-        return super().compute(control_action, joint_pos, joint_vel)
-
-
-@configclass
-class RobotiqGripperActuatorCfg(ImplicitActuatorCfg):
-    """Configuration for :class:`RobotiqGripperActuator`."""
-
-    class_type: type = RobotiqGripperActuator
-
-    physics_dt: float | None = None
-    """Physics step [s], at which the actuator is computed; needed with ``stroke_time_range``."""
-
-    stroke: float | None = None
-    """Distance [rad] between the open and closed positions of the driven joint; needed with ``stroke_time_range``."""
-
-    stroke_time_range: tuple[float, float] | None = None
-    """Time [s] in which the drive target covers the full stroke, sampled per environment at reset; None leaves the
-    speed to the drive."""
-
-    min_delay: int = 0
-    """Minimum command delay [physics steps]."""
-
-    max_delay: int = 0
-    """Maximum command delay [physics steps]."""

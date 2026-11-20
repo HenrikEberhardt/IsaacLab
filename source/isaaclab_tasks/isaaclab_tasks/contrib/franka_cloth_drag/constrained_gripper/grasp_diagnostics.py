@@ -20,7 +20,7 @@ from ..mdp.stages import (
     grasp_node_pos_w,
     gripper_holds_raised_node,
 )
-from .geometry import gripper_closing, gripper_holds_cloth
+from .gripper_state import gripper_closing, gripper_holds_cloth
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedEnv
@@ -60,9 +60,9 @@ class GraspDiagnostics:
     Only episodes that start without a lock, in APPROACH or GRASP, are counted. A lock is right when it holds a raised
     node (the condition of DRAG, see :func:`~..mdp.stages.gripper_holds_raised_node`) and wrong otherwise, e.g. flat
     cloth next to the raised node. A close is the gripper command switching to closed; a lock attempt is the gripper
-    trying to lock once the fingers settled (:attr:`~.grasp_action.ClothGraspAction.grasp_tried`), which forms a lock
-    only with at least ``grasp_min_nodes`` nodes between the pads. Events are read once per environment step, after the
-    physics, so values "at" an attempt or lock are one control step after the gripper tried.
+    trying to lock once the fingers settled (:attr:`~.gripper_action.ConstrainedGripperAction.grasp_tried`), which
+    forms a lock only with at least ``grasp_min_nodes`` nodes between the pads. Events are read once per environment
+    step, after the physics, so values "at" an attempt or lock are one control step after the gripper tried.
 
     Logged keys, each left out when no event of its kind ended in the step:
 
@@ -121,11 +121,11 @@ class GraspDiagnostics:
         """
         env, cfg = self._env, self._cfg
         term = env.action_manager.get_term(cfg.gripper_action_name)
-        constraint = term.constraint
+        lock = term.node_lock
         dt = env.step_dt
         closed = gripper_closing(env, cfg)
         tried = term.grasp_tried
-        active = constraint.active
+        active = lock.active
         holds = gripper_holds_cloth(env, cfg)
         right = gripper_holds_raised_node(env, cfg)
         wrong = holds & ~right
@@ -167,17 +167,17 @@ class GraspDiagnostics:
         self._close_pending &= ~attempt_event
 
         # locks
-        num_locked = constraint.num_grasped.float()
+        num_locked = lock.num_grasped.float()
         c["right_locks"] += right_lock.float()
         s["right_lock_nodes"] += torch.where(right_lock, num_locked, 0.0)
-        on_node = constraint.grasped.gather(1, grasp_node.unsqueeze(1)).squeeze(1)
+        on_node = lock.grasped.gather(1, grasp_node.unsqueeze(1)).squeeze(1)
         s["right_lock_on_grasp_node"] += (right_lock & on_node).float()
         c["wrong_locks"] += wrong_lock.float()
         s["wrong_lock_nodes"] += torch.where(wrong_lock, num_locked, 0.0)
         if wrong_lock.any():
             nodal_pos_w = env.scene[cfg.object_name].data.nodal_pos_w.torch
             to_node = torch.linalg.norm(nodal_pos_w - node_pos_w.unsqueeze(1), dim=2)
-            nearest_mm = torch.where(constraint.grasped, to_node, torch.inf).min(dim=1).values * 1000.0
+            nearest_mm = torch.where(lock.grasped, to_node, torch.inf).min(dim=1).values * 1000.0
             s["wrong_lock_nearest_node_mm"] += torch.where(wrong_lock, nearest_mm, 0.0)
 
         # episode flags

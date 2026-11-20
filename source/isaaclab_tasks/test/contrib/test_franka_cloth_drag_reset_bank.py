@@ -26,6 +26,11 @@ from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation import (
     ResetBankGenerationCfg,
     subsample_to_quotas,
 )
+from isaaclab_tasks.contrib.franka_cloth_drag.reset_bank_generation.diversity import (
+    diversity_report,
+    physical_features,
+    select_diverse_rows,
+)
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies import ResetFromBankCfg, reset_from_bank
 from isaaclab_tasks.contrib.franka_cloth_drag.reset_strategies.bank import (
     SCHEMA_VERSION,
@@ -134,6 +139,68 @@ def test_subsample_keeps_exact_stage_quotas():
         subsample_to_quotas(bank, {"grasp": 4})
 
 
+def test_diverse_selection_is_deterministic_and_spans_stage_progress():
+    num = 9
+    x = torch.linspace(0.10, 0.18, num)
+    nodes = torch.zeros(num, 4, 3)
+    nodes[:, :, 0] = torch.tensor([0.0, 0.03, 0.06, 0.09])
+    bank = ResetBank(
+        {
+            "scene": {
+                "joint_pos": torch.stack([torch.arange(7) * 0.01 + value for value in x]),
+                "nodal_pos": nodes,
+                "cube_root_pose": torch.cat(
+                    (torch.zeros(num, 3), torch.tensor([[0.0, 0.0, 0.0, 1.0]]).repeat(num, 1)), dim=1
+                ),
+            },
+            "task": {
+                "stage": torch.ones(num, dtype=torch.long),
+                "raised_node_ids": torch.tensor([[0, 1, 2]]).repeat(num, 1),
+                "target_pos_b": torch.tensor([[0.2, 0.0, 0.0]]).repeat(num, 1),
+                "ee_pos_b": torch.stack((x, torch.zeros(num), torch.zeros(num)), dim=1),
+                "squeeze_progress": torch.zeros(num),
+            },
+        }
+    )
+    first = select_diverse_rows(bank, "grasp", 3)
+    second = select_diverse_rows(bank, "grasp", 3)
+    assert first.tolist() == second.tolist()
+    assert len(first) == 3
+    # One selected state comes from each ordered beginning/middle/end progress third.
+    assert sum(row < 3 for row in first.tolist()) == 1
+    assert sum(3 <= row < 6 for row in first.tolist()) == 1
+    assert sum(row >= 6 for row in first.tolist()) == 1
+    assert diversity_report(bank)["stages"]["grasp"]["count"] == num
+
+
+def test_physical_features_ignore_global_translation():
+    num = 2
+    nodes = torch.tensor([[[0.0, 0.0, 0.0], [0.1, 0.0, 0.0]]] * num)
+    shift = torch.tensor([0.4, -0.2, 0.1])
+    nodes[1] += shift
+    bank = ResetBank(
+        {
+            "scene": {
+                "joint_pos": torch.zeros(num, 7),
+                "nodal_pos": nodes,
+                "cube_root_pose": torch.tensor(
+                    [[0.05, 0.0, 0.0, 0.0, 0.0, 0.0, 1.0], [0.45, -0.2, 0.1, 0.0, 0.0, 0.0, 1.0]]
+                ),
+            },
+            "task": {
+                "stage": torch.ones(num, dtype=torch.long),
+                "raised_node_ids": torch.tensor([[0, 1], [0, 1]]),
+                "target_pos_b": torch.tensor([[0.2, 0.0, 0.0], [0.6, -0.2, 0.1]]),
+                "ee_pos_b": torch.tensor([[0.05, 0.0, 0.1], [0.45, -0.2, 0.2]]),
+                "squeeze_progress": torch.zeros(num),
+            },
+        }
+    )
+    features, progress, _ = physical_features(bank, torch.arange(num))
+    torch.testing.assert_close(features[0], features[1], atol=1.0e-6, rtol=0.0)
+    torch.testing.assert_close(progress[0], progress[1], atol=1.0e-6, rtol=0.0)
+
+
 def test_stage_ratios_sample_their_stages():
     bank = _bank([0, 1, 1, 2, 3, 3])
     # the beginning of the task is a stored state too
@@ -184,7 +251,7 @@ def test_frontier_uses_linearly_weighted_recent_outcomes():
 
 
 def test_frontier_beta_weights_peak_at_the_target_and_stay_positive():
-    sampler = ResetStateFrontierSampler(3, "cpu", FrontierSamplerCfg(target_success_estimate=0.5))
+    sampler = ResetStateFrontierSampler(3, "cpu", FrontierSamplerCfg(target_success_estimate=0.5, min_history=1))
     sampler.success_rate[:] = torch.tensor([0.0, 0.5, 1.0])
     sampler.history_size[:] = 1
     weights = sampler.sampling_weights()
@@ -204,23 +271,44 @@ def test_frontier_beta_weights_peak_at_the_target_and_stay_positive():
     assert metrics["frontier_full_history_fraction"] == 0.0
 
 
-def test_frontier_prioritizes_unvisited_states_at_the_target():
-    sampler = ResetStateFrontierSampler(3, "cpu", FrontierSamplerCfg(target_success_estimate=0.5))
+def test_frontier_mixes_two_visit_coverage_with_eligible_sgs():
+    cfg = FrontierSamplerCfg(min_history=2, coverage_mix_min=0.02, coverage_mix_max=0.25)
+    sampler = ResetStateFrontierSampler(4, "cpu", cfg)
+    sampler.success_rate[:] = torch.tensor([0.0, 1.0, 0.5, 0.0])
+    sampler.history_size[:] = torch.tensor([0, 1, 2, 2])
+
+    probabilities = sampler.probabilities(torch.arange(4))
+    # Coverage deficits are 2:1 and the SGS component contains only the two eligible states.
+    mix = 0.02 + (0.25 - 0.02) * 0.5
+    assert probabilities[0] == pytest.approx(mix * 2.0 / 3.0, abs=2.0e-4)
+    assert probabilities[1] == pytest.approx(mix / 3.0, abs=2.0e-4)
+    assert probabilities[2] > probabilities[3]
+    assert (probabilities > 0.0).all()
+    metrics = sampler.metrics(torch.arange(3))
+    assert metrics["frontier_success_mean"] == pytest.approx(0.5)
+    assert metrics["frontier_unvisited_fraction"] == pytest.approx(1.0 / 3.0)
+
+
+def test_zero_min_history_recovers_the_legacy_target_prior():
+    cfg = FrontierSamplerCfg(min_history=0, coverage_mix_min=0.0, coverage_mix_max=0.0)
+    sampler = ResetStateFrontierSampler(3, "cpu", cfg)
     sampler.success_rate[:] = torch.tensor([0.0, 0.5, 0.0])
     sampler.history_size[:] = torch.tensor([0, 1, 1])
-
     weights = sampler.sampling_weights()
-
     assert weights[0] == pytest.approx(float(weights[1]))
     assert weights[0] > weights[2]
-    metrics = sampler.metrics(torch.arange(3))
-    assert metrics["frontier_success_mean"] == pytest.approx(0.25)
-    assert metrics["frontier_unvisited_fraction"] == pytest.approx(1.0 / 3.0)
 
 
 @pytest.mark.parametrize(
     ("field", "value"),
-    [("window_size", 0), ("weight_increment", -1.0), ("target_success_estimate", 1.0), ("temperature", 0.5)],
+    [
+        ("window_size", 0),
+        ("weight_increment", -1.0),
+        ("target_success_estimate", 1.0),
+        ("temperature", 0.0),
+        ("min_history", -1),
+        ("coverage_mix_max", 1.1),
+    ],
 )
 def test_frontier_settings_are_checked(field, value):
     with pytest.raises(ValueError):
@@ -552,12 +640,17 @@ def test_frontier_tracks_next_stage_outcomes_and_logs_visits(monkeypatch, tmp_pa
     assert term._frontier.success_rate.tolist() == [1.0, 0.0, 1.0, 1.0]
     assert log["Reset/state_visit_fraction_1_grasp"] == 1.0
     assert log["Reset/state_visit_fraction_0_grasp"] == 0.0
-    assert log["Reset/frontier_success_mean_grasp"] == pytest.approx(0.5)
+    # One outcome is not enough to classify a state as part of the SGS frontier.
+    assert log["Reset/frontier_success_mean_grasp"] == 0.0
     assert log["Reset/frontier_success_median_grasp"] == 0.0
-    assert log["Reset/frontier_hard_fraction_grasp"] == pytest.approx(0.5)
+    assert log["Reset/frontier_hard_fraction_grasp"] == 0.0
     assert log["Reset/frontier_medium_fraction_grasp"] == 0.0
-    assert log["Reset/frontier_solved_fraction_grasp"] == pytest.approx(0.5)
+    assert log["Reset/frontier_solved_fraction_grasp"] == 0.0
     assert log["Reset/frontier_unvisited_fraction_grasp"] == 0.0
+    assert log["Reset/frontier_one_visit_fraction_grasp"] == 1.0
+    assert log["Reset/frontier_under_min_history_fraction_grasp"] == 1.0
+    assert log["Reset/frontier_eligible_fraction_grasp"] == 0.0
+    assert log["Reset/frontier_coverage_mix_grasp"] == pytest.approx(0.25)
     assert log["Reset/frontier_partial_history_fraction_grasp"] == 1.0
     assert log["Reset/frontier_full_history_fraction_grasp"] == 0.0
     assert log["Reset/frontier_effective_pool_fraction_grasp"] == pytest.approx(1.0)
@@ -585,10 +678,9 @@ def test_stages_outside_frontier_stages_draw_uniformly(monkeypatch, tmp_path):
     )
     # one approach and one grasp state solved, the other two failed: different frontier weights in both stages
     term._frontier.record(torch.arange(4), torch.tensor([True, False, True, False]))
-    frontier = term._frontier.sampling_weights()
     weights = term._row_weights()
     assert weights[:2].tolist() == [1.0, 1.0]
-    assert weights[2:].tolist() == frontier[2:].tolist()
+    assert weights[2:].tolist() == term._frontier.probabilities(torch.tensor([2, 3])).tolist()
     log = _reset(term, env, torch.arange(4), step=1)
     assert "Reset/frontier_success_mean_grasp" in log
     assert not any(key.startswith("Reset/frontier_") and key.endswith("_approach") for key in log)
@@ -866,7 +958,7 @@ def test_capture_windows():
     locked = torch.tensor([False] * 5 + [True] * 6 + [False, False, True, True])
     collector.gripper = SimpleNamespace(
         closed=torch.tensor([False, False, False, False, True] + [True] * 6 + [False, False, True, True]),
-        constraint=SimpleNamespace(active=locked, contacts_disabled=locked),
+        node_lock=SimpleNamespace(active=locked, contacts_disabled=locked),
     )
     stage = torch.tensor([1, 0, 1, 1, 1, 2, 2, 2, 3, 3, 3] + [1, 0, 3, 2])
     time_to_stage = torch.where(torch.arange(4) <= stage.unsqueeze(1), 0.5, -1.0)

@@ -46,7 +46,7 @@ def physics_contact(env: ManagerBasedRLEnv, contact_name: str) -> torch.Tensor:
     """Terminate when the monitored contact pair ``contact_name`` touched during the last step.
 
     The physics manager latches the pair after every physics substep (see
-    :meth:`~..constrained_gripper.coupler.NewtonClothGraspCouplerManager.contact_latch`), so a touch within a step is
+    :meth:`~..physics.coupler.NewtonClothDragCouplerManager.contact_latch`), so a touch within a step is
     not missed. This term reads the latch and clears it, so it must be the only reader of that pair.
     """
     physics = env.sim.physics_manager

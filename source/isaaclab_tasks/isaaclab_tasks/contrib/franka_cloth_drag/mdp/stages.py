@@ -14,7 +14,7 @@ import torch
 
 from isaaclab.managers import SceneEntityCfg
 
-from ..constrained_gripper.geometry import gripper_cfg
+from ..constrained_gripper.gripper_state import gripper_cfg
 from .frames import cloth_center_pos_b, cloth_center_vel_b, points_to_base, raised_node_ids, vectors_to_base
 
 # without raised nodes, grasp the node this far from the central node towards the target [m]
@@ -142,13 +142,13 @@ def gripper_holds_raised_node(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) 
 
     A grasp that locks only other nodes, such as a pinch of the cloth's edge, does not count. Without raised nodes
     (see :attr:`ClothTargetCommandCfg.raised_nodes_event`), this is
-    :func:`~..constrained_gripper.geometry.gripper_holds_cloth`. Shape is (num_envs,).
+    :func:`~..constrained_gripper.gripper_state.gripper_holds_cloth`. Shape is (num_envs,).
     """
     term = env.action_manager.get_term(cfg.gripper_action_name)
     ids = raised_node_ids(env, cfg.raised_nodes_event)
     if ids is None:
         return term.is_grasping
-    return term.constraint.active & term.constraint.grasped.gather(1, ids).any(dim=1)
+    return term.node_lock.active & term.node_lock.grasped.gather(1, ids).any(dim=1)
 
 
 def grasp_node_capturable(
@@ -156,10 +156,10 @@ def grasp_node_capturable(
 ) -> torch.Tensor:
     """Whether closing now captures the grasp node. Shape is (num_envs,).
 
-    The lock selector (:meth:`~..constrained_gripper.constraint.ClothGraspConstraint.select`) picks the grasp node, so
-    it or a mesh edge or triangle through it lies between the pads, and with ``require_min_nodes`` at least
-    :attr:`~..constrained_gripper.grasp_action_cfg.ClothGraspActionCfg.grasp_min_nodes` nodes, so the lock forms; while
-    a lock is active, whether the locked nodes include the grasp node.
+    The lock selector (:meth:`~..constrained_gripper.constraint_node_lock.ClothNodeLock.select`) picks the grasp node,
+    so it or a mesh edge or triangle through it lies between the pads, and with ``require_min_nodes`` at least
+    :attr:`~..constrained_gripper.gripper_action_cfg.ConstrainedGripperActionCfg.grasp_min_nodes` nodes, so the lock
+    forms; while a lock is active, whether the locked nodes include the grasp node.
 
     Args:
         env: The environment.
@@ -167,13 +167,13 @@ def grasp_node_capturable(
         grasp_node: Grasp node id of every environment, shape [num_envs].
         require_min_nodes: Whether the selection must also reach the lock's minimum node count.
     """
-    constraint = env.action_manager.get_term(cfg.gripper_action_name).constraint
+    node_lock = env.action_manager.get_term(cfg.gripper_action_name).node_lock
     node = grasp_node.unsqueeze(1)
-    selected = constraint.select()
+    selected = node_lock.select()
     ready = selected.gather(1, node).squeeze(1)
     if require_min_nodes:
         ready &= selected.sum(dim=1) >= max(gripper_cfg(env, cfg).grasp_min_nodes, 1)
-    return torch.where(constraint.active, constraint.grasped.gather(1, node).squeeze(1), ready)
+    return torch.where(node_lock.active, node_lock.grasped.gather(1, node).squeeze(1), ready)
 
 
 def goal_point_pos_b(env: ManagerBasedEnv, cfg: ClothTargetCommandCfg) -> torch.Tensor:

@@ -48,7 +48,7 @@ def capture_reset_states(
     Returns:
         The ``scene`` and ``task`` groups, every tensor with N rows.
     """
-    from ..mdp.frames import raised_node_ids
+    from ..mdp.frames import ee_pose_in_base, raised_node_ids
 
     robot, cloth = env.scene[robot_name], env.scene[cloth_name]
     origins = env.scene.env_origins[env_ids]
@@ -74,6 +74,8 @@ def capture_reset_states(
         "raised_node_ids": raised[env_ids].clone(),
         "target_pos_b": command.command[env_ids].clone(),
         "stage": command.stage[env_ids].clone(),
+        # Selection-only physical descriptor. Restore ignores it; the diverse-bank builder removes it after using it.
+        "ee_pos_b": ee_pose_in_base(env)[0][env_ids].clone(),
     }
     task |= {key: grasp[key] for key in GRASP_STATE_KEYS}
     return {"scene": scene, "task": task}
