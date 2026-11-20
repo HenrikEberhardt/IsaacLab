@@ -235,8 +235,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # Table: the lab table (as in srl-ethz/IsaacLab-Cloth), 1.4 m deep and 0.8 m wide, robot base 15 cm from its back
-    # edge; top at z = 0, spanning x -0.15..1.25 m and y -0.40..0.40 m
+    # Table
     table: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0.55, 0.0, -0.02]),
@@ -315,7 +314,7 @@ GRIPPER_ACTION_CFG = ConstrainedGripperActionCfg(
     hysteresis_threshold=0.5,  # hysteresis for stable constrained gripper
     
     # Constrained Gripper Parameters
-    settle_speed=0.05,  # [rad/s] finger speed below which a closing gripper counts as settled
+    settle_speed=0.05,  # [rad/s] lower finger speed counts as settled
     release_travel=0.004,  # [m] gap growth after a failed grasp to re-arm
     release_gap=0.002,  # [m] gap growth unlock the nodes
     squeeze_steps=5,
@@ -339,10 +338,10 @@ class ActionsCfg:
         ),
         # Ensure controller respects joint range and velocity limits
         scale_trans=(0.015, 0.015, 0.015),  # [m] per action step (dx, dy, dz)
-        scale_rot=0.2,  # [rad] per action step (dyaw)
-        limit_operation_space=True,  # clamp the EE to the reachable task space
-        joint_vel_factor=0.9,  # limit commanded veloctiy by [factor] of hardware max
-        joint_range_margin=0.05,  # stop the whole arm 0.05 rad before one joint reaches limit
+        scale_rot=0.2,
+        limit_operation_space=True,
+        joint_vel_factor=0.9,  # reduce joint veloctiy by [factor] of hardware max
+        joint_range_margin=0.05,  # reduce joint range by 0.05 [rad] of hardware max
     )
 
     gripper_action = GRIPPER_ACTION_CFG
@@ -351,134 +350,115 @@ class ActionsCfg:
 # ------------------- Observation Terms -------------------
 @configclass
 class ActorObsCfg(ObsGroup):
-    """Position-only cloth observations with five-frame history and robot proprioception."""
-
+    """Proprioception, Exterioception and Task Observation with five-frame history."""
     # ---------- Proprioception ----------
-
-    # Arm revolute joint positions and velocities as ratios of robot limits
-    joint_pos = ObsTerm(
-        func=mdp.joint_pos_ratio,
-        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    joint_angles = ObsTerm(
+        func=mdp.joint_pos_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
     )
-    joint_vel = ObsTerm(
-        func=mdp.joint_vel_ratio,
-        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    joint_velocities = ObsTerm(
+        func=mdp.joint_vel_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
     )
-
-    # EE position and veloctiy for all 4 DoFs (x, y, z, yaw) in base frame
     ee_pose = ObsTerm(func=mdp.ee_pose_b)
-    ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")})
-
-    # Gripper information
-    gripper_width = ObsTerm(func=mdp.gripper_width, params={"action_name": "gripper_action"})
-    # Privileged grasp flag (+1 / -1), hidden for whole episodes by the curriculum after success (zero)
-    cloth_grasped = ObsTerm(func=mdp.cloth_grasped, params={"hide_curriculum": "observation_hiding"})
-
-    # Last action applied to the robot
-    actions = ObsTerm(func=mdp.last_action)
+    ee_velocity = ObsTerm(
+        func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")}
+    )
+    gripper_finger_width = ObsTerm(func=mdp.gripper_width)
+    gripper_hysteresis_command = ObsTerm(func=mdp.gripper_command)
+    last_action = ObsTerm(
+        func=mdp.last_action
+        )
 
     # ---------- Exteroception ----------
-
-    # Nine permanent landmarks, the episode's raised nodes (grasp node first) and 18 episode-sampled nodes, drawn at
-    # each episode beginning and kept fixed, so every slot tracks the same node through the position history
+    # 3x3 node landmarks, the raised nodes and 18 random nodes, fixed per episode
     cloth_points = ObsTerm(
         func=mdp.ClothPointsInBaseFrame, params={"num_random_nodes": 18, "command_name": "cloth_target"}
     )
-
-    # Cube position and orientation (quaternion, w >= 0) in base frame
-    cube_pose = ObsTerm(func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")})
+    cube_pose = ObsTerm(
+        func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")}
+    )
 
     # ---------- Task ----------
-
-    # Target relative to the EE along the base axes (forward kinematics and command, known on the real robot)
-    target_pos_ee = ObsTerm(func=mdp.target_pos_ee, params={"command_name": "cloth_target"})
-
-    # Current task stage, hidden for whole episodes by the curriculum after success (all zeros)
+    target_pos = ObsTerm(
+        func=mdp.generated_commands, params={"command_name": "cloth_target"}
+    )
     stage = ObsTerm(
         func=mdp.cloth_drag_stage, params={"command_name": "cloth_target", "hide_curriculum": "observation_hiding"}
+    )
+    cloth_grasped = ObsTerm(
+        func=mdp.cloth_grasped, params={"hide_curriculum": "observation_hiding"}
     )
 
     def __post_init__(self) -> None:
         self.enable_corruption = False
         self.concatenate_terms = True
-        self.history_length = 5  # stack the last 5 steps of every term
+        self.history_length = 5  # observe history the estimate cloth movement
         self.flatten_history_dim = True
 
 
 @configclass
 class CriticObsCfg(ObsGroup):
-    """Privileged critic observations with full cloth positions and velocities, without history."""
+    """Privileged critic observations with full cloth pos/vel, detailed grasp information and no histroy"""
 
     # ---------- Proprioception ----------
-
-    # Joint information
-    joint_pos = ObsTerm(
-        func=mdp.joint_pos_ratio,
-        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    joint_angles = ObsTerm(
+        func=mdp.joint_pos_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
     )
-    joint_vel = ObsTerm(
-        func=mdp.joint_vel_ratio,
-        params={"action_name": "arm_action", "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    joint_velocities = ObsTerm(
+        func=mdp.joint_vel_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
     )
-
-    # EE information
     ee_pose = ObsTerm(func=mdp.ee_pose_b)
-    ee_velocity = ObsTerm(func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")})
+    ee_velocity = ObsTerm(
+        func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")}
+    )
+    gripper_finger_width = ObsTerm(func=mdp.gripper_width)
+    gripper_hysteresis_command = ObsTerm(func=mdp.gripper_command)
+    last_action = ObsTerm(
+        func=mdp.last_action
+        )
 
-    # Privileged gripper information
-    cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
-    grasped_node_ratio = ObsTerm(func=mdp.grasped_node_ratio)
-    gripper_width = ObsTerm(func=mdp.gripper_width, params={"action_name": "gripper_action"})
-
-    # Last actions
-    actions = ObsTerm(func=mdp.last_action)
-
-    # ---------- Exterioceptive ----------
-
-    # Privileged simulation information (position and velocity of all nodes)
+    # ---------- Exteroception ----------
     cloth_nodal_pos = ObsTerm(func=mdp.cloth_nodal_pos_b)
     cloth_nodal_vel = ObsTerm(func=mdp.cloth_nodal_vel_b)
-    # Grasp node of the episode (the raised node the approach rewards target)
-    grasp_node_pos = ObsTerm(func=mdp.grasp_node_pos_b, params={"command_name": "cloth_target"})
-
-    # Cube pose, velocity, offset from the cloth's central node (sliding) and distance to the EE frame origin
-    cube_pose = ObsTerm(func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")})
-    cube_velocity = ObsTerm(func=mdp.object_velocity_b, params={"asset_cfg": SceneEntityCfg("cube")})
-    cube_center_offset = ObsTerm(func=mdp.object_center_offset_b, params={"asset_cfg": SceneEntityCfg("cube")})
-    ee_cube_distance = ObsTerm(func=mdp.ee_object_distance, params={"asset_cfg": SceneEntityCfg("cube")})
-    # Gripper touched the cube in the last step (solver contacts)
-    gripper_cube_contact = ObsTerm(func=mdp.termination_flag, params={"term_name": "gripper_cube_contact"})
+    grasp_node_pos = ObsTerm(
+        func=mdp.grasp_node_pos_b, params={"command_name": "cloth_target"}
+        )
+    cloth_center_pos = ObsTerm(
+        func=mdp.cloth_center_pos_b
+    )
+    
+    cube_pose = ObsTerm(
+        func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")}
+        )
+    cube_velocity = ObsTerm(
+        func=mdp.object_velocity_b, params={"asset_cfg": SceneEntityCfg("cube")}
+    )
+    cube_cloth_center_offset = ObsTerm(
+        func=mdp.object_center_offset_b, params={"asset_cfg": SceneEntityCfg("cube")}
+    )
+    ee_cube_distance = ObsTerm(
+        func=mdp.ee_object_distance, params={"asset_cfg": SceneEntityCfg("cube")}
+        )
 
     # ---------- Task ----------
-
-    # Target position in base frame
-    target_pos = ObsTerm(func=mdp.generated_commands, params={"command_name": "cloth_target"})
-
-    # Cloth center node position in base frame
-    cloth_center_pos = ObsTerm(func=mdp.cloth_center_pos_b)
-
-    # Displacement from center node to target position in base frame
-    cloth_target_displacement = ObsTerm(func=mdp.cloth_target_displacement_b)
-
-    # Displacement from cube to target position in base frame
-    cube_target_displacement = ObsTerm(
-        func=mdp.target_object_displacement_b,
-        params={"command_name": "cloth_target", "asset_cfg": SceneEntityCfg("cube")},
+    target_pos = ObsTerm(
+        func=mdp.generated_commands, params={"command_name": "cloth_target"}
+    )
+    cloth_center_to_target = ObsTerm( # planer distance
+        func=mdp.cloth_center_to_target_b, params={"command_name": "cloth_target"}
+    )
+    cube_to_target = ObsTerm( # planer distance
+        func=mdp.object_to_target_b, params={"command_name": "cloth_target", "asset_cfg": SceneEntityCfg("cube")}
+    )
+    stage = ObsTerm(
+        func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"}
     )
 
-    # Current task stage
-    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
-
-    def __post_init__(self) -> None:
-        self.enable_corruption = False
-        self.concatenate_terms = True
-
-
-@configclass
-class StageObsCfg(ObsGroup):
-    """One-hot stage of every environment, for logging only: neither the actor nor the critic reads it."""
-
-    stage = ObsTerm(func=mdp.cloth_drag_stage, params={"command_name": "cloth_target"})
+    # priviledged constrained-gripper grasping information
+    cloth_grasped = ObsTerm(func=mdp.cloth_grasped)
+    locked_nodes = ObsTerm(func=mdp.locked_node_count)
+    nodes_between_pads = ObsTerm(func=mdp.nodes_between_pads)
+    grasp_node_capturable = ObsTerm(func=mdp.grasp_node_capturable)
+    grasp_tried = ObsTerm(func=mdp.grasp_tried)
 
     def __post_init__(self) -> None:
         self.enable_corruption = False
@@ -487,11 +467,10 @@ class StageObsCfg(ObsGroup):
 
 @configclass
 class ObservationsCfg:
-    """The actor (``policy``), the privileged critic (``critic``) and the stage for logging (``stage``)."""
+    """The actor (``policy``) and the privileged critic (``critic``)."""
 
     policy: ActorObsCfg = ActorObsCfg()
     critic: CriticObsCfg = CriticObsCfg()
-    stage: StageObsCfg = StageObsCfg()
 
 
 # ------------------- Command Terms -------------------

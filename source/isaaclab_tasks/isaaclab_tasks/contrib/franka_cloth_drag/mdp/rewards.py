@@ -29,7 +29,6 @@ from .frames import (
     ee_twist_in_base,
     vectors_to_base,
 )
-from .observations import _robot_with_action_joints
 from .stages import (
     ClothDragStage,
     cloth_goal_xy_distance,
@@ -39,7 +38,7 @@ from .stages import (
 )
 
 if TYPE_CHECKING:
-    from isaaclab.assets import DeformableObject, RigidObject
+    from isaaclab.assets import Articulation, DeformableObject, RigidObject
     from isaaclab.envs import ManagerBasedRLEnv
     from isaaclab.managers import RewardTermCfg
     from isaaclab.sensors import FrameTransformer
@@ -50,6 +49,19 @@ if TYPE_CHECKING:
 
 def _command(env: ManagerBasedRLEnv, command_name: str) -> ClothTargetCommand:
     return env.command_manager.get_term(command_name)
+
+
+def _robot_with_action_joints(
+    env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, action_name: str, num_action_joints: int
+) -> Articulation:
+    """Return the robot after checking that ``asset_cfg`` selects as many joints as the action ``action_name``."""
+    robot: Articulation = env.scene[asset_cfg.name]
+    num_joints = robot.data.joint_pos.torch[:, asset_cfg.joint_ids].shape[1]
+    if num_joints != num_action_joints:
+        raise ValueError(
+            f"The reward selects {num_joints} joints, but action '{action_name}' limits {num_action_joints}."
+        )
+    return robot
 
 
 def _stage_gate(value: torch.Tensor, stage: torch.Tensor, stages: Sequence[str], saturate: bool) -> torch.Tensor:
