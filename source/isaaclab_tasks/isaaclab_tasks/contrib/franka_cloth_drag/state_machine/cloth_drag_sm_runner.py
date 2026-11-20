@@ -73,7 +73,10 @@ class ClothDragSmRunner:
             raise ValueError("The state-machine goal tolerance must not exceed the task success radius.")
         for name in ("scale_trans", "scale_rot", "wrist_joint_limits"):
             if not hasattr(self.arm.cfg, name):
-                raise TypeError(f"The arm action must define {name}; use the ee_delta action preset.")
+                raise TypeError(f"The arm action must define {name}; use the task's TopDownDeltaEEActionCfg.")
+
+        # per-axis translation scale (dx, dy, dz) [m]
+        self._scale_trans = torch.tensor(self.arm.cfg.scale_trans, device=env.device)
 
         self.previous_state = sm.sm_state.clone()
         self.actions = torch.zeros(env.action_space.shape, device=env.device)
@@ -106,7 +109,7 @@ class ClothDragSmRunner:
         self.previous_state = self.sm.sm_state.clone()
         command = self.sm.compute(observation)
 
-        self.actions[:, :3] = ((command.ee_pos - self.ee_pos) / self.arm.cfg.scale_trans).clamp(-1.0, 1.0)
+        self.actions[:, :3] = ((command.ee_pos - self.ee_pos) / self._scale_trans).clamp(-1.0, 1.0)
         yaw_step = feasible_yaw_step(
             command.ee_yaw,
             self.ee_yaw,

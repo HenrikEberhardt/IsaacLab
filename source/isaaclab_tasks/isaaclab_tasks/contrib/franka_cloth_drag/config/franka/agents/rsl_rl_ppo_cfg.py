@@ -46,8 +46,8 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
             std_range=(0.05, 1.0),
             mean_bound=1.0,
             mean_bound_coef=0.01,
-            # dx, dy, dz, dyaw, gripper: the gripper latch ignores noise inside +-0.5 and no penalty acts on it, so
-            # without a lower ceiling its std grows and flips the latch at random
+            # dx, dy, dz, dyaw, gripper: the gripper hysteresis ignores noise inside +-0.5 and no penalty acts on it,
+            # so without a lower ceiling its std grows and flips the gripper at random
             std_range_per_dim=[(0.05, 1.0)] * 4 + [(0.05, 0.35)],
             init_std_per_dim=[0.5] * 4 + [0.3],
         ),
@@ -93,8 +93,8 @@ class FrankaClothDragDetachedStdPPORunnerCfg(FrankaClothDragPPORunnerCfg):
             std_range=(0.05, 1.0),
             mean_bound=1.0,
             mean_bound_coef=0.01,
-            # dx, dy, dz, dyaw, gripper: the gripper latch ignores noise inside +-0.5 and no penalty acts on it, so
-            # without a lower ceiling its std grows and flips the latch at random
+            # dx, dy, dz, dyaw, gripper: the gripper hysteresis ignores noise inside +-0.5 and no penalty acts on it,
+            # so without a lower ceiling its std grows and flips the gripper at random
             std_range_per_dim=[(0.05, 1.0)] * 4 + [(0.05, 0.35)],
             init_std_per_dim=[0.5] * 4 + [0.3],
         ),

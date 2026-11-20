@@ -8,14 +8,11 @@
 from __future__ import annotations
 
 import math
-from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
 
 import isaaclab.utils.math as math_utils
-from isaaclab.envs.mdp.actions.binary_joint_actions import BinaryJointPositionAction
-from isaaclab.envs.mdp.actions.joint_actions import RelativeJointPositionAction
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
 
 from .frames import top_down_yaw
@@ -24,12 +21,7 @@ if TYPE_CHECKING:
     from isaaclab.assets import Articulation
     from isaaclab.envs import ManagerBasedEnv
 
-    from .actions_cfg import (
-        LimitedRelativeJointPositionActionCfg,
-        RateLimitedBinaryJointPositionActionCfg,
-        TopDownDeltaEEActionCfg,
-        TopDownStabilizedDeltaEEActionCfg,
-    )
+    from .actions_cfg import TopDownDeltaEEActionCfg, TopDownStabilizedDeltaEEActionCfg
 
 TOP_DOWN_QUAT = (1.0, 0.0, 0.0, 0.0)
 
@@ -64,45 +56,8 @@ def _commanded_joint_vel_limits(asset: Articulation, joint_ids, vel_factor: floa
     return (factor * asset.data.joint_vel_limits.torch[:, joint_ids]).clone()
 
 
-class LimitedRelativeJointPositionAction(RelativeJointPositionAction):
-    """Relative joint position action with target-range and PD position-error bounds."""
-
-    cfg: LimitedRelativeJointPositionActionCfg
-
-    def __init__(self, cfg: LimitedRelativeJointPositionActionCfg, env: ManagerBasedEnv):
-        """Initialize joint target limits and the PD position-error cap."""
-        super().__init__(cfg, env)
-        self._pos_lower = self._pos_upper = self._max_offset = None
-        self._joint_pos_limits = _reduced_joint_pos_limits(self._asset, self._joint_ids, cfg.joint_range_margin or 0.0)
-        if cfg.joint_range_margin is not None:
-            self._pos_lower, self._pos_upper = self._joint_pos_limits
-        if cfg.joint_vel_factor is not None:
-            self._max_offset = _max_joint_pos_offset(self._asset, self._joint_ids, cfg.joint_vel_factor)
-        self._joint_vel_limits = _commanded_joint_vel_limits(self._asset, self._joint_ids, cfg.joint_vel_factor)
-
-    @property
-    def joint_pos_limits(self) -> tuple[torch.Tensor, torch.Tensor]:
-        """Joint position reference bounds [rad], each of shape [num_envs, num_joints]."""
-        return self._joint_pos_limits
-
-    @property
-    def joint_vel_limits(self) -> torch.Tensor:
-        """Joint velocity reference for observation normalization [rad/s], shape [num_envs, num_joints]."""
-        return self._joint_vel_limits
-
-    def apply_actions(self):
-        """Apply joint position deltas with configured target-range and PD position-error bounds."""
-        offset = self.processed_actions
-        if self._max_offset is not None:
-            offset = torch.clamp(offset, -self._max_offset, self._max_offset)
-        target = self._asset.data.joint_pos.torch[:, self._joint_ids] + offset
-        if self._pos_lower is not None:
-            target = torch.clamp(target, self._pos_lower, self._pos_upper)
-        self._asset.set_joint_position_target_index(target=target, joint_ids=self._joint_ids)
-
-
 class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
-    """4-DOF delta end-effector action: the hand moves in 3D, points straight down and turns about the vertical axis."""
+    """4-DOF delta end-effector action: the hand moves in 3D and points straight"""
 
     cfg: TopDownDeltaEEActionCfg
 
@@ -116,9 +71,9 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
             body_offset=cfg.OffsetCfg(pos=ee_frame.offset.pos, rot=ee_frame.offset.rot),
         )
         super().__init__(cfg, env)
-        self._scale[:] = torch.tensor((cfg.scale_trans,) * 3 + (cfg.scale_rot,), device=self.device)
-        self._space_lower = torch.tensor((cfg.x_min, cfg.y_limits[0], cfg.z_min), device=self.device)
-        self._space_upper = torch.tensor((math.inf, cfg.y_limits[1], math.inf), device=self.device)
+        self._scale[:] = torch.tensor((*cfg.scale_trans, cfg.scale_rot), device=self.device)
+        self._space_lower = torch.tensor((cfg.x_limits[0], cfg.y_limits[0], cfg.z_min), device=self.device)
+        self._space_upper = torch.tensor((cfg.x_limits[1], cfg.y_limits[1], math.inf), device=self.device)
         self._wrist_id = self._asset.find_joints(self._joint_names[-1])[0][0]
         self._pos_lower = self._pos_upper = self._max_offset = None
         lower, upper = _reduced_joint_pos_limits(self._asset, self._joint_ids, cfg.joint_range_margin or 0.0)
@@ -219,28 +174,3 @@ class TopDownStabilizedDeltaEEAction(TopDownDeltaEEAction):
         effort = (jacobian[:, 3:, :].transpose(1, 2) @ correction.unsqueeze(-1)).squeeze(-1)
         effort = torch.clamp(effort, -self._tilt_effort_limits, self._tilt_effort_limits)
         self._asset.set_joint_effort_target_index(target=effort, joint_ids=self._joint_ids)
-
-
-class RateLimitedBinaryJointPositionAction(BinaryJointPositionAction):
-    """Binary joint position action whose target moves to the open or close command at a limited speed."""
-
-    cfg: RateLimitedBinaryJointPositionActionCfg
-
-    def __init__(self, cfg: RateLimitedBinaryJointPositionActionCfg, env: ManagerBasedEnv):
-        """Initialize finger targets and their maximum change per physics step."""
-        super().__init__(cfg, env)
-        self._torch_joint_ids = self._asset.find_joints(cfg.joint_names)[0]
-        vel_limits = self._asset.data.joint_vel_limits.torch[:, self._torch_joint_ids]
-        factor = math.inf if cfg.joint_vel_factor is None else cfg.joint_vel_factor
-        self._max_step = factor * vel_limits * env.physics_dt
-        self._target = self._open_command.expand(self.num_envs, -1).clone()
-
-    def apply_actions(self):
-        """Move finger targets toward the binary command at the configured target speed."""
-        self._target += torch.clamp(self._processed_actions - self._target, -self._max_step, self._max_step)
-        self._asset.set_joint_position_target_index(target=self._target, joint_ids=self._joint_ids)
-
-    def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        """Reset finger targets to the open command for the selected environments."""
-        super().reset(env_ids)
-        self._target[slice(None) if env_ids is None else env_ids] = self._open_command

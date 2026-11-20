@@ -46,12 +46,14 @@ from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyMappingCfg
 from isaaclab_tasks.utils import PresetCfg
 
 from ... import mdp, reset_strategies
-from ...constrained_gripper import ConstrainedGripperActionCfg, RobotiqGripperActuatorCfg
+from ...constrained_gripper import ConstrainedGripperActionCfg
 from ...constrained_gripper.robotiq import (
     FRANKA_PANDA_ROBOTIQ_CFG,
-    ROBOTIQ_DRIVE_EFFORT,
+    ROBOTIQ_CLOSED,
     ROBOTIQ_DRIVE_JOINT,
-    ROBOTIQ_SPEED,
+    ROBOTIQ_GRIPPER_ACTUATOR_CFG,
+    ROBOTIQ_OPEN,
+    ROBOTIQ_PASSIVE_ACTUATOR_CFG,
     stiffen_robotiq_mimics,
 )
 from ...physics import ClothDragCouplerCfg
@@ -233,12 +235,13 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         ),
     )
 
-    # Table
+    # Table: the lab table (as in srl-ethz/IsaacLab-Cloth), 1.4 m deep and 0.8 m wide, robot base 15 cm from its back
+    # edge; top at z = 0, spanning x -0.15..1.25 m and y -0.40..0.40 m
     table: AssetBaseCfg = AssetBaseCfg(
         prim_path="{ENV_REGEX_NS}/Table",
-        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.5, 0.0, -0.5]),
+        init_state=AssetBaseCfg.InitialStateCfg(pos=[0.55, 0.0, -0.02]),
         spawn=sim_utils.CuboidCfg(
-            size=(1.5, 1.0, 1.0),
+            size=(1.4, 0.8, 0.04),  # [m]
             collision_props=sim_utils.CollisionPropertiesCfg(),
             physics_material=RigidBodyMaterialBaseCfg(
                 dynamic_friction=0.20,  # Total friction: sqrt(contact_proxy_mu * table_mu)
@@ -289,33 +292,11 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                     "panda_joint[3-4]": 0.4625,
                     "panda_joint[5-7]": 0.2055,
                 },
-                viscous_friction=0.0,  # the drive damping above is the only damping; the MuJoCo variant adds its own
-            ),
-            # Robotiq 2F-85 gripper
-            "gripper": RobotiqGripperActuatorCfg(
-                joint_names_expr=[ROBOTIQ_DRIVE_JOINT],
-                stiffness=200.0,
-                damping=5.0,
-                armature=0.02,  # sets the delay fitted to the real step response
-                viscous_friction=ROBOTIQ_DRIVE_EFFORT / ROBOTIQ_SPEED,  # saturated drive cruises at 0.95 rad/s
-                joint_effort_limit=ROBOTIQ_DRIVE_EFFORT,  # about 25 N per pad
-                actuator_velocity_limit=3.0,
-                joint_velocity_limit=2.0,
-                min_delay=5,
-                max_delay=5,
-            ),
-            # Mimic the second finger of the Gripper
-            "gripper_passive": ImplicitActuatorCfg(
-                joint_names_expr=[
-                    ".*_inner_finger_joint",
-                    ".*_inner_finger_knuckle_joint",
-                    "right_outer_knuckle_joint",
-                ],
-                stiffness=0.0,
-                damping=0.0,
-                armature=0.02,
                 viscous_friction=0.0,
             ),
+            # Add the Robotiq 2F-85 Gripper Linkage
+            "gripper": ROBOTIQ_GRIPPER_ACTUATOR_CFG,
+            "gripper_passive": ROBOTIQ_PASSIVE_ACTUATOR_CFG,
         }
 
 
@@ -325,48 +306,27 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
 
 # ------------------- Action Terms -------------------
 GRIPPER_ACTION_CFG = ConstrainedGripperActionCfg(
-    # Binary gripper action: close below -latch_threshold, open above it, else keep the last command
+    # Binary Robotiq Gripper
     asset_name="robot",
     joint_names=[ROBOTIQ_DRIVE_JOINT],
     finger_joint_name=ROBOTIQ_DRIVE_JOINT,
-    # The finger joint angle [rad] grows while closing; the pads stop 2 mm apart just short of its 0.82 limit
-    open_command_expr={ROBOTIQ_DRIVE_JOINT: 0.0},
-    close_command_expr={ROBOTIQ_DRIVE_JOINT: 0.8},
-    joint_vel_factor=0.475,  # target speed as fraction of the drive's 2 rad/s limit: the real 0.95 rad/s
-    latch_threshold=0.5,  # action threshold to change from open to close
-    # Grasping parameters
+    open_command_expr={ROBOTIQ_DRIVE_JOINT: ROBOTIQ_OPEN},
+    close_command_expr={ROBOTIQ_DRIVE_JOINT: ROBOTIQ_CLOSED},
+    hysteresis_threshold=0.5,  # hysteresis for stable constrained gripper
+    
+    # Constrained Gripper Parameters
     settle_speed=0.05,  # [rad/s] finger speed below which a closing gripper counts as settled
-    release_travel=0.004,  # [m] gap growth after a failed grasp that re-arms it
-    release_gap=0.002,  # [m] gap growth from the pinch at which the lock lets go of the cloth
-    squeeze_steps=5,  # Squeezing Model
-    grasp_min_nodes=2,  # GRASP -> DRAG: a grasp locking at least this many nodes to the EE, one of them raised
-    # Pad box that selects the nodes to lock, in the EE frame
-    finger_pad_half_width=0.0125,  # [m] along x, the physical pad is 22 mm wide
-    finger_pad_half_length=0.019,  # [m] along z, the physical pad is 38 mm long
-    finger_gap_margin=0.003,  # [m] added to the measured finger gap
-    contact_clearance=0.01,  # [m] cloth distance from the gripper's colliders that restores the contacts
+    release_travel=0.004,  # [m] gap growth after a failed grasp to re-arm
+    release_gap=0.002,  # [m] gap growth unlock the nodes
+    squeeze_steps=5,
+    grasp_min_nodes=2,
+    contact_clearance=0.01,  # [m] distance to restore collisions
 )
 
 
 @configclass
-class JointDeltaActionsCfg:
-    """7-DoF delta joint position + 1-DoF binary gripper."""
-
-    arm_action = mdp.LimitedRelativeJointPositionActionCfg(
-        asset_name="robot",
-        joint_names=["panda_joint.*"],
-        # Ensure controller respects joint range and velocity limits
-        scale=0.03,  # action scale
-        joint_range_margin=0.05,  # reduce range by [rad] on both sides
-        joint_vel_factor=0.90,  # limit commanded veloctiy by [factor] of hardware max
-    )
-
-    gripper_action = GRIPPER_ACTION_CFG
-
-
-@configclass
-class EEDeltaActionsCfg:
-    """4-DoF delta EE motion (dx, dy, dz, dyaw) => hand pointing down + 1-DoF binary gripper."""
+class ActionsCfg:
+    """5-DoF delta EE motion => head pointing down (dx, dy, dz, dyaw) + binary gripper."""
 
     arm_action = mdp.TopDownDeltaEEActionCfg(
         asset_name="robot",
@@ -374,31 +334,18 @@ class EEDeltaActionsCfg:
         controller=DifferentialIKControllerCfg(
             command_type="pose",
             use_relative_mode=True,
-            ik_method="dls",  # "Damped Least Squares" => stable near singularities
-            ik_params={"lambda_val": 0.1},  # Damping factor
+            ik_method="dls",  # dampled least squares => stable around singularities
+            ik_params={"lambda_val": 0.1},
         ),
         # Ensure controller respects joint range and velocity limits
-        scale_trans=0.015,  # [m] per step at action 1 (0.3 m/s)
-        scale_rot=0.2,
-        limit_operation_space=True,  # limit end-effector to reasonable task space
+        scale_trans=(0.015, 0.015, 0.015),  # [m] per action step (dx, dy, dz)
+        scale_rot=0.2,  # [rad] per action step (dyaw)
+        limit_operation_space=True,  # clamp the EE to the reachable task space
         joint_vel_factor=0.9,  # limit commanded veloctiy by [factor] of hardware max
         joint_range_margin=0.05,  # stop the whole arm 0.05 rad before one joint reaches limit
     )
 
     gripper_action = GRIPPER_ACTION_CFG
-
-
-@configclass
-class ActionsCfg(PresetCfg):
-    """Action-space presets: delta joint space or delta EE task space."""
-
-    # "env.actions=joint_delta" Flag to use joint actions
-    joint_delta: JointDeltaActionsCfg = JointDeltaActionsCfg()
-
-    # "env.actions=ee_delta" Flag to use end-effector actions
-    ee_delta: EEDeltaActionsCfg = EEDeltaActionsCfg()
-
-    default = ee_delta
 
 
 # ------------------- Observation Terms -------------------
@@ -811,8 +758,8 @@ class TerminationsCfg:
     cloth_out_of_bounds = DoneTerm(
         func=mdp.deformable_outside_bounds,
         params={
-            "x_bounds": (0.0, 1.1),
-            "y_bounds": (-0.5, 0.5),
+            "x_bounds": (-0.15, 1.25),  # [m] table edges
+            "y_bounds": (-0.40, 0.40),  # [m] table edges
             "z_bounds": (-0.02, 1.0),
             "asset_cfg": SceneEntityCfg("deformable"),
         },
@@ -845,6 +792,13 @@ class TerminationsCfg:
 @configclass
 class CurriculumCfg:
     """Observation-hiding curriculum for task stage and grasp state."""
+
+    # TODO (deploy): ramp actions.gripper_action.hysteresis_threshold from 0.5 to 0, gated like observation_hiding and
+    # together with the action-scale reduction. 0.5 keeps exploration noise from flipping the gripper early in
+    # training; at 0 the gripper switches on the sign of the action (close < 0, open > 0), a stateless mapping that the
+    # real robot reproduces without any hysteresis state. ConstrainedGripperAction reads the threshold from its cfg
+    # every step, so the curriculum only has to write the cfg value. Check the gripper std ceiling (0.35 in
+    # rsl_rl_ppo_cfg.py) once the threshold is low: it was sized against the +-0.5 band.
 
     # Hide actor observations of the task stage and the grasp flag in the same episodes: the flag is unknown on the real
     # Franka, and the DRAG stage would reveal the grasp

@@ -10,33 +10,11 @@ from __future__ import annotations
 import math
 from typing import TYPE_CHECKING
 
-from isaaclab.envs.mdp.actions.actions_cfg import (
-    BinaryJointPositionActionCfg,
-    DifferentialInverseKinematicsActionCfg,
-    RelativeJointPositionActionCfg,
-)
+from isaaclab.envs.mdp.actions.actions_cfg import DifferentialInverseKinematicsActionCfg
 from isaaclab.utils import configclass
 
 if TYPE_CHECKING:
-    from .actions import (
-        LimitedRelativeJointPositionAction,
-        RateLimitedBinaryJointPositionAction,
-        TopDownDeltaEEAction,
-        TopDownStabilizedDeltaEEAction,
-    )
-
-
-@configclass
-class LimitedRelativeJointPositionActionCfg(RelativeJointPositionActionCfg):
-    """Configuration for relative joint position targets with range and PD position-error bounds."""
-
-    class_type: type[LimitedRelativeJointPositionAction] | str = "{DIR}.actions:LimitedRelativeJointPositionAction"
-
-    joint_range_margin: float | None = None
-    """Distance kept from each hard joint limit [rad]. Defaults to None (no range bound)."""
-
-    joint_vel_factor: float | None = None
-    """Velocity-limit fraction used to cap PD position error. Defaults to None (no cap)."""
+    from .actions import TopDownDeltaEEAction, TopDownStabilizedDeltaEEAction
 
 
 @configclass
@@ -51,29 +29,26 @@ class TopDownDeltaEEActionCfg(DifferentialInverseKinematicsActionCfg):
     ee_frame_name: str = "ee_frame"
     """Scene frame transformer that defines the end-effector frame."""
 
-    scale_trans: float = 0.02
-    """Scale of the ``(dx, dy, dz)`` actions per policy step [m]."""
+    scale_trans: tuple[float, float, float] = (0.02, 0.02, 0.02)
+    """Scale of the ``(dx, dy, dz)`` actions per policy step, one per axis of the robot base frame [m]."""
 
     scale_rot: float = 0.05
     """Scale of the ``dyaw`` action per policy step [rad]."""
 
     wrist_joint_limits: tuple[float, float] = (-2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0)
-    """Range of the last arm joint, which turns the hand, that ``dyaw`` may command [rad]. Half a turn would cover every
-    orientation of the symmetric gripper; ±120° adds 60° of overlap, so a jaw orientation near the end of a half turn
-    can be reached from either side instead of only by the long way round. Inside the hardware range (±166°)."""
+    """Range of the wrist joint, in [rad]. ±120° to include overlap. Inside the hardware range (±166°)."""
 
     limit_operation_space: bool = False
     """Whether to clamp commanded EE positions to the workspace planes below."""
 
-    x_min: float = 0.05
-    """Plane towards the robot base: smallest end-effector x-value [m]."""
+    x_limits: tuple[float, float] = (0.30, 0.80)
+    """Planes towards and away from the robot base: end-effector x-range [m]."""
 
-    y_limits: tuple[float, float] = (-0.65, 0.65)
+    y_limits: tuple[float, float] = (-0.40, 0.40)
     """Planes at the table sides: end-effector y-range [m]."""
 
-    z_min: float = 0.0195
-    """Floor: lowest end-effector height. The closed fingertips are 19.0 mm below the end-effector frame, 0.5 mm of
-    clearance above the table; the open ones are 5.5 mm below it."""
+    z_min: float = 0.0193
+    """lowest end-effector height [m]. No target below table."""
 
     joint_vel_factor: float | None = None
     """Velocity-limit fraction used to cap PD position error by uniformly scaling the IK step."""
@@ -96,13 +71,3 @@ class TopDownStabilizedDeltaEEActionCfg(TopDownDeltaEEActionCfg):
 
     tilt_effort_limit_factor: float = 0.25
     """Largest stabilizing torque per joint as a fraction of its effort limit."""
-
-
-@configclass
-class RateLimitedBinaryJointPositionActionCfg(BinaryJointPositionActionCfg):
-    """Configuration for a binary joint position action with a speed-limited target."""
-
-    class_type: type[RateLimitedBinaryJointPositionAction] | str = "{DIR}.actions:RateLimitedBinaryJointPositionAction"
-
-    joint_vel_factor: float | None = None
-    """Fraction of the hardware joint velocity limit the target moves at."""

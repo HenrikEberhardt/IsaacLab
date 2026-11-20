@@ -9,18 +9,23 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+from isaaclab.envs.mdp.actions.actions_cfg import BinaryJointPositionActionCfg
 from isaaclab.utils import configclass
 
-from ..mdp.actions_cfg import RateLimitedBinaryJointPositionActionCfg
-from .robotiq import ROBOTIQ_DRIVE_JOINT, ROBOTIQ_GAP_CURVE
+from .robotiq import ROBOTIQ_DRIVE_JOINT, ROBOTIQ_GAP_CURVE, ROBOTIQ_PAD_LENGTH
 
 if TYPE_CHECKING:
     from .gripper_action import ConstrainedGripperAction
 
 
 @configclass
-class ConstrainedGripperActionCfg(RateLimitedBinaryJointPositionActionCfg):
-    """Configuration of the constrained gripper: finger command, latch, lock, squeeze, release and contact clearance."""
+class ConstrainedGripperActionCfg(BinaryJointPositionActionCfg):
+    """Configuration of the constrained gripper: finger command, hysteresis, lock, squeeze, release and contact
+    clearance.
+
+    The finger command is a step to the open or close position, as the real gripper receives it; the finger actuator
+    sets the speed and delay.
+    """
 
     class_type: type[ConstrainedGripperAction] | str = "{DIR}.gripper_action:ConstrainedGripperAction"
 
@@ -39,21 +44,27 @@ class ConstrainedGripperActionCfg(RateLimitedBinaryJointPositionActionCfg):
     """Direction of the pads' motion along the EE frame's z-axis while opening: 1.0 if the open pads sit towards the
     fingertips (``+z``) of the closed ones, -1.0 if they sit behind them."""
 
-    latch_threshold: float = 0.5
+    hysteresis_threshold: float = 0.5
     """Action threshold: close below its negative, open above it, otherwise keep the command."""
 
     # lock
 
     settle_speed: float = 0.05
-    """Finger joint speed [rad/s] below which a closing gripper counts as settled and tries the lock."""
+    """Finger joint speed [rad/s] below which a closing gripper counts as settled and tries the lock, once the finger
+    has moved faster than this since the close command."""
+
+    close_timeout: float = 1.0
+    """Time [s] after the close command from which a settled finger tries the lock even if it never moved (e.g. it was
+    already pinching). Longer than the delay plus the full stroke (about 0.9 s)."""
 
     grasp_min_nodes: int = 1
     """Number of selected cloth nodes a grasp needs to lock; with fewer it locks nothing."""
 
     finger_pad_half_width: float = 0.0125
-    """Half width [m] of the pad box that selects the nodes, along the EE frame's x-axis."""
+    """Half width [m] of the pad box that selects the nodes, along the EE frame's x-axis (1.5 mm wider than the
+    physical pad on each side)."""
 
-    finger_pad_half_length: float = 0.0085
+    finger_pad_half_length: float = 0.5 * ROBOTIQ_PAD_LENGTH
     """Half length [m] of the pad box along the EE frame's z-axis, centered on the pads."""
 
     finger_gap_margin: float = 0.003

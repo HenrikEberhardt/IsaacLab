@@ -22,7 +22,11 @@ from isaaclab_newton.physics import NewtonManager
 
 from pxr import Gf, Usd, UsdGeom, UsdPhysics
 
+from isaaclab.actuators import ImplicitActuatorCfg
+
 from isaaclab_assets.robots.franka import FRANKA_PANDA_CFG
+
+from .robotiq_actuator import RobotiqGripperActuatorCfg
 
 FRANKA_PANDA_ROBOTIQ_USD = str(
     Path(__file__).resolve().parent.parent / "assets" / "robotiq" / "franka_panda_robotiq_simplified.usda"
@@ -59,6 +63,19 @@ ROBOTIQ_DRIVE_JOINT = "finger_joint"
 """The single driven joint; mimic constraints make the other five gripper joints follow it, keeping the pads
 parallel."""
 
+ROBOTIQ_OPEN = 0.0
+"""``finger_joint`` angle [rad] of the fully open gripper (about 87 mm between the pad faces)."""
+
+ROBOTIQ_CLOSED = 0.8
+"""``finger_joint`` angle [rad] of the closed gripper, just short of the 0.82 rad limit (about 2 mm between the pad
+faces)."""
+
+ROBOTIQ_PAD_WIDTH = 0.022
+"""Width [m] of the physical finger pad, along the EE frame's x-axis."""
+
+ROBOTIQ_PAD_LENGTH = 0.038
+"""Length [m] of the physical finger pad, along the EE frame's z-axis."""
+
 ROBOTIQ_GAP_CURVE = (0.0127769, 0.1143161, -0.7077544)
 """``(a, b, c)`` of the gap between the pads' inner faces, ``a - b * sin(q + c)`` [m], over ``finger_joint`` ``q``
 [rad]: the parallel linkage moves the pads on a circle. Fitted to the pad hulls under the asset's forward kinematics
@@ -93,6 +110,36 @@ ROBOTIQ_DRIVE_EFFORT = ROBOTIQ_MAX_SQUEEZE_FORCE * ROBOTIQ_GAP_CURVE[1] * math.c
 
 ROBOTIQ_SPEED = 0.95
 """Free ``finger_joint`` speed [rad/s] measured on the real 2F-85 at speed register 192 (0.70 at 128, 1.20 at 255)."""
+
+ROBOTIQ_GRIPPER_ACTUATOR_CFG = RobotiqGripperActuatorCfg(
+    joint_names_expr=[ROBOTIQ_DRIVE_JOINT],
+    # stiffness and damping are weakly determined by free motion; this pair matches the real overshoot from rest
+    stiffness=200.0,
+    damping=5.0,
+    armature=0.02,  # sets the rise time, fitted to real step responses
+    # passive damping acts outside the effort limit, so the saturated drive cruises at effort / viscous friction
+    # (ROBOTIQ_SPEED), as the real finger does
+    viscous_friction=ROBOTIQ_DRIVE_EFFORT / ROBOTIQ_SPEED,
+    joint_effort_limit=ROBOTIQ_DRIVE_EFFORT,  # about 25 N per pad
+    actuator_velocity_limit=3.0,
+    joint_velocity_limit=2.0,
+    # command delay of the real gripper: 5 physics steps = 45 ms at the task's 120 Hz
+    min_delay=5,
+    max_delay=5,
+)
+"""Delayed position drive of the Robotiq 2F-85 on ``finger_joint``, fitted to the real gripper's free motion (as in
+srl-ethz/IsaacLab-Cloth). It takes a step open/close target; the effort limit and viscous friction set the speed."""
+
+ROBOTIQ_PASSIVE_ACTUATOR_CFG = ImplicitActuatorCfg(
+    joint_names_expr=[".*_inner_finger_joint", ".*_inner_finger_knuckle_joint", "right_outer_knuckle_joint"],
+    stiffness=0.0,
+    damping=0.0,
+    # the drive's reflected inertia on every coupled joint: with only the links' few grams, contact throws the pads
+    # about against the mimic constraints
+    armature=ROBOTIQ_GRIPPER_ACTUATOR_CFG.armature,
+    viscous_friction=0.0,
+)
+"""The five gripper joints that follow ``finger_joint`` through the mimic constraints, with no drive of their own."""
 
 _CYLINDER_RIM_POINTS = 32
 """Points per rim circle that stand for a collision cylinder in :func:`robotiq_collision_corners`."""

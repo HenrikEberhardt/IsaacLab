@@ -23,7 +23,7 @@ def configure_state_machine_osc(env_cfg: ManagerBasedRLEnvCfg):
     """
     action_cfg = env_cfg.actions.arm_action
     if not isinstance(action_cfg, TopDownDeltaEEActionCfg):
-        raise TypeError("State-machine OSC requires the task's ee_delta arm action configuration.")
+        raise TypeError("State-machine OSC requires the task's TopDownDeltaEEActionCfg arm action.")
 
     env_cfg.actions.arm_action = TopDownStabilizedDeltaEEActionCfg(
         asset_name=action_cfg.asset_name,
@@ -34,7 +34,7 @@ def configure_state_machine_osc(env_cfg: ManagerBasedRLEnvCfg):
         scale_rot=action_cfg.scale_rot,
         wrist_joint_limits=action_cfg.wrist_joint_limits,
         limit_operation_space=action_cfg.limit_operation_space,
-        x_min=action_cfg.x_min,
+        x_limits=action_cfg.x_limits,
         y_limits=action_cfg.y_limits,
         z_min=action_cfg.z_min,
         joint_vel_factor=action_cfg.joint_vel_factor,

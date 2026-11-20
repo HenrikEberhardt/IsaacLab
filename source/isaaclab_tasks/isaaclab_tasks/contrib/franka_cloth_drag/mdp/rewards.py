@@ -44,7 +44,7 @@ if TYPE_CHECKING:
     from isaaclab.managers import RewardTermCfg
     from isaaclab.sensors import FrameTransformer
 
-    from .actions import LimitedRelativeJointPositionAction, TopDownDeltaEEAction
+    from .actions import TopDownDeltaEEAction
     from .commands import ClothTargetCommand
 
 
@@ -358,8 +358,8 @@ def action_term_rate_l2(env: ManagerBasedRLEnv, action_name: str) -> torch.Tenso
     """Squared change of one action term's actions between the last two steps, summed over its dimensions.
 
     Like :func:`isaaclab.envs.mdp.action_rate_l2`, restricted to the term ``action_name``. For the arm term, this leaves
-    out the binary gripper action, whose raw value changes freely without moving anything until it crosses the latch
-    threshold.
+    out the binary gripper action, whose raw value changes freely without moving anything until it crosses the
+    hysteresis threshold.
 
     Args:
         env: The environment.
@@ -390,7 +390,7 @@ def joint_limit_barrier(
     """
     if margin <= 0.0:
         raise ValueError("margin must be positive.")
-    action: LimitedRelativeJointPositionAction | TopDownDeltaEEAction = env.action_manager.get_term(action_name)
+    action: TopDownDeltaEEAction = env.action_manager.get_term(action_name)
     lower, upper = action.joint_pos_limits
     robot = _robot_with_action_joints(env, asset_cfg, action_name, lower.shape[1])
     joint_pos = robot.data.joint_pos.torch[:, asset_cfg.joint_ids]

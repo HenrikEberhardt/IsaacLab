@@ -13,8 +13,8 @@ from typing import TYPE_CHECKING
 import torch
 
 import isaaclab.utils.math as math_utils
+from isaaclab.envs.mdp.actions.binary_joint_actions import BinaryJointPositionAction
 
-from ..mdp.actions import RateLimitedBinaryJointPositionAction
 from .constraint_node_lock import ClothNodeLock
 from .robotiq import joint_from_pad_gap, pad_gap_from_joint, robotiq_collision_corners
 
@@ -25,15 +25,18 @@ if TYPE_CHECKING:
     from .gripper_action_cfg import ConstrainedGripperActionCfg
 
 
-class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
-    """Latched, rate-limited gripper that locks the pinched cloth nodes to the EE frame once the fingers settle.
+class ConstrainedGripperAction(BinaryJointPositionAction):
+    """Gripper with a hysteresis that locks the pinched cloth nodes to the EE frame once the closing fingers settle.
 
-    Per step (:meth:`process_actions`):
+    The fingers get a step open or close target, as the real gripper does; the finger actuator sets their speed and
+    command delay. Per step (:meth:`process_actions`):
 
-    1. Latch: an action below ``-latch_threshold`` closes, above ``latch_threshold`` opens, otherwise the command stays.
+    1. Hysteresis: an action below ``-hysteresis_threshold`` closes, above ``hysteresis_threshold`` opens, otherwise
+       the command stays. At 0 it is the plain sign of the action.
     2. Release: commanded open, the lock lets go once the pads are ``release_gap`` wider than the pinch.
-    3. Grasp: closed, with the finger target at the close command and the finger settled, the gripper tries the lock
-       once (:attr:`grasp_tried`); it re-arms after opening by ``release_travel``.
+    3. Grasp: closed, once the finger has moved in the closing direction and settled again (or ``close_timeout`` after
+       the close command, if it never moved), the gripper tries the lock once (:attr:`grasp_tried`); it re-arms after
+       opening by ``release_travel``.
     4. Hold: while locked and closed, the fingers track the pinch gap instead of the close command.
     5. Clearance: after a release, the gripper-cloth contacts come back once the cloth is ``contact_clearance`` away.
     """
@@ -46,10 +49,16 @@ class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
         command_cfg = env.command_manager.get_term(cfg.command_name).cfg
         self._cloth: DeformableObject = env.scene[command_cfg.object_name]
         self._finger_id = self._asset.find_joints(cfg.finger_joint_name)[0][0]
+        self._torch_joint_ids = self._asset.find_joints(cfg.joint_names)[0]
+        self._step_dt = env.step_dt
 
         # finger command
         self._closed = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
         self._grasp_tried = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # whether the finger has moved in the closing direction since the close command
+        self._moved = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
+        # time [s] since the close command, zero while open
+        self._close_time = torch.zeros(self.num_envs, device=self.device)
         # finger joint angle [rad] at the last grasp attempt, shape [num_envs, 1]
         self._held_joint = torch.zeros(self.num_envs, self._num_joints, device=self.device)
 
@@ -98,13 +107,15 @@ class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
         return self.node_lock.num_grasped
 
     def process_actions(self, actions: torch.Tensor):
-        """Update the latch, the release and grasp transitions, the finger targets and the cloth contacts."""
+        """Update the hysteresis, the release and grasp transitions, the finger targets and the cloth contacts."""
         super().process_actions(actions)
         lock = self.node_lock
         action = self._raw_actions[:, 0]
-        threshold = self.cfg.latch_threshold
+        threshold = self.cfg.hysteresis_threshold
+        was_closed = self._closed
         self._closed = torch.where(action < -threshold, True, torch.where(action > threshold, False, self._closed))
         close = self._closed
+        new_close = close & ~was_closed
         self._processed_actions = torch.where(close.unsqueeze(1), self._close_command, self._open_command)
         if self.cfg.clip is not None:
             self._processed_actions = torch.clamp(
@@ -120,16 +131,20 @@ class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
         opened = ~close & ~lock.active & (gap >= self._held_gap()[:, 0] + self.cfg.release_travel)
         self._grasp_tried &= ~(released | opened)
 
-        # grasp: once per close, when the finger target has reached the close command and the finger settled
-        ramp_done = torch.all((self._target - self._close_command).abs() <= 1e-6, dim=1)
-        settled = self._asset.data.joint_vel.torch[:, self._finger_id].abs() <= self.cfg.settle_speed
-        grasping = close & ~self._grasp_tried & ramp_done & settled
+        # grasp: once per close, when the finger has closed and come to rest (on the cloth or fully closed). The finger
+        # angle grows while closing; the command delay keeps it still for a moment after the close command, so the
+        # lock waits for closing motion first, or for the timeout if the finger cannot move.
+        finger_vel = self._asset.data.joint_vel.torch[:, self._finger_id]
+        self._close_time = torch.where(new_close | ~close, 0.0, self._close_time + self._step_dt)
+        self._moved = (self._moved & ~new_close) | (close & (finger_vel > self.cfg.settle_speed))
+        settled = finger_vel.abs() <= self.cfg.settle_speed
+        closed_down = self._moved | (self._close_time >= self.cfg.close_timeout)
+        grasping = close & ~self._grasp_tried & closed_down & settled
         if grasping.any():
             grasp_ids = grasping.nonzero(as_tuple=False).squeeze(-1)
             self._grasp_tried[grasp_ids] = True
             self._held_joint[grasp_ids] = self._asset.data.joint_pos.torch[grasp_ids][:, self._torch_joint_ids]
-            holding_ids = lock.activate(grasp_ids)
-            self._target[holding_ids] = self._held_joint[holding_ids]
+            lock.activate(grasp_ids)
 
         # hold: a closed gripper holds the pinch; an open one follows the open command until the release
         self._processed_actions = torch.where(
@@ -161,6 +176,9 @@ class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
             env_ids = torch.as_tensor(env_ids, dtype=torch.long, device=self.device)
         self._closed[env_ids] = False
         self._grasp_tried[env_ids] = False
+        self._moved[env_ids] = False
+        self._close_time[env_ids] = 0.0
+        self._processed_actions[env_ids] = self._open_command
         self.node_lock.deactivate(env_ids)
         self.node_lock.restore_contacts(env_ids)
         self._any_active = bool(self.node_lock.active.any())
@@ -168,10 +186,13 @@ class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
         self._targets_dirty = False
 
     def get_grasp_state(self, env_ids: torch.Tensor) -> dict[str, torch.Tensor]:
-        """Return copies of the gripper and lock state of the given environments, see :meth:`set_grasp_state`."""
+        """Return copies of the gripper and lock state of the given environments, see :meth:`set_grasp_state`.
+
+        ``finger_target`` is the current finger command, kept so that stored reset banks keep their layout.
+        """
         state = {
             "closed": self._closed[env_ids].clone(),
-            "finger_target": self._target[env_ids].clone(),
+            "finger_target": self._processed_actions[env_ids].clone(),
             "grasp_tried": self._grasp_tried[env_ids].clone(),
             "held_finger_pos": self._held_joint[env_ids].clone(),
         }
@@ -182,6 +203,10 @@ class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
 
         The locked nodes are held where they are now; the next :meth:`apply_actions` moves them with the hand.
 
+        The stored ``finger_target`` is not needed: the next :meth:`process_actions` recomputes the finger command from
+        the restored hysteresis state and lock. A restored close that has not tried the lock yet tries it once the
+        finger moved and settled, or after ``close_timeout``.
+
         Args:
             env_ids: The environments, shape [N].
             state: The state of :meth:`get_grasp_state`, each entry with the environments as first dimension.
@@ -189,7 +214,9 @@ class ConstrainedGripperAction(RateLimitedBinaryJointPositionAction):
         closed = state["closed"]
         self._closed[env_ids] = closed
         self._raw_actions[env_ids, 0] = torch.where(closed, -1.0, 1.0)
-        self._target[env_ids] = state["finger_target"]
+        self._processed_actions[env_ids] = torch.where(closed.unsqueeze(1), self._close_command, self._open_command)
+        self._moved[env_ids] = False
+        self._close_time[env_ids] = 0.0
         self._grasp_tried[env_ids] = state["grasp_tried"]
         self._held_joint[env_ids] = state["held_finger_pos"]
         self.node_lock.set_state(env_ids, state)

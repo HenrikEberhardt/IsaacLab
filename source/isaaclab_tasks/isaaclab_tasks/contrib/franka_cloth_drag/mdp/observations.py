@@ -45,7 +45,7 @@ if TYPE_CHECKING:
     from isaaclab.sensors import FrameTransformer
 
     from ..constrained_gripper.gripper_action import ConstrainedGripperAction
-    from .actions import LimitedRelativeJointPositionAction, TopDownDeltaEEAction
+    from .actions import TopDownDeltaEEAction
 
 
 def joint_pos_ratio(env: ManagerBasedRLEnv, action_name: str, asset_cfg: SceneEntityCfg) -> torch.Tensor:
@@ -59,7 +59,7 @@ def joint_pos_ratio(env: ManagerBasedRLEnv, action_name: str, asset_cfg: SceneEn
         action_name: Name of the arm action term, which provides ``joint_pos_limits``.
         asset_cfg: The robot, with ``joint_names`` selecting the joints of the action in the same order.
     """
-    action: LimitedRelativeJointPositionAction | TopDownDeltaEEAction = env.action_manager.get_term(action_name)
+    action: TopDownDeltaEEAction = env.action_manager.get_term(action_name)
     lower, upper = action.joint_pos_limits
     robot = _robot_with_action_joints(env, asset_cfg, action_name, lower.shape[1])
     ratio = 2.0 * (robot.data.joint_pos.torch[:, asset_cfg.joint_ids] - lower) / (upper - lower) - 1.0
@@ -76,7 +76,7 @@ def joint_vel_ratio(env: ManagerBasedRLEnv, action_name: str, asset_cfg: SceneEn
         action_name: Name of the arm action term, which provides ``joint_vel_limits``.
         asset_cfg: The robot, with ``joint_names`` selecting the joints of the action in the same order.
     """
-    action: LimitedRelativeJointPositionAction | TopDownDeltaEEAction = env.action_manager.get_term(action_name)
+    action: TopDownDeltaEEAction = env.action_manager.get_term(action_name)
     vel_limits = action.joint_vel_limits
     robot = _robot_with_action_joints(env, asset_cfg, action_name, vel_limits.shape[1])
     ratio = robot.data.joint_vel.torch[:, asset_cfg.joint_ids] / vel_limits
