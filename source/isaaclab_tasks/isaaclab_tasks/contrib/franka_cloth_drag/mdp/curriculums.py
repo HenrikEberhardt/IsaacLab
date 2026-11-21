@@ -7,15 +7,18 @@
 
 Each term is a block with its own success gate: it tracks the success rate of the finished episodes as an exponential
 moving average and, once the average has stayed at least ``success_threshold`` for ``dwell_steps``, grows its progress
-linearly with the environment steps from ``initial_progress`` to one over ``ramp_steps``. Below the threshold the
-progress holds; it never goes back. After such a pause, the average must stay above the threshold for
-``resume_dwell_steps`` (by default ``dwell_steps``) before the progress grows again. With ``after``, a block waits
-until the named block is complete, so the blocks run one after another. Only the episodes that started at the
-beginning of the task count (:attr:`~.commands.ClothTargetCommand.start_stage` APPROACH); episodes started from stored
-reset states of later stages (uniform and adaptive resets) begin mid-task and succeed more easily.
+linearly with the environment steps from ``initial_progress`` to one over ``ramp_steps``. Once the gate has opened,
+the average only has to stay at least ``pause_threshold`` (by default ``success_threshold``), so a hard ramp may let
+the success drop to relearn. Below that the progress holds; it never goes back. After such a pause, the average must
+stay above it for ``resume_dwell_steps`` (by default ``dwell_steps``) before the progress grows again. With
+``after``, a block waits until the named block is complete, so the blocks run one after another. Only the episodes
+that started at the beginning of the task count (:attr:`~.commands.ClothTargetCommand.start_stage` APPROACH);
+episodes started from stored reset states of later stages (uniform and adaptive resets) begin mid-task and succeed
+more easily.
 
 The curriculum manager calls the terms at the start of every reset, with the environments being reset. The state is
-not stored in policy checkpoints: a resumed run starts again from ``initial_progress``.
+not stored in policy checkpoints: a resumed run starts again from ``initial_progress``. The task configuration
+currently uses no curriculum: the actor observes and acts as on the real robot from the first step.
 """
 
 from __future__ import annotations
@@ -65,6 +68,7 @@ class _SuccessGatedRamp(ManagerTermBase):
         dwell_steps: int,
         after: str | None,
         resume_dwell_steps: int | None = None,
+        pause_threshold: float | None = None,
     ) -> None:
         """Fold the finished episodes into the success average and advance the progress.
 
@@ -83,9 +87,15 @@ class _SuccessGatedRamp(ManagerTermBase):
                 block (``None`` in the curriculum cfg) counts as complete.
             resume_dwell_steps: Environment steps the average must stay above the threshold before the progress grows
                 again after a pause, once the gate has opened before. None => ``dwell_steps``.
+            pause_threshold: Success average below which the progress pauses once the gate has opened before. None =>
+                ``success_threshold``.
         """
         if ramp_steps <= 0:
             raise ValueError("ramp_steps must be positive.")
+        if pause_threshold is not None and pause_threshold > success_threshold:
+            raise ValueError(
+                f"pause_threshold {pause_threshold} must not exceed success_threshold {success_threshold}."
+            )
         step = env.common_step_counter
         # the reset at the start of training ends no episode
         if step > 0:
@@ -96,7 +106,9 @@ class _SuccessGatedRamp(ManagerTermBase):
             if success.numel() > 0:
                 alpha = success.numel() / (success.numel() + ema_episodes)
                 self.success_ema += alpha * (success.float().mean().item() - self.success_ema)
-        if self.success_ema >= success_threshold and _block_complete(env, after):
+        # the first opening needs the success threshold, an opened gate only the pause threshold
+        threshold = success_threshold if not self._has_opened or pause_threshold is None else pause_threshold
+        if self.success_ema >= threshold and _block_complete(env, after):
             if self._above_since is None:
                 self._above_since = step
         else:
@@ -152,6 +164,7 @@ class ActionRateCurriculum(_SuccessGatedRamp):
         after: str | None = None,
         initial_progress: float = 0.0,
         resume_dwell_steps: int | None = None,
+        pause_threshold: float | None = None,
     ) -> dict[str, float]:
         """Advance the progress and set the reward weight.
 
@@ -168,6 +181,7 @@ class ActionRateCurriculum(_SuccessGatedRamp):
             after: See :meth:`_SuccessGatedRamp._update`.
             initial_progress: Progress at the start of training, read once at initialization.
             resume_dwell_steps: See :meth:`_SuccessGatedRamp._update`.
+            pause_threshold: See :meth:`_SuccessGatedRamp._update`.
 
         Returns:
             The state to log: success average, gate, progress and weight.
@@ -182,6 +196,7 @@ class ActionRateCurriculum(_SuccessGatedRamp):
             dwell_steps,
             after,
             resume_dwell_steps,
+            pause_threshold,
         )
         weight = self._start_weight * (final_weight / self._start_weight) ** self.progress
         self._reward_cfg.weight = weight
@@ -192,71 +207,3 @@ class ActionRateCurriculum(_SuccessGatedRamp):
             "progress": self.progress,
             "weight": weight,
         }
-
-
-class ObservationHidingCurriculum(_SuccessGatedRamp):
-    """Success-gated share of episodes in which the actor does not see an observation.
-
-    :attr:`hidden` is drawn once per episode, with probability equal to the progress, so an episode sees the
-    observation in every step or in none. The observation terms that name this block in ``hide_curriculum``
-    (:func:`~.observations.cloth_drag_stage`, :func:`~.observations.cloth_grasped`) are all zeros in hidden episodes,
-    a value distinct from every visible one.
-
-    The term runs at the start of a reset, before the observation manager resets the observation history of the same
-    environments and backfills it with the first observation of the new episode. The history of an episode therefore
-    holds either the real observation or zeros in all of its slots.
-    """
-
-    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
-        """Initialize the per-episode mask."""
-        super().__init__(cfg, env)
-        self.hidden = torch.zeros(env.num_envs, dtype=torch.bool, device=env.device)
-        """Whether the actor does not see the observation in the current episode, shape [num_envs]."""
-        self._generator = torch.Generator(device=env.device)
-        self._generator.manual_seed(env.cfg.seed if env.cfg.seed is not None else torch.initial_seed())
-
-    def __call__(
-        self,
-        env: ManagerBasedRLEnv,
-        env_ids: Sequence[int] | slice,
-        command_name: str,
-        success_threshold: float,
-        ramp_steps: int,
-        ema_episodes: int = 2048,
-        dwell_steps: int = 0,
-        after: str | None = None,
-        initial_progress: float = 0.0,
-        resume_dwell_steps: int | None = None,
-    ) -> dict[str, float]:
-        """Advance the progress and draw the mask of the episodes that start now.
-
-        Args:
-            env: The environment.
-            env_ids: The environments being reset.
-            command_name: See :meth:`_SuccessGatedRamp._update`.
-            success_threshold: See :meth:`_SuccessGatedRamp._update`.
-            ramp_steps: See :meth:`_SuccessGatedRamp._update`.
-            ema_episodes: See :meth:`_SuccessGatedRamp._update`.
-            dwell_steps: See :meth:`_SuccessGatedRamp._update`.
-            after: See :meth:`_SuccessGatedRamp._update`.
-            initial_progress: Progress at the start of training, read once at initialization.
-            resume_dwell_steps: See :meth:`_SuccessGatedRamp._update`.
-
-        Returns:
-            The state to log: progress and success average.
-        """
-        self._update(
-            env,
-            env_ids,
-            command_name,
-            success_threshold,
-            ramp_steps,
-            ema_episodes,
-            dwell_steps,
-            after,
-            resume_dwell_steps,
-        )
-        num_reset = self.hidden[env_ids].shape[0]
-        draw = torch.rand(num_reset, generator=self._generator, device=self.hidden.device)
-        self.hidden[env_ids] = draw < self.progress
-        return {"progress": self.progress, "success_ema": self.success_ema}

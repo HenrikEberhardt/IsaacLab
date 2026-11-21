@@ -18,7 +18,6 @@ __all__ = [
     "cloth_drag_termination_penalty",
     "ClothTargetCommandCfg",
     "ActionRateCurriculum",
-    "ObservationHidingCurriculum",
     "TopDownDeltaEEActionCfg",
     "TopDownStabilizedDeltaEEActionCfg",
     "cloth_between_fingers",
@@ -64,7 +63,6 @@ __all__ = [
     "grasp_node_capturable",
     "grasp_tried",
     "grasp_node_pos_b",
-    "gripper_command",
     "gripper_width",
     "joint_limit_barrier",
     "nonfinite_state",
@@ -73,6 +71,12 @@ __all__ = [
     "ee_object_distance",
     "object_center_offset_b",
     "object_pose_b",
+    "object_position_b",
+    "object_quat_b",
+    "domain_randomization_params",
+    "ClothPointsNoiseModelCfg",
+    "randomize_cloth_friction",
+    "randomize_cloth_material",
     "object_slip_speed",
     "object_velocity_b",
     "physics_contact",
@@ -88,7 +92,7 @@ from .actions_cfg import (
     TopDownStabilizedDeltaEEActionCfg,
 )
 from .commands_cfg import ClothTargetCommandCfg
-from .curriculums import ActionRateCurriculum, ObservationHidingCurriculum
+from .curriculums import ActionRateCurriculum
 from .events import (
     edge_included,
     interior_nodes,
@@ -106,6 +110,7 @@ from .observations import (
     cloth_grasped,
     cloth_nodal_pos_b,
     cloth_nodal_vel_b,
+    domain_randomization_params,
     ee_object_distance,
     ee_pose_b,
     ee_velocity_b,
@@ -114,13 +119,16 @@ from .observations import (
     grasp_node_capturable,
     grasp_tried,
     grasp_node_pos_b,
-    gripper_command,
     gripper_width,
     object_center_offset_b,
     object_pose_b,
+    object_position_b,
+    object_quat_b,
     object_velocity_b,
     object_to_target_b,
 )
+from .randomization import randomize_cloth_friction, randomize_cloth_material
+from .randomization_cfg import ClothPointsNoiseModelCfg
 from .rewards import (
     ClothDistanceProgress,
     GripperCloseProgress,

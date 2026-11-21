@@ -141,6 +141,9 @@ class ClothTargetCommand(CommandTerm):
 
         # target position in the robot's root frame [m]
         self.target_pos_b = torch.zeros(self.num_envs, 3, device=self.device)
+        # targets a reset event drew before this command's reset (see preset_targets), used by the next resample
+        self._preset_target = torch.zeros(self.num_envs, 3, device=self.device)
+        self._preset = torch.zeros(self.num_envs, dtype=torch.bool, device=self.device)
 
         # consecutive steps the cloth's central node has stayed at the target
         self._hold_steps = round(cfg.hold_time / env.step_dt)
@@ -348,6 +351,34 @@ class ClothTargetCommand(CommandTerm):
         self._start_stage[env_ids] = stage.long()
         self._grasp_node_stale[env_ids] = True
 
+    def sample_targets(self, num: int) -> torch.Tensor:
+        """Draw targets uniformly from :attr:`ClothTargetCommandCfg.ranges`.
+
+        Args:
+            num: Number of targets.
+
+        Returns:
+            Targets in the robot's root frame [m], shape [num, 3].
+        """
+        ranges = self.cfg.ranges
+        low = torch.tensor([ranges.pos_x[0], ranges.pos_y[0], ranges.pos_z[0]], device=self.device)
+        high = torch.tensor([ranges.pos_x[1], ranges.pos_y[1], ranges.pos_z[1]], device=self.device)
+        return low + (high - low) * torch.rand(num, 3, device=self.device)
+
+    def preset_targets(self, env_ids: torch.Tensor, target_pos_b: torch.Tensor) -> None:
+        """Fix the targets of the next resample of the given environments.
+
+        The reset events run before the command manager resets this command; an event that needs the episode's
+        target (e.g. to place the cloth's raised node towards it) draws it with :meth:`sample_targets` and hands it
+        over here. The next resample uses it once.
+
+        Args:
+            env_ids: The environments, shape [N].
+            target_pos_b: Targets in the robot's root frame [m], shape [N, 3].
+        """
+        self._preset_target[env_ids] = target_pos_b
+        self._preset[env_ids] = True
+
     """
     Implementation specific functions.
     """
@@ -371,10 +402,11 @@ class ClothTargetCommand(CommandTerm):
         self._steps_held[env_ids] = 0
         self._last_hold_step[env_ids] = -1
         self._at_target_hist[env_ids] = False
-        r = torch.empty(len(env_ids), device=self.device)
-        self.target_pos_b[env_ids, 0] = r.uniform_(*self.cfg.ranges.pos_x)
-        self.target_pos_b[env_ids, 1] = r.uniform_(*self.cfg.ranges.pos_y)
-        self.target_pos_b[env_ids, 2] = r.uniform_(*self.cfg.ranges.pos_z)
+        # a target preset by a reset event wins once; the others are drawn
+        drawn = self.sample_targets(len(env_ids))
+        preset = self._preset[env_ids].unsqueeze(1)
+        self.target_pos_b[env_ids] = torch.where(preset, self._preset_target[env_ids], drawn)
+        self._preset[env_ids] = False
 
     def _update_command(self):
         """Advance the stage machine on the current state."""

@@ -56,6 +56,13 @@ class TopDownDeltaEEActionCfg(DifferentialInverseKinematicsActionCfg):
     joint_range_margin: float | None = None
     """Margin inside hard joint limits [rad]. The IK step scales uniformly to keep targets inside this range."""
 
+    command_delay_range: tuple[int, int] = (0, 0)
+    """Range of the delay of the IK target in physics steps, drawn uniformly per environment at reset.
+
+    It models the latency between the policy and the real robot's controller. The policy's commanded target pose
+    (start pose plus delta) reaches the IK only after the drawn number of physics steps. (0, 0) disables the delay.
+    """
+
 
 @configclass
 class TopDownStabilizedDeltaEEActionCfg(TopDownDeltaEEActionCfg):

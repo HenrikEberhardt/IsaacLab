@@ -20,11 +20,10 @@ if TYPE_CHECKING:
 
 @configclass
 class ConstrainedGripperActionCfg(BinaryJointPositionActionCfg):
-    """Configuration of the constrained gripper: finger command, hysteresis, lock, squeeze, release and contact
-    clearance.
+    """Configuration of the constrained gripper: finger command, lock, squeeze, release and contact clearance.
 
-    The finger command is a step to the open or close position, as the real gripper receives it; the finger actuator
-    sets the speed and delay.
+    The finger command is binary, a step to the open or close position, as the real gripper receives it; the finger
+    actuator sets the speed and delay.
     """
 
     class_type: type[ConstrainedGripperAction] | str = "{DIR}.gripper_action:ConstrainedGripperAction"
@@ -43,9 +42,6 @@ class ConstrainedGripperActionCfg(BinaryJointPositionActionCfg):
     pad_path_direction: float = 1.0
     """Direction of the pads' motion along the EE frame's z-axis while opening: 1.0 if the open pads sit towards the
     fingertips (``+z``) of the closed ones, -1.0 if they sit behind them."""
-
-    hysteresis_threshold: float = 0.5
-    """Action threshold: close below its negative, open above it, otherwise keep the command."""
 
     # lock
 

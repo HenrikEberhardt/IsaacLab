@@ -321,12 +321,21 @@ def test_reset_strategy_presets():
     # without an override, the default resets
     assert isinstance(cfg.default, DefaultResetsCfg) and isinstance(cfg.default_resets, DefaultResetsCfg)
     assert isinstance(cfg.uniform_resets, UniformResetsCfg) and isinstance(cfg.adaptive_resets, AdaptiveResetsCfg)
-    # the three randomized resets and the startup event of the gripper linkage: the success per start stage is a
-    # metric of the cloth target command
-    assert set(vars(cfg.default_resets)) == {"reset_robot_joints", "reset_deformable", "reset_cube", "robotiq_linkage"}
+    # every strategy shares the domain randomization (with the startup event of the gripper linkage); the success
+    # per start stage is a metric of the cloth target command
+    randomization = {
+        "robotiq_linkage",
+        "arm_gains",
+        "arm_friction",
+        "arm_armature",
+        "cloth_material",
+        "cloth_friction",
+        "cube_mass",
+    }
+    assert set(vars(cfg.default_resets)) == randomization | {"reset_robot_joints", "reset_deformable", "reset_cube"}
     for strategy in (cfg.uniform_resets, cfg.adaptive_resets):
-        # only the bank term (and the gripper linkage), with all four stages drawn from the bank
-        assert set(vars(strategy)) == {"reset_from_bank", "robotiq_linkage"}
+        # only the bank term besides the randomization, with all four stages drawn from the bank
+        assert set(vars(strategy)) == randomization | {"reset_from_bank"}
         term = strategy.reset_from_bank
         assert term.func.endswith(".reset_strategies.reset_from_bank:ResetFromBank") and term.mode == "reset"
         assert term.bank_path is not None

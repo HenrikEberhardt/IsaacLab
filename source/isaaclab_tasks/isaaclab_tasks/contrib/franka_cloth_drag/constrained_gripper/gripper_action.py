@@ -26,13 +26,12 @@ if TYPE_CHECKING:
 
 
 class ConstrainedGripperAction(BinaryJointPositionAction):
-    """Gripper with a hysteresis that locks the pinched cloth nodes to the EE frame once the closing fingers settle.
+    """Binary gripper that locks the pinched cloth nodes to the EE frame once the closing fingers settle.
 
     The fingers get a step open or close target, as the real gripper does; the finger actuator sets their speed and
     command delay. Per step (:meth:`process_actions`):
 
-    1. Hysteresis: an action below ``-hysteresis_threshold`` closes, above ``hysteresis_threshold`` opens, otherwise
-       the command stays. At 0 it is the plain sign of the action.
+    1. Command: a negative action closes, a positive one opens, exactly zero keeps the command.
     2. Release: commanded open, the lock lets go once the pads are ``release_gap`` wider than the pinch.
     3. Grasp: closed, once the finger has moved in the closing direction and settled again (or ``close_timeout`` after
        the close command, if it never moved), the gripper tries the lock once (:attr:`grasp_tried`); it re-arms after
@@ -107,13 +106,12 @@ class ConstrainedGripperAction(BinaryJointPositionAction):
         return self.node_lock.num_grasped
 
     def process_actions(self, actions: torch.Tensor):
-        """Update the hysteresis, the release and grasp transitions, the finger targets and the cloth contacts."""
+        """Update the binary command, the release and grasp transitions, the finger targets and the cloth contacts."""
         super().process_actions(actions)
         lock = self.node_lock
         action = self._raw_actions[:, 0]
-        threshold = self.cfg.hysteresis_threshold
         was_closed = self._closed
-        self._closed = torch.where(action < -threshold, True, torch.where(action > threshold, False, self._closed))
+        self._closed = torch.where(action < 0.0, True, torch.where(action > 0.0, False, self._closed))
         close = self._closed
         new_close = close & ~was_closed
         self._processed_actions = torch.where(close.unsqueeze(1), self._close_command, self._open_command)
@@ -204,7 +202,7 @@ class ConstrainedGripperAction(BinaryJointPositionAction):
         The locked nodes are held where they are now; the next :meth:`apply_actions` moves them with the hand.
 
         The stored ``finger_target`` is not needed: the next :meth:`process_actions` recomputes the finger command from
-        the restored hysteresis state and lock. A restored close that has not tried the lock yet tries it once the
+        the restored closed state and lock. A restored close that has not tried the lock yet tries it once the
         finger moved and settled, or after ``close_timeout``.
 
         Args:

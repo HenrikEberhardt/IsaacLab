@@ -15,7 +15,7 @@ from isaaclab.managers import TerminationTermCfg as DoneTerm
 from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.agents.rsl_rl_ppo_cfg import FrankaClothDragPPORunnerCfg
 from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import (
     ActorObsCfg,
-    CurriculumCfg,
+    CriticObsCfg,
     RewardsCfg,
     TerminationsCfg,
 )
@@ -46,26 +46,91 @@ OPEN, HALFWAY, CLOSED = 0.0, 0.4, 0.8
 def test_action_regularization_and_clip_configuration():
     """Action costs should be fixed from reset one; samples beyond the nominal range are not clipped."""
     rewards = RewardsCfg()
-    curriculum = CurriculumCfg()
     runner = FrankaClothDragPPORunnerCfg()
 
     assert rewards.pen_action_magnitude.weight == -0.5
     assert rewards.pen_action_rate.weight == -0.1
-    assert not hasattr(curriculum, "action_magnitude")
-    assert not hasattr(curriculum, "action_rate")
     assert runner.clip_actions is None
     assert (
         runner.algorithm.class_name == "isaaclab_tasks.contrib.franka_cloth_drag.action_distribution.ppo:KLMetricsPPO"
     )
 
 
-def test_stage_and_grasp_flag_are_hidden_by_the_same_curriculum_term():
-    """An observation naming an unknown term stays visible without an error, so the names must match the term."""
-    actor = ActorObsCfg()
+def test_stage_and_grasp_flag_are_critic_only():
+    """The real robot observes neither the task stage nor the node lock, so only the critic gets them."""
+    actor, critic = ActorObsCfg(), CriticObsCfg()
 
-    assert CurriculumCfg().observation_hiding is not None
-    assert actor.stage.params["hide_curriculum"] == "observation_hiding"
-    assert actor.cloth_grasped.params["hide_curriculum"] == "observation_hiding"
+    assert getattr(actor, "stage", None) is None and getattr(actor, "cloth_grasped", None) is None
+    assert critic.stage is not None and critic.cloth_grasped is not None
+
+
+def test_actor_width_offset_blurs_the_pinch():
+    """The actor's per-episode width offset spans the gap between a pinch and an empty close in sim (6.5 vs 2.25 mm)
+    and the shift to the real readings (2 vs 0 mm); the critic sees the true width. The gripper command, redundant with
+    the last action, is gone."""
+    actor, critic = ActorObsCfg(), CriticObsCfg()
+
+    bias = actor.gripper_finger_width.noise.bias_noise_cfg
+    assert bias.operation == "abs" and bias.n_min <= -0.0045 and bias.n_max >= 0.0045
+    assert critic.gripper_finger_width.noise is None
+    assert getattr(actor, "gripper_command", None) is None and getattr(critic, "gripper_command", None) is None
+
+
+def test_raised_node_lies_between_the_cube_and_the_target():
+    """The raised node is the candidate nearest the point at the drawn distance from the center towards the target,
+    shifted sideways by the drawn lateral offset; any target direction works."""
+    from isaaclab_tasks.contrib.franka_cloth_drag.mdp.events import node_toward_target
+
+    # 1 cm grid of candidates around a center at (0.02, -0.01)
+    axis = torch.arange(-0.15, 0.1501, 0.01)
+    candidate_xy = torch.cartesian_prod(axis, axis)
+    center = torch.tensor([0.02, -0.01])
+    angles = torch.tensor([0.0, 0.5 * torch.pi, 2.3, -1.1])
+    direction = torch.stack([angles.cos(), angles.sin()], dim=-1)
+    target = center + 0.4 * direction
+    distance = torch.tensor([0.08, 0.09, 0.10, 0.09])
+    lateral = torch.tensor([0.0, 0.01, -0.01, 0.005])
+
+    picked = candidate_xy[node_toward_target(candidate_xy, center, target, distance, lateral)]
+    left = torch.stack([-direction[:, 1], direction[:, 0]], dim=-1)
+    expected = center + distance.unsqueeze(1) * direction + lateral.unsqueeze(1) * left
+    # the nearest grid node is at most half a diagonal (~7 mm) away
+    assert (picked - expected).norm(dim=-1).max() <= 0.5 * 0.01 * 2**0.5 + 1e-6
+    along = ((picked - center) * direction).sum(dim=-1)
+    assert torch.allclose(along, distance, atol=0.0075)
+
+
+def test_cloth_point_noise_shifts_the_cloth_rigidly_and_jitters_only_the_raised_nodes():
+    """Per episode the whole cloth shifts by one planar offset and the raised nodes by another; per frame only the
+    raised nodes jitter. A reset redraws the offsets of the reset environments only."""
+    from isaaclab_tasks.contrib.franka_cloth_drag.mdp.randomization import ClothPointsNoiseModel
+    from isaaclab_tasks.contrib.franka_cloth_drag.mdp.randomization_cfg import ClothPointsNoiseModelCfg
+
+    cfg = ClothPointsNoiseModelCfg(
+        num_landmarks=2, num_raised=2, cloth_offset_range=(-0.003, 0.003), raised_offset_range=(-0.004, 0.004)
+    )
+    num_envs, num_points = 64, 6
+    model = ClothPointsNoiseModel(cfg, num_envs=num_envs, device="cpu")
+    points = torch.rand(num_envs, num_points, 3)
+    raised = [2, 3]
+    other = [0, 1, 4, 5]
+
+    first = model(points.reshape(num_envs, -1)).reshape(num_envs, num_points, 3) - points
+    second = model(points.reshape(num_envs, -1)).reshape(num_envs, num_points, 3) - points
+    # non-raised points: one planar offset per environment, constant over frames, z untouched
+    offset = first[:, other]
+    assert torch.allclose(offset, offset[:, :1].expand_as(offset), atol=1e-6)
+    assert torch.allclose(second[:, other], first[:, other], atol=1e-6)
+    assert offset[..., 2].abs().max() < 1e-6 and offset[..., :2].abs().max() <= 0.003 + 1e-6
+    # raised points: the cloth offset plus their own offset, and fresh noise every frame
+    assert not torch.allclose(second[:, raised], first[:, raised])
+    jitter = second[:, raised] - first[:, raised]
+    assert 0.0015 < jitter.std().item() / 2**0.5 < 0.0035  # difference of two draws with std 2.5 mm
+
+    model.reset(torch.tensor([0, 1]))
+    after = model(points.reshape(num_envs, -1)).reshape(num_envs, num_points, 3) - points
+    assert not torch.allclose(after[:2, other], first[:2, other])
+    assert torch.allclose(after[2:, other], first[2:, other], atol=1e-6)
 
 
 class _EventManager:

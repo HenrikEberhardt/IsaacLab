@@ -75,13 +75,6 @@ def gripper_width(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -
     width = pad_gap_from_joint(angle, action.cfg.gap_curve).unsqueeze(1)
     return torch.nan_to_num(width, nan=0.0, posinf=0.0, neginf=0.0)
 
-
-def gripper_command(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
-    """Gripper command after the hysteresis, -1 closed and +1 open, shape [N, 1]."""
-    action: ConstrainedGripperAction = env.action_manager.get_term(action_name)
-    return torch.where(action.closed, -1.0, 1.0).unsqueeze(1)
-
-
 class ClothPointsInBaseFrame(ManagerTermBase):
     """Positions [m] of 9 landmarks, the raised nodes (grasp node first) and random nodes in the robot base frame."""
 
@@ -145,35 +138,45 @@ def object_pose_b(
     robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
     """Rigid object position [m] and quaternion (x, y, z, w; w >= 0) in the robot base frame, shape [N, 7]."""
+    return torch.cat(
+        (object_position_b(env, asset_cfg, robot_cfg), object_quat_b(env, asset_cfg, robot_cfg)), dim=-1
+    )
+
+
+def object_position_b(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Rigid object position [m] in the robot base frame, shape [N, 3]."""
+    asset: RigidObject = env.scene[asset_cfg.name]
+    pos_b = points_to_base(env, asset.data.root_pos_w.torch, robot_cfg)
+    return torch.nan_to_num(pos_b, nan=0.0, posinf=0.0, neginf=0.0)
+
+
+def object_quat_b(
+    env: ManagerBasedRLEnv,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("cube"),
+    robot_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+) -> torch.Tensor:
+    """Rigid object quaternion (x, y, z, w; w >= 0) in the robot base frame, shape [N, 4]."""
     asset: RigidObject = env.scene[asset_cfg.name]
     robot: Articulation = env.scene[robot_cfg.name]
-    pos_b = points_to_base(env, asset.data.root_pos_w.torch, robot_cfg)
     quat_b = quat_unique(quat_mul(quat_inv(robot.data.root_quat_w.torch), asset.data.root_quat_w.torch))
-    return torch.nan_to_num(torch.cat((pos_b, quat_b), dim=-1), nan=0.0, posinf=0.0, neginf=0.0)
+    return torch.nan_to_num(quat_b, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def cloth_drag_stage(env: ManagerBasedRLEnv, command_name: str, hide_curriculum: str | None = None) -> torch.Tensor:
-    """One-hot task stage, all zeros in episodes the curriculum hides it in, shape [N, 4]."""
+def cloth_drag_stage(env: ManagerBasedRLEnv, command_name: str) -> torch.Tensor:
+    """One-hot task stage, shape [N, 4]."""
     stage = env.command_manager.get_term(command_name).stage
     one_hot = torch.nn.functional.one_hot(stage, num_classes=len(ClothDragStage)).float()
-    if hide_curriculum is not None:
-        hidden = _curriculum_hidden(env, hide_curriculum)
-        if hidden is not None:
-            one_hot = torch.where(hidden.unsqueeze(1), 0.0, one_hot)
     return torch.nan_to_num(one_hot, nan=0.0, posinf=0.0, neginf=0.0)
 
 
-def cloth_grasped(
-    env: ManagerBasedRLEnv, action_name: str = "gripper_action", hide_curriculum: str | None = None
-) -> torch.Tensor:
-    """+1 while cloth nodes are locked to the hand, else -1; 0 in episodes the curriculum hides it, shape [N, 1]."""
+def cloth_grasped(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> torch.Tensor:
+    """+1 while cloth nodes are locked to the hand, else -1, shape [N, 1]."""
     action: ConstrainedGripperAction = env.action_manager.get_term(action_name)
-    flag = action.is_grasping.float().unsqueeze(1) * 2.0 - 1.0
-    if hide_curriculum is not None:
-        hidden = _curriculum_hidden(env, hide_curriculum)
-        if hidden is not None:
-            flag = torch.where(hidden.unsqueeze(1), 0.0, flag)
-    return flag
+    return action.is_grasping.float().unsqueeze(1) * 2.0 - 1.0
 
 
 """
@@ -294,13 +297,25 @@ def grasp_tried(env: ManagerBasedRLEnv, action_name: str = "gripper_action") -> 
     return action.grasp_tried.float().unsqueeze(1)
 
 
-"""
-Helpers.
-"""
+def domain_randomization_params(
+    env: ManagerBasedRLEnv,
+    mass_event: str = "cube_mass",
+    material_event: str = "cloth_material",
+    friction_event: str = "cloth_friction",
+) -> torch.Tensor:
+    """Drawn task parameters as log-ratios to their authored values (0 at the authored value), shape [N, 3 + G].
 
-
-def _curriculum_hidden(env: ManagerBasedRLEnv, term_name: str) -> torch.Tensor | None:
-    """Per-episode hide mask of the curriculum term ``term_name``, or None before the curriculum exists."""
-    curriculum_manager = getattr(env, "curriculum_manager", None)
-    term_cfg = getattr(curriculum_manager.cfg, term_name, None) if curriculum_manager is not None else None
-    return getattr(term_cfg.func, "hidden", None) if term_cfg is not None else None
+    Columns: cube mass, cloth density, cloth bending stiffness, then the cloth friction factor of each shape group of
+    ``friction_event`` (e.g. table, cube). The terms are the event terms of these names: a
+    :func:`~isaaclab.envs.mdp.randomize_rigid_body_mass` on the cube, :class:`.randomization.randomize_cloth_material`
+    and :class:`.randomization.randomize_cloth_friction`.
+    """
+    mass_term = env.event_manager.get_term_cfg(mass_event).func
+    material = env.event_manager.get_term_cfg(material_event).func
+    friction = env.event_manager.get_term_cfg(friction_event).func
+    # the mass term records the authored masses at its first call
+    mass = mass_term.asset.data.body_mass.torch
+    mass_scale = mass / mass_term.default_mass if mass_term.default_mass is not None else torch.ones_like(mass)
+    columns = [material.SCALE_NAMES.index("density"), material.SCALE_NAMES.index("edge_ke")]
+    scales = torch.cat((mass_scale[:, :1], material.scales[:, columns], friction.scales), dim=-1)
+    return torch.log(scales)

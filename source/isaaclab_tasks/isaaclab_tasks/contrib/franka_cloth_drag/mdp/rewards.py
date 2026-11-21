@@ -370,8 +370,7 @@ def action_term_rate_l2(env: ManagerBasedRLEnv, action_name: str) -> torch.Tenso
     """Squared change of one action term's actions between the last two steps, summed over its dimensions.
 
     Like :func:`isaaclab.envs.mdp.action_rate_l2`, restricted to the term ``action_name``. For the arm term, this leaves
-    out the binary gripper action, whose raw value changes freely without moving anything until it crosses the
-    hysteresis threshold.
+    out the binary gripper action, whose raw value changes freely without moving anything until it changes sign.
 
     Args:
         env: The environment.

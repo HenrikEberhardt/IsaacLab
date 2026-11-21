@@ -27,7 +27,6 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.assets.deformable_object import DeformableObjectCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
-from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -40,6 +39,7 @@ from isaaclab.sensors.frame_transformer.frame_transformer_cfg import OffsetCfg
 from isaaclab.sim.spawners.from_files.from_files_cfg import GroundPlaneCfg
 from isaaclab.sim.spawners.materials import RigidBodyMaterialBaseCfg
 from isaaclab.utils import configclass
+from isaaclab.utils.noise import GaussianNoiseCfg, NoiseModelWithAdditiveBiasCfg, UniformNoiseCfg
 
 from isaaclab_contrib.coupling import CouplerEntryCfg, CouplerProxyMappingCfg
 
@@ -294,7 +294,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
                 viscous_friction=0.0,
             ),
             # Add the Robotiq 2F-85 Gripper Linkage
-            "gripper": ROBOTIQ_GRIPPER_ACTUATOR_CFG,
+            "gripper": ROBOTIQ_GRIPPER_ACTUATOR_CFG.replace(min_delay=4, max_delay=6),
             "gripper_passive": ROBOTIQ_PASSIVE_ACTUATOR_CFG,
         }
 
@@ -311,7 +311,6 @@ GRIPPER_ACTION_CFG = ConstrainedGripperActionCfg(
     finger_joint_name=ROBOTIQ_DRIVE_JOINT,
     open_command_expr={ROBOTIQ_DRIVE_JOINT: ROBOTIQ_OPEN},
     close_command_expr={ROBOTIQ_DRIVE_JOINT: ROBOTIQ_CLOSED},
-    hysteresis_threshold=0.5,  # hysteresis for stable constrained gripper
     
     # Constrained Gripper Parameters
     settle_speed=0.05,  # [rad/s] lower finger speed counts as settled
@@ -342,6 +341,7 @@ class ActionsCfg:
         limit_operation_space=True,
         joint_vel_factor=0.9,  # reduce joint veloctiy by [factor] of hardware max
         joint_range_margin=0.05,  # reduce joint range by 0.05 [rad] of hardware max
+        command_delay_range=(0, 4),  # IK target latency steps at 120 Hz
     )
 
     gripper_action = GRIPPER_ACTION_CFG
@@ -362,34 +362,50 @@ class ActorObsCfg(ObsGroup):
     ee_velocity = ObsTerm(
         func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")}
     )
-    gripper_finger_width = ObsTerm(func=mdp.gripper_width)
-    gripper_hysteresis_command = ObsTerm(func=mdp.gripper_command)
+    # Randomize gripper width to avoid detecting grasp based on finger pad width
+    gripper_finger_width = ObsTerm(
+        func=mdp.gripper_width,
+        noise=NoiseModelWithAdditiveBiasCfg(
+            noise_cfg=GaussianNoiseCfg(std=0.0004),  # [m] Robotiq position resolution
+            bias_noise_cfg=UniformNoiseCfg(n_min=-0.005, n_max=0.005, operation="abs"),  # [m] offset per episode
+        ),
+    )
     last_action = ObsTerm(
         func=mdp.last_action
         )
 
     # ---------- Exteroception ----------
-    # 3x3 node landmarks, the raised nodes and 18 random nodes, fixed per episode
+    # 3x3 node landmarks, the raised node and 18 random nodes, fixed per episode
     cloth_points = ObsTerm(
-        func=mdp.ClothPointsInBaseFrame, params={"num_random_nodes": 18, "command_name": "cloth_target"}
+        func=mdp.ClothPointsInBaseFrame,
+        params={"num_random_nodes": 18, "command_name": "cloth_target"},
+        noise=mdp.ClothPointsNoiseModelCfg(
+            num_raised=1,
+            cloth_offset_range=(-0.003, 0.003),  # [m] per episode, all points
+            raised_offset_range=(-0.004, 0.004),  # [m] per episode, raised nodes
+            raised_noise_std=0.0025,  # [m] per frame, raised nodes
+        ),
     )
-    cube_pose = ObsTerm(
-        func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")}
+    # Cube Postion
+    cube_position = ObsTerm(
+        func=mdp.object_position_b,
+        params={"asset_cfg": SceneEntityCfg("cube")},
+        noise=NoiseModelWithAdditiveBiasCfg(
+            noise_cfg=GaussianNoiseCfg(std=0.005),  # [m]
+            bias_noise_cfg=UniformNoiseCfg(n_min=-0.01, n_max=0.01, operation="abs"),  # [m]
+        ),
+    )
+    cube_orientation = ObsTerm(
+        func=mdp.object_quat_b, params={"asset_cfg": SceneEntityCfg("cube")}
     )
 
     # ---------- Task ----------
     target_pos = ObsTerm(
         func=mdp.generated_commands, params={"command_name": "cloth_target"}
     )
-    stage = ObsTerm(
-        func=mdp.cloth_drag_stage, params={"command_name": "cloth_target", "hide_curriculum": "observation_hiding"}
-    )
-    cloth_grasped = ObsTerm(
-        func=mdp.cloth_grasped, params={"hide_curriculum": "observation_hiding"}
-    )
 
     def __post_init__(self) -> None:
-        self.enable_corruption = False
+        self.enable_corruption = True
         self.concatenate_terms = True
         self.history_length = 5  # observe history the estimate cloth movement
         self.flatten_history_dim = True
@@ -397,7 +413,7 @@ class ActorObsCfg(ObsGroup):
 
 @configclass
 class CriticObsCfg(ObsGroup):
-    """Privileged critic observations with full cloth pos/vel, detailed grasp information and no histroy"""
+    """Privileged critic observations with full cloth pos/vel, detailed grasp information, domain raondomization values and no history"""
 
     # ---------- Proprioception ----------
     joint_angles = ObsTerm(
@@ -411,7 +427,6 @@ class CriticObsCfg(ObsGroup):
         func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")}
     )
     gripper_finger_width = ObsTerm(func=mdp.gripper_width)
-    gripper_hysteresis_command = ObsTerm(func=mdp.gripper_command)
     last_action = ObsTerm(
         func=mdp.last_action
         )
@@ -460,6 +475,9 @@ class CriticObsCfg(ObsGroup):
     grasp_node_capturable = ObsTerm(func=mdp.grasp_node_capturable)
     grasp_tried = ObsTerm(func=mdp.grasp_tried)
 
+    # Values of cube mass, cloth density and bending, cloth-table and cloth-cube friction
+    domain_randomization = ObsTerm(func=mdp.domain_randomization_params)
+
     def __post_init__(self) -> None:
         self.enable_corruption = False
         self.concatenate_terms = True
@@ -506,6 +524,7 @@ FRONTIER_SAMPLER_CFG = reset_strategies.FrontierSamplerCfg(
     # Weighted Moving Average Success Estimate
     window_size=4,
     weight_increment=1.0,
+    
     # Beta Sampling Variables
     target_success_estimate=0.5,
     kappa=1.0,  # small kappa = uniform, large = focus near target_success
@@ -518,11 +537,83 @@ FRONTIER_SAMPLER_CFG = reset_strategies.FrontierSamplerCfg(
 
 
 @configclass
-class DefaultResetsCfg:
-    """Fresh randomized resets that start at the beginning of the task."""
+class DomainRandomizationCfg:
+    """Add randomization to train a more robust policy"""
 
-    # Gripper linkage: the gripper is locked in parallel mode, so contact loads must not bend it
-    robotiq_linkage = EventTerm(func=stiffen_robotiq_mimics, mode="startup")
+    # ---------- Gripper ----------
+    robotiq_linkage = EventTerm(
+        func=stiffen_robotiq_mimics, 
+        mode="startup"
+    )
+
+    # ---------- Robot ----------
+    arm_gains = EventTerm(
+        func=mdp.randomize_actuator_gains,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
+            "stiffness_distribution_params": (0.9, 1.1),
+            "damping_distribution_params": (0.9, 1.1),
+            "operation": "scale",
+        },
+    )
+    arm_friction = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
+            "friction_distribution_params": (0.0, 0.5),  # joint friction [Nm]
+            "operation": "abs",
+        },
+    )
+    arm_armature = EventTerm(
+        func=mdp.randomize_joint_parameters,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
+            "armature_distribution_params": (0.9, 1.1),
+            "operation": "scale",
+        },
+    )
+
+    # ---------- Cloth ----------
+    cloth_material = EventTerm(
+        func=mdp.randomize_cloth_material,
+        mode="reset",
+        params={
+            "density_range": (0.13, 0.27),
+            "tri_ka_range": (0.5, 2.0),
+            "tri_kd_range": (0.5, 2.0),
+            "edge_ke_range": (0.25, 2.0),
+        },
+    )
+    cloth_friction = EventTerm(
+        func=mdp.randomize_cloth_friction,
+        mode="reset",
+        params={
+            "shape_patterns": {
+                "table": r"/World/envs/env_[^/]+/Table(/.*)?",
+                "cube": r"/World/envs/env_[^/]+/Cube",
+            },
+            "mu_scale_range": (0.71, 2.14),
+        },
+    )
+
+    # ---------- Cube ----------
+    cube_mass = EventTerm(
+        func=mdp.randomize_rigid_body_mass,
+        mode="startup",
+        params={
+            "asset_cfg": SceneEntityCfg("cube"),
+            "mass_distribution_params": (0.8, 1.2),
+            "operation": "scale",
+        },
+    )
+
+
+@configclass
+class DefaultResetsCfg(DomainRandomizationCfg):
+    """Fresh randomized resets that start at the beginning of the task."""
 
     # Robot Reset
     reset_robot_joints = EventTerm(
@@ -547,11 +638,11 @@ class DefaultResetsCfg:
             # Cloth position and orientation
             "position_range": {"x": (-0.03, 0.03), "y": (-0.05, 0.05)},
             "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),  # symmetrie covers all angles
-            # Node perturbation
+            # One raised node between the cube and the target, where the real lower-and-squeeze grasp happens
             "include_edge_nodes": False,
-            "num_raised_nodes": 3,  # redrawn at every episode reset
             "node_raise_height": 0.01,  # height above the table [m]
-            "min_spacing": 0.05,  # minimum distance between raised nodes [m]
+            "grasp_distance_range": (0.08, 0.10),  # [m] from the cube towards the target, per episode
+            "grasp_lateral_range": (-0.01, 0.01),  # [m] sideways from that line, per episode
             "asset_cfg": SceneEntityCfg("deformable"),
         },
     )
@@ -570,14 +661,13 @@ class DefaultResetsCfg:
 
 
 @configclass
-class UniformResetsCfg:
+class UniformResetsCfg(DomainRandomizationCfg):
     """Bank resets using fixed configured ratios between start stages."""
 
-    # Gripper linkage: the gripper is locked in parallel mode, so contact loads must not bend it
-    robotiq_linkage = EventTerm(func=stiffen_robotiq_mimics, mode="startup")
-
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_v11_robotiq.pt",  # approach 8000, grasp 1000, drag 100, goal 100
+        bank_path="logs/reset_banks/bank_v13_one_raised_node.pt",  # approach 8000, grasp 1000, drag 100, goal 100
+        # one raised node between cube and target; later settings changes that leave the stored states valid pass
+        allow_settings_mismatch=True,
         start_stage_ratios={"approach": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
@@ -585,14 +675,13 @@ class UniformResetsCfg:
 
 
 @configclass
-class AdaptiveResetsCfg:
+class AdaptiveResetsCfg(DomainRandomizationCfg):
     """Bank resets whose start-stage ratios adapt to training success."""
 
-    # Gripper linkage: the gripper is locked in parallel mode, so contact loads must not bend it
-    robotiq_linkage = EventTerm(func=stiffen_robotiq_mimics, mode="startup")
-
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_v12_frontier_robotiq.pt",  # approach 8000, grasp 1000, drag 100, goal 100
+        bank_path="logs/reset_banks/bank_v13_one_raised_node.pt",  # approach 8000, grasp 1000, drag 100, goal 100
+        # one raised node between cube and target; later settings changes that leave the stored states valid pass
+        allow_settings_mismatch=True,
         start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
         min_stage_ratios={"grasp": 0.10, "drag": 0.01, "goal": 0.01},
         # Ratio Changing Variables
@@ -600,7 +689,7 @@ class AdaptiveResetsCfg:
         ratio_max_shift_per_step=0.0016,
         ratio_hold_steps=300,
         # Frontier Sampling
-        use_frontier_sampling=True,
+        use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
         frontier_stages=("grasp", "drag", "goal"),
     )
@@ -768,33 +857,6 @@ class TerminationsCfg:
     )
 
 
-@configclass
-class CurriculumCfg:
-    """Observation-hiding curriculum for task stage and grasp state."""
-
-    # TODO (deploy): ramp actions.gripper_action.hysteresis_threshold from 0.5 to 0, gated like observation_hiding and
-    # together with the action-scale reduction. 0.5 keeps exploration noise from flipping the gripper early in
-    # training; at 0 the gripper switches on the sign of the action (close < 0, open > 0), a stateless mapping that the
-    # real robot reproduces without any hysteresis state. ConstrainedGripperAction reads the threshold from its cfg
-    # every step, so the curriculum only has to write the cfg value. Check the gripper std ceiling (0.35 in
-    # rsl_rl_ppo_cfg.py) once the threshold is low: it was sized against the +-0.5 band.
-
-    # Hide actor observations of the task stage and the grasp flag in the same episodes: the flag is unknown on the real
-    # Franka, and the DRAG stage would reveal the grasp
-    observation_hiding = CurrTerm(
-        func=mdp.ObservationHidingCurriculum,
-        params={
-            "command_name": "cloth_target",
-            "success_threshold": 0.99,  # success ratio
-            "dwell_steps": 600,  # 25 iterations above the threshold before the ramp starts
-            "resume_dwell_steps": 240,  # 10 iterations back above the threshold before a paused ramp continues
-            "ramp_steps": 3600,  # 150 iterations at 24 steps/iteration
-            "ema_episodes": 2048,
-            "initial_progress": 0.1,  # hidden in 10 % of episodes from the start (from 0 %, success fell 0.06-0.09)
-        },
-    )
-
-
 ##
 # Environment configuration
 ##
@@ -814,7 +876,6 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: ResetStrategiesCfg = ResetStrategiesCfg()
-    curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self) -> None:
         # Simulation settings
@@ -832,9 +893,6 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
         self.sim.visualizer_cfgs = [
             ViserVisualizerCfg(eye=(0.5 + 3.18, -3.18, 7.59), lookat=(0.5, 0.0, -0.2), focal_length=23.5, port=8755)
         ]
-
-        # Curriculum settings
-        self.curriculum.observation_hiding.params["initial_progress"] = 0.0
 
         # Reset Strategie settings
         self.events = DefaultResetsCfg()

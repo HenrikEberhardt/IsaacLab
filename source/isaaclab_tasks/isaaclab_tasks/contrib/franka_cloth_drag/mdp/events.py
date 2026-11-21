@@ -14,7 +14,7 @@ import torch
 from isaaclab_newton.physics import NewtonManager
 
 from isaaclab.managers import EventTermCfg, ManagerTermBase, SceneEntityCfg
-from isaaclab.utils.math import quat_from_euler_xyz, sample_uniform
+from isaaclab.utils.math import quat_apply, quat_from_euler_xyz, sample_uniform
 
 from .frames import CLOTH_CENTER_LANDMARK, cloth_landmark_ids
 
@@ -105,7 +105,8 @@ def reset_cloth_planar_pose(
         asset_cfg: Scene entity of the cloth.
     """
     cloth: DeformableObject = env.scene[asset_cfg.name]
-    nodal_state = _planar_pose_nodal_state(cloth, env_ids, position_range, yaw_range)
+    yaw, offset = _draw_planar_pose(len(env_ids), position_range, yaw_range, env.device)
+    nodal_state = _planar_pose_nodal_state(cloth, env_ids, yaw, offset)
     cloth.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids)
 
 
@@ -268,42 +269,43 @@ class ClothRaisedNodes:
 
 
 class ResetClothWithRaisedNodes(ManagerTermBase):
-    """Reset a cloth like :func:`reset_cloth_planar_pose` and raise a few nodes that keep sticking out.
+    """Reset a cloth like :func:`reset_cloth_planar_pose` and raise one node between the cube and the target.
 
-    At every reset, ``num_raised_nodes`` nodes are drawn anew from :data:`interior_nodes`, or from
-    :data:`edge_included` if ``include_edge_nodes``, in random order and at least ``min_spacing`` apart where
-    possible, and start lifted by ``node_raise_height``. The cloth takes the lifted shape as its rest shape around
-    them, see :class:`ClothRaisedNodes` (:attr:`raised_nodes`). The drawn nodes are kept, sorted, in
-    :attr:`raised_node_ids`.
+    At every reset the event draws the cloth pose and the episode's target (:meth:`~.commands.ClothTargetCommand.
+    sample_targets`, handed to the command with :meth:`~.commands.ClothTargetCommand.preset_targets`, since the
+    events run before the command resamples). It raises the candidate node nearest a point ``grasp_distance_range``
+    from the cloth's central node (where the cube stands) towards the target, offset by ``grasp_lateral_range`` to the
+    side, see :func:`node_toward_target`. The candidates are :data:`interior_nodes`, or :data:`edge_included` if
+    ``include_edge_nodes``. The node starts lifted by ``node_raise_height``, and the cloth takes the lifted shape as
+    its rest shape around it, see :class:`ClothRaisedNodes` (:attr:`raised_nodes`, :attr:`raised_node_ids`).
+
+    The raised node is a training aid: it stands in for the fold that lowering and squeezing makes on a real flat
+    cloth. Placed where the real grasp happens, it gives the teacher a target that a student can predict from the
+    cube, the cloth and the target without seeing a bump.
 
     The shape is built from the default nodes and then turned and shifted like :func:`reset_cloth_planar_pose`; the
     rest values do not change under that planar motion.
     """
 
     def __init__(self, cfg: EventTermCfg, env: ManagerBasedEnv):
-        """Set up the raised nodes of the cloth and their candidates."""
+        """Set up the raised node of the cloth and its candidates."""
         super().__init__(cfg, env)
         params = cfg.params
-        self.raised_nodes = ClothRaisedNodes(
-            env,
-            params["num_raised_nodes"],
-            params["node_raise_height"],
-            params.get("asset_cfg", SceneEntityCfg("deformable")),
-        )
-        """Rest shape of the cloth around the raised nodes."""
+        asset_cfg = params.get("asset_cfg", SceneEntityCfg("deformable"))
+        self.raised_nodes = ClothRaisedNodes(env, 1, params["node_raise_height"], asset_cfg)
+        """Rest shape of the cloth around the raised node."""
         num_nodes = self.raised_nodes.num_nodes
         node_set = edge_included if params.get("include_edge_nodes", False) else interior_nodes
         self._node_set = torch.tensor(node_set, dtype=torch.long, device=env.device)
         if ((self._node_set < 0) | (self._node_set >= num_nodes)).any():
             raise ValueError(f"The raised-node candidates must be cloth node ids in [0, {num_nodes}).")
-        if not 0 <= params["num_raised_nodes"] <= len(self._node_set):
-            raise ValueError(f"num_raised_nodes must be between 0 and the {len(self._node_set)} candidate nodes.")
-        candidate_xy = self.raised_nodes.rest_pos[self._node_set, :2]
-        self._candidate_dist = torch.cdist(candidate_xy, candidate_xy)
+        self._candidate_xy = self.raised_nodes.rest_pos[self._node_set, :2]
+        center_id = cloth_landmark_ids(env, asset_cfg)[CLOTH_CENTER_LANDMARK]
+        self._center_xy = self.raised_nodes.rest_pos[center_id, :2]
 
     @property
     def raised_node_ids(self) -> torch.Tensor:
-        """Nodes raised in the current episode of every environment, sorted, shape [num_envs, num_raised_nodes]."""
+        """Node raised in the current episode of every environment, shape [num_envs, 1]."""
         return self.raised_nodes.raised_node_ids
 
     @property
@@ -318,12 +320,13 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
         position_range: dict[str, tuple[float, float]],
         yaw_range: tuple[float, float],
         include_edge_nodes: bool,
-        num_raised_nodes: int,
         node_raise_height: float,
-        min_spacing: float = 0.03,
+        grasp_distance_range: tuple[float, float],
+        grasp_lateral_range: tuple[float, float] = (0.0, 0.0),
+        command_name: str = "cloth_target",
         asset_cfg: SceneEntityCfg = SceneEntityCfg("deformable"),
     ) -> None:
-        """Reset the cloth pose, draw the raised nodes and set the cloth rest shape around them.
+        """Reset the cloth pose, draw the target, raise the node towards it and set the cloth rest shape around it.
 
         Args:
             env: The environment instance.
@@ -332,44 +335,39 @@ class ResetClothWithRaisedNodes(ManagerTermBase):
             yaw_range: Bounds of the rotation about the vertical axis [rad].
             include_edge_nodes: Whether the nodes on the U's border may be raised too (:data:`edge_included`), or only
                 its interior (:data:`interior_nodes`).
-            num_raised_nodes: Number of nodes raised in every episode.
-            node_raise_height: Height of the raised nodes above the rest of the cloth [m].
-            min_spacing: Minimum planar distance between raised nodes in the rest mesh [m].
+            node_raise_height: Height of the raised node above the rest of the cloth [m].
+            grasp_distance_range: Bounds of the distance [m] from the central node towards the target, drawn per
+                episode.
+            grasp_lateral_range: Bounds of the offset [m] perpendicular to that line, drawn per episode.
+            command_name: Name of the :class:`~.commands.ClothTargetCommand` that receives the drawn targets.
             asset_cfg: Scene entity of the cloth.
         """
         cloth: DeformableObject = env.scene[asset_cfg.name]
-        raised = self._node_set[self._draw_spread(len(env_ids), num_raised_nodes, min_spacing)]
-        shaped = self.set_raised_nodes(env_ids, raised, node_raise_height)
+        command = env.command_manager.get_term(command_name)
+        robot: Articulation = env.scene[command.cfg.asset_name]
+        num, device = len(env_ids), env.device
+        yaw, offset = _draw_planar_pose(num, position_range, yaw_range, device)
+        targets_b = command.sample_targets(num)
+
+        # the targets in the cloth's rest frame: undo the robot root, the shift and the turn about the default center
+        targets_w = robot.data.root_pos_w.torch[env_ids] + quat_apply(robot.data.root_quat_w.torch[env_ids], targets_b)
+        default_center = cloth.data.default_nodal_state_w.torch[env_ids, :, :2].mean(dim=1)
+        targets_rest = _rotate_xy(targets_w[:, :2] - default_center - offset, -yaw.squeeze(1))
+        distance = sample_uniform(*grasp_distance_range, (num,), device=device)
+        lateral = sample_uniform(*grasp_lateral_range, (num,), device=device)
+        index = node_toward_target(self._candidate_xy, self._center_xy, targets_rest, distance, lateral)
+
+        shaped = self.set_raised_nodes(env_ids, self._node_set[index].unsqueeze(1), node_raise_height)
         displacement = shaped - self.raised_nodes.rest_pos
-        nodal_state = _planar_pose_nodal_state(cloth, env_ids, position_range, yaw_range, displacement)
+        nodal_state = _planar_pose_nodal_state(cloth, env_ids, yaw, offset, displacement)
         cloth.write_nodal_state_to_sim_index(nodal_state, env_ids=env_ids)
+        command.preset_targets(env_ids, targets_b)
 
     def set_raised_nodes(
         self, env_ids: torch.Tensor, raised: torch.Tensor, node_raise_height: float | None = None
     ) -> torch.Tensor:
         """Set the cloth rest shape around the given raised nodes, see :meth:`ClothRaisedNodes.set_raised_nodes`."""
         return self.raised_nodes.set_raised_nodes(env_ids, raised, node_raise_height)
-
-    def _draw_spread(self, num_envs: int, num_drawn: int, min_spacing: float) -> torch.Tensor:
-        """Draw ``num_drawn`` candidate indices per environment, at least ``min_spacing`` [m] apart where possible.
-
-        Candidates are visited in random order; the spacing is dropped for the rest if it cannot be met.
-
-        Returns:
-            Indices into the candidate nodes, sorted, shape [num_envs, num_drawn].
-        """
-        order = torch.rand(num_envs, len(self._node_set), device=self._node_set.device).argsort(dim=1)
-        rows = torch.arange(num_envs, device=order.device)
-        chosen = torch.zeros(num_envs, len(self._node_set), dtype=torch.bool, device=order.device)
-        blocked = torch.zeros_like(chosen)
-        for relax in (False, True):
-            for candidate in order.T:
-                take = (chosen.sum(dim=1) < num_drawn) & ~chosen[rows, candidate]
-                if not relax:
-                    take &= ~blocked[rows, candidate]
-                chosen[rows, candidate] |= take
-                blocked |= take.unsqueeze(1) & (self._candidate_dist[candidate] < min_spacing)
-        return chosen.nonzero()[:, 1].view(num_envs, num_drawn)
 
 
 def _cloth_elements_per_env(
@@ -436,11 +434,34 @@ def _triangle_rest_shapes(pos: torch.Tensor, tris: torch.Tensor) -> tuple[torch.
     return torch.linalg.inv(rest), torch.linalg.det(rest) / 2.0
 
 
+def _draw_planar_pose(
+    num: int, position_range: dict[str, tuple[float, float]], yaw_range: tuple[float, float], device: str
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Draw planar cloth poses: a yaw [rad], shape [num, 1], and a planar offset [m], shape [num, 2].
+
+    Args:
+        num: Number of poses.
+        position_range: Planar offset bounds [m] keyed by ``x`` and ``y``. Missing keys => no offset.
+        yaw_range: Bounds of the rotation about the vertical axis [rad].
+        device: Device of the returned tensors.
+    """
+    yaw = sample_uniform(yaw_range[0], yaw_range[1], (num, 1), device=device)
+    ranges = torch.tensor([position_range.get(key, (0.0, 0.0)) for key in ("x", "y")], device=device)
+    offset = sample_uniform(ranges[:, 0], ranges[:, 1], (num, 2), device=device)
+    return yaw, offset
+
+
+def _rotate_xy(xy: torch.Tensor, yaw: torch.Tensor) -> torch.Tensor:
+    """Rotate planar vectors [..., 2] by ``yaw`` [rad], broadcast over the leading dimensions."""
+    cos, sin = torch.cos(yaw), torch.sin(yaw)
+    return torch.stack([cos * xy[..., 0] - sin * xy[..., 1], sin * xy[..., 0] + cos * xy[..., 1]], dim=-1)
+
+
 def _planar_pose_nodal_state(
     cloth: DeformableObject,
     env_ids: torch.Tensor,
-    position_range: dict[str, tuple[float, float]],
-    yaw_range: tuple[float, float],
+    yaw: torch.Tensor,
+    offset: torch.Tensor,
     displacement: torch.Tensor | None = None,
 ) -> torch.Tensor:
     """Default nodal state, optionally displaced, turned about the cloth center and shifted in the plane.
@@ -448,30 +469,49 @@ def _planar_pose_nodal_state(
     Args:
         cloth: The cloth.
         env_ids: The environment indices.
-        position_range: Planar offset bounds [m] keyed by ``x`` and ``y``. Missing keys => no offset.
-        yaw_range: Bounds of the rotation about the vertical axis [rad].
+        yaw: Rotation about the vertical axis [rad], shape [len(env_ids), 1] (see :func:`_draw_planar_pose`).
+        offset: Planar offset [m], shape [len(env_ids), 2].
         displacement: Displacements of the default nodes before the turn [m], shape [len(env_ids), num_nodes, 3].
 
     Returns:
         Nodal state with zero velocities [m, m/s], shape [len(env_ids), num_nodes, 6].
     """
     nodal_state = cloth.data.default_nodal_state_w.torch[env_ids].clone()
-    device = nodal_state.device
-    num = len(env_ids)
-
-    yaw = sample_uniform(yaw_range[0], yaw_range[1], (num, 1), device=device)
-    cos, sin = torch.cos(yaw), torch.sin(yaw)
     center_xy = nodal_state[..., :2].mean(dim=1, keepdim=True)
     if displacement is not None:
         nodal_state[..., :3] += displacement
-    rel = nodal_state[..., :2] - center_xy
-    rotated = torch.stack([cos * rel[..., 0] - sin * rel[..., 1], sin * rel[..., 0] + cos * rel[..., 1]], dim=-1)
-
-    ranges = torch.tensor([position_range.get(key, (0.0, 0.0)) for key in ("x", "y")], device=device)
-    offset = sample_uniform(ranges[:, 0], ranges[:, 1], (num, 2), device=device)
+    rotated = _rotate_xy(nodal_state[..., :2] - center_xy, yaw)
     nodal_state[..., :2] = center_xy + rotated + offset.unsqueeze(1)
     nodal_state[..., 3:] = 0.0
     return nodal_state
+
+
+def node_toward_target(
+    candidate_xy: torch.Tensor,
+    center_xy: torch.Tensor,
+    target_xy: torch.Tensor,
+    distance: torch.Tensor,
+    lateral: torch.Tensor,
+) -> torch.Tensor:
+    """Pick the candidate node nearest a point on the way from the cloth center to the target.
+
+    The point lies ``distance`` from the center towards the target and ``lateral`` to the left of that line. All
+    positions are in one planar frame (e.g. the cloth's rest frame).
+
+    Args:
+        candidate_xy: Candidate node positions [m], shape [K, 2].
+        center_xy: Center (where the cube stands) [m], shape [N, 2] or [2].
+        target_xy: Targets [m], shape [N, 2].
+        distance: Distance along the line [m], shape [N].
+        lateral: Offset perpendicular to the line, positive to the left [m], shape [N].
+
+    Returns:
+        Indices into the candidates, shape [N].
+    """
+    direction = torch.nn.functional.normalize(target_xy - center_xy, dim=-1)
+    left = torch.stack([-direction[:, 1], direction[:, 0]], dim=-1)
+    point = center_xy + distance.unsqueeze(1) * direction + lateral.unsqueeze(1) * left
+    return torch.cdist(point, candidate_xy).argmin(dim=1)
 
 
 def _dihedral_angles(pos: torch.Tensor, quads: torch.Tensor) -> torch.Tensor:

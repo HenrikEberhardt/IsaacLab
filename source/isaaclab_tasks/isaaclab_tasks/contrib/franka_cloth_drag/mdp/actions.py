@@ -8,12 +8,14 @@
 from __future__ import annotations
 
 import math
+from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
 import torch
 
 import isaaclab.utils.math as math_utils
 from isaaclab.envs.mdp.actions.task_space_actions import DifferentialInverseKinematicsAction
+from isaaclab.utils.buffers import DelayBuffer
 
 from .frames import top_down_yaw
 
@@ -86,6 +88,14 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
         upper[:, -1] = upper[:, -1].clamp(max=cfg.wrist_joint_limits[1])
         self._joint_pos_limits = (lower, upper)
         self._joint_vel_limits = _commanded_joint_vel_limits(self._asset, self._joint_ids, cfg.joint_vel_factor)
+        # delay line of the commanded target pose (position, quaternion), advanced once per physics step
+        min_delay, max_delay = cfg.command_delay_range
+        if not 0 <= min_delay <= max_delay:
+            raise ValueError(f"Expected 0 <= min <= max in command_delay_range, got {cfg.command_delay_range}.")
+        self._command_delay = None
+        if max_delay > 0:
+            self._command_delay = DelayBuffer(max_delay, self.num_envs, self.device)
+            self._commanded_pose = torch.zeros(self.num_envs, 7, device=self.device)
 
     @property
     def action_dim(self) -> int:
@@ -118,9 +128,15 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
             ee_pos, ee_quat, ee_pos, _top_down_quat(yaw), rot_error_type="axis_angle"
         )
         self._ik_controller.set_command(torch.cat([self._processed_actions[:, :3], rotation], dim=-1), ee_pos, ee_quat)
+        if self._command_delay is not None:
+            self._commanded_pose[:] = torch.cat([self._ik_controller.ee_pos_des, self._ik_controller.ee_quat_des], -1)
 
     def apply_actions(self):
         """Uniformly scale the IK step to respect configured joint target and PD position-error bounds."""
+        if self._command_delay is not None:
+            delayed = self._command_delay.compute(self._commanded_pose)
+            self._ik_controller.ee_pos_des[:] = delayed[:, :3]
+            self._ik_controller.ee_quat_des[:] = delayed[:, 3:]
         ee_pos, ee_quat = self._compute_frame_pose()
         if (self._max_offset is None and self._pos_lower is None) or ee_quat.norm() == 0:
             super().apply_actions()
@@ -136,6 +152,25 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
             ratio = torch.maximum(ratio, step.abs() / room.clamp(min=1e-9))
         ratio = ratio.amax(dim=1, keepdim=True)
         self._asset.set_joint_position_target_index(target=joint_pos + step / ratio, joint_ids=self._joint_ids)
+
+    def reset(self, env_ids: Sequence[int] | None = None) -> None:
+        """Reset the raw actions, empty the delay line and draw new command delays."""
+        super().reset(env_ids)
+        if self._command_delay is None:
+            return
+        ids = torch.arange(self.num_envs, device=self.device)[slice(None) if env_ids is None else env_ids]
+        # an emptied delay line returns the newest command, so no target of the previous episode is applied
+        self._command_delay.reset(ids)
+        min_delay, max_delay = self.cfg.command_delay_range
+        lags = torch.randint(min_delay, max_delay + 1, (len(ids),), dtype=torch.int, device=self.device)
+        self._command_delay.set_time_lag(lags, ids)
+
+    @property
+    def command_delay(self) -> torch.Tensor:
+        """Delay of the IK target in physics steps, shape [num_envs]."""
+        if self._command_delay is None:
+            return torch.zeros(self.num_envs, dtype=torch.int, device=self.device)
+        return self._command_delay.time_lags
 
 
 class TopDownStabilizedDeltaEEAction(TopDownDeltaEEAction):

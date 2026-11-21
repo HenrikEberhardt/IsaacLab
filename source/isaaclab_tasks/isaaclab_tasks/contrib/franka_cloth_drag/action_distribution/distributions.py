@@ -37,8 +37,8 @@ class SigmoidBoundedGaussianDistribution(GaussianDistribution):
 
     The standard deviation is ``min + (max - min) * sigmoid(raw)`` of one learnable parameter per action dimension.
     Unlike a hard parameter clamp, the sigmoid keeps a gradient near either bound. ``std_range_per_dim`` and
-    ``init_std_per_dim`` give a dimension its own bounds and initial value, e.g. a lower ceiling for a gripper with
-    hysteresis.
+    ``init_std_per_dim`` give a dimension its own bounds and initial value, e.g. a lower ceiling for a binary gripper
+    command.
 
     With ``mean_bound_coef > 0``, every backward pass through the mean also descends the bounds loss
     ``mean_bound_coef * mean_batch(sum_actions(relu(|mean| - mean_bound) ** 2))`` (rl_games' ``bounds_loss_coef``).

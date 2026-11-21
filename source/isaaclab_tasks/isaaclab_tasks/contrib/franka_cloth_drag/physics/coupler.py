@@ -122,6 +122,8 @@ class NewtonClothDragCouplerManager(NewtonCouplerManager):
     * ``collision_filter_pairs``: shape pairs that never collide.
     * ``monitored_contacts``: per-world touch latch of shape pairs, see :meth:`contact_latch`.
     * :meth:`get_cloth_rest` / :meth:`set_cloth_rest`: read and change the cloth rest shape at runtime.
+    * :meth:`get_cloth_material` / :meth:`set_cloth_material` and :meth:`find_shapes` / :meth:`get_shape_friction` /
+      :meth:`set_shape_friction`: per-environment cloth material and contact friction, for domain randomization.
     """
 
     _vbd_articulation_mask: wp.array | None = None
@@ -327,6 +329,79 @@ class NewtonClothDragCouplerManager(NewtonCouplerManager):
                 raise RuntimeError(f"Solver view '{entry.view.name}' does not hold every model element of '{name}'.")
             arrays[array.ptr] = array
         return list(arrays.values())
+
+    CLOTH_MATERIAL_ARRAYS = ("particle_mass", "particle_inv_mass", "tri_materials", "edge_bending_properties")
+    """Cloth material arrays of the model that :meth:`get_cloth_material` and :meth:`set_cloth_material` handle."""
+
+    @classmethod
+    def get_cloth_material(cls, name: str, ids: torch.Tensor) -> torch.Tensor:
+        """Return a copy of the model's material values ``name`` of the given particle, triangle or edge ids."""
+        if name not in cls.CLOTH_MATERIAL_ARRAYS:
+            raise ValueError(f"Unknown cloth material array '{name}', expected one of {cls.CLOTH_MATERIAL_ARRAYS}.")
+        return wp.to_torch(getattr(NewtonManager._model, name))[ids].clone()
+
+    @classmethod
+    def set_cloth_material(cls, name: str, ids: torch.Tensor, values: torch.Tensor) -> None:
+        """Write the material values ``name`` of the given model ids into the model and every particle-owning view.
+
+        Newton has no change notification for these arrays and each solver view holds its own copy, so every copy is
+        written. Particle arrays are written at each view's local particle ids. The inverse masses of free particles
+        are rewritten every step by the cloth asset from its own defaults, which the caller must update as well.
+        """
+        if name not in cls.CLOTH_MATERIAL_ARRAYS:
+            raise ValueError(f"Unknown cloth material array '{name}', expected one of {cls.CLOTH_MATERIAL_ARRAYS}.")
+        model_array = getattr(NewtonManager._model, name)
+        wp.to_torch(model_array)[ids] = values
+        written = {model_array.ptr}
+        for entry in cls._particle_entries:
+            array = getattr(entry.view, name)
+            if array.ptr in written:
+                continue
+            written.add(array.ptr)
+            if name.startswith("particle_"):
+                local_ids = wp.to_torch(entry.particle_global_to_local)[ids].long()
+            elif array.shape == model_array.shape:
+                local_ids = ids
+            else:
+                raise RuntimeError(f"Solver view '{entry.view.name}' does not hold every model element of '{name}'.")
+            wp.to_torch(array)[local_ids] = values
+
+    @classmethod
+    def find_shapes(cls, pattern: str) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the model ids and environments of the shapes whose label, or whose body's label, matches ``pattern``.
+
+        Raises:
+            ValueError: If no shape matches.
+        """
+        model = NewtonManager._model
+        shapes = _shapes_matching(pattern, model.shape_label, model.shape_body.numpy(), model.body_label)
+        if len(shapes) == 0:
+            raise ValueError(f"The shape pattern {pattern!r} matches no shape.")
+        shape_world = wp.to_torch(model.shape_world)
+        ids = torch.as_tensor(shapes, device=shape_world.device)
+        return ids, shape_world[ids].long()
+
+    @classmethod
+    def get_shape_friction(cls, ids: torch.Tensor) -> torch.Tensor:
+        """Return a copy of the model's friction coefficients of the given shape ids."""
+        return wp.to_torch(NewtonManager._model.shape_material_mu)[ids].clone()
+
+    @classmethod
+    def set_shape_friction(cls, ids: torch.Tensor, values: torch.Tensor) -> None:
+        """Write the friction coefficients of the given shape ids into the model and every solver view.
+
+        The views index shapes like the model. Unlike a ``SHAPE_PROPERTIES`` notification, this leaves the views' shape
+        flags alone, where :meth:`set_proxy_particle_contacts` turns the gripper-cloth contacts off.
+        """
+        model_array = NewtonManager._model.shape_material_mu
+        arrays = {model_array.ptr: model_array}
+        for entry in NewtonManager._solver._entries.values():
+            array = entry.view.shape_material_mu
+            if array.shape != model_array.shape:
+                raise RuntimeError(f"Solver view '{entry.view.name}' does not hold every model shape.")
+            arrays[array.ptr] = array
+        for array in arrays.values():
+            wp.to_torch(array)[ids] = values
 
     @classmethod
     def _solver_specific_clear(cls) -> None:
