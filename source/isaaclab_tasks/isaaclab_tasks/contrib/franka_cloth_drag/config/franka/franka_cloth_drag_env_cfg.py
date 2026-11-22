@@ -27,6 +27,7 @@ from isaaclab.assets import ArticulationCfg, AssetBaseCfg, RigidObjectCfg
 from isaaclab.assets.deformable_object import DeformableObjectCfg
 from isaaclab.controllers import DifferentialIKControllerCfg
 from isaaclab.envs import ManagerBasedRLEnvCfg
+from isaaclab.managers import CurriculumTermCfg as CurrTerm
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
 from isaaclab.managers import ObservationTermCfg as ObsTerm
@@ -58,19 +59,10 @@ from ...constrained_gripper.robotiq import (
 )
 from ...physics import ClothDragCouplerCfg
 
-##
-#################### Pre-defined configs ####################
-##
-
 # Blender cloth meshes
 CLOTH_MESH_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "..", "assets", "cloth20")
 
-##
-#################### Physics ####################
-##
-
-# Robotiq 2F-85 bodies with colliders, as the labels of their prims. The outer knuckles carry none: the outer-finger
-# box encloses them (fixed joint).
+# Robotiq 2F-85 Gripper
 ROBOTIQ_BODIES = (
     r"/World/envs/env_[^/]+/Robot/Geometry/.*/Robotiq/"
     r"(base_link|(left|right)_(inner_finger|outer_finger|inner_knuckle))"
@@ -89,9 +81,9 @@ class PhysicsCfg(NewtonCfg):
                     solver="newton",
                     integrator="implicitfast",
                     use_mujoco_contacts=True,
-                    cone="elliptic",  # shape of the friction cone
+                    cone="elliptic",
                     iterations=100,
-                    ls_iterations=30,  # LS iterations of constraint solver
+                    ls_iterations=30,
                 ),
                 bodies=[r"/World/envs/env_[^/]+/Robot"],
             ),
@@ -100,14 +92,14 @@ class PhysicsCfg(NewtonCfg):
                 solver_cfg=VBDSolverCfg(
                     iterations=10,
                     particle_enable_self_contact=False,
-                    rigid_compliant_alm=True,  # AVBD for rigid-rigid contacts
-                    rigid_body_particle_contact_buffer_size=1024,  # rigid-soft
-                    rigid_body_contact_buffer_size=64,  # rigid-rigid
-                    friction_epsilon=1.0e-2,  # dynamic-static friction threshold
+                    rigid_compliant_alm=True,
+                    rigid_body_particle_contact_buffer_size=1024, # rigid-soft
+                    rigid_body_contact_buffer_size=64, # rigid-rigid
+                    friction_epsilon=1.0e-2, # dynamic-static friction threshold
                 ),
-                bodies=[r"/World/envs/env_[^/]+/Cube"],  # Include Cube
+                bodies=[r"/World/envs/env_[^/]+/Cube"], # Include Cube
                 all_particles=True,
-                include_static_shapes=True,  # Include Table
+                include_static_shapes=True, # Include Table
             ),
         ],
         proxies=[
@@ -115,19 +107,17 @@ class PhysicsCfg(NewtonCfg):
                 source="rigid",
                 destination="soft",
                 mode="lagged",
-                bodies=[ROBOTIQ_BODIES],  # the gripper collides with the cloth, the arm does not
-                collide_interval=1,  # Compute collision with proxy at every step
+                bodies=[ROBOTIQ_BODIES],  # only the gripper colliders
+                collide_interval=1, 
                 collision_pipeline=NewtonCollisionPipelineCfg(
                     enable_rigid_soft_full_surface_contact=True,
                 ),
                 mass_scale=5.0,
             )
         ],
-        iterations=1,  # Solve coupling once per step
-        # No Cube-Tablecollision
-        collision_filter_pairs=[(r"/World/envs/env_[^/]+/Cube", r"/World/envs/env_[^/]+/Table(/.*)?")],
-        # Monitor Franka-Cube Contacts
-        monitored_contacts={
+        iterations=1,
+        collision_filter_pairs=[(r"/World/envs/env_[^/]+/Cube", r"/World/envs/env_[^/]+/Table(/.*)?")], # No Cube-Tablecollision
+        monitored_contacts={ # Monitor Franka-Cube Contacts
             "gripper_cube": (
                 ROBOTIQ_BODIES,
                 r"/World/envs/env_[^/]+/Cube",
@@ -136,12 +126,11 @@ class PhysicsCfg(NewtonCfg):
         contact_touch_tolerance=1.0e-3,
     )
     soft_contact_cfg = NewtonSoftContactCfg(
-        soft_contact_ke=8.0e3,  # stiffness, higher less penetration but more unstable
-        soft_contact_kd=1.0,  # contact damping, higher more stable but slower response
+        soft_contact_ke=8.0e3,
+        soft_contact_kd=1.0,
         soft_contact_mu=1.5,
     )
     num_substeps = 2
-
     solver_cfg.proxies[0].proxy_relaxation = 0.5
 
 
@@ -210,11 +199,11 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             physics_material=NewtonSurfaceDeformableBodyMaterialCfg(
                 density=0.2,  # areal density [kg/m^2]
                 particle_radius=0.002,
-                tri_ke=1e2,  # 5e2
-                tri_ka=2e3,  # 5e2
-                tri_kd=1e-3,  # 1e-3
-                edge_ke=0.7,  # 1.0
-                edge_kd=1e-3,  # 1e-3
+                tri_ke=1e2, 
+                tri_ka=2e3, 
+                tri_kd=1e-3,
+                edge_ke=0.7,
+                edge_kd=1e-3,
             ),
         ),
     )
@@ -227,7 +216,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
             size=(0.04, 0.04, 0.04),  # [m]
             visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.3, 0.9)),
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
-            mass_props=sim_utils.MassPropertiesCfg(mass=0.1),  # [kg]
+            mass_props=sim_utils.MassPropertiesCfg(mass=0.1), # [kg]
             collision_props=sim_utils.CollisionPropertiesCfg(),
             physics_material=RigidBodyMaterialBaseCfg(
                 dynamic_friction=1.5,  # Total friction: sqrt(contact_proxy_mu * cube_mu)
@@ -240,10 +229,10 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         prim_path="{ENV_REGEX_NS}/Table",
         init_state=AssetBaseCfg.InitialStateCfg(pos=[0.55, 0.0, -0.02]),
         spawn=sim_utils.CuboidCfg(
-            size=(1.4, 0.8, 0.04),  # [m]
+            size=(1.4, 0.8, 0.04), # [m]
             collision_props=sim_utils.CollisionPropertiesCfg(),
             physics_material=RigidBodyMaterialBaseCfg(
-                dynamic_friction=0.20,  # Total friction: sqrt(contact_proxy_mu * table_mu)
+                dynamic_friction=0.20, # Total friction: sqrt(contact_proxy_mu * table_mu)
             ),
         ),
     )
@@ -332,15 +321,11 @@ class ActionsCfg:
         controller=DifferentialIKControllerCfg(
             command_type="pose",
             use_relative_mode=True,
-            ik_method="dls",  # dampled least squares => stable around singularities
+            ik_method="dls",  # dampled least squares
             ik_params={"lambda_val": 0.1},
         ),
-        # Ensure controller respects joint range and velocity limits
         scale_trans=(0.015, 0.015, 0.015),  # [m] per action step (dx, dy, dz)
-        scale_rot=0.2,
-        limit_operation_space=True,
-        joint_vel_factor=0.9,  # reduce joint veloctiy by [factor] of hardware max
-        joint_range_margin=0.05,  # reduce joint range by 0.05 [rad] of hardware max
+        scale_rot=0.2,  # [rad] per action step (dyaw)
         command_delay_range=(0, 4),  # IK target latency steps at 120 Hz
     )
 
@@ -358,16 +343,17 @@ class ActorObsCfg(ObsGroup):
     joint_velocities = ObsTerm(
         func=mdp.joint_vel_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
     )
-    ee_pose = ObsTerm(func=mdp.ee_pose_b)
+    ee_pose = ObsTerm(
+        func=mdp.ee_pose_b, params={"ee_frame_cfg": SceneEntityCfg("ee_frame"), "robot_cfg": SceneEntityCfg("robot")}
+    )
     ee_velocity = ObsTerm(
         func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")}
     )
-    # Randomize gripper width to avoid detecting grasp based on finger pad width
     gripper_finger_width = ObsTerm(
         func=mdp.gripper_width,
-        noise=NoiseModelWithAdditiveBiasCfg(
-            noise_cfg=GaussianNoiseCfg(std=0.0004),  # [m] Robotiq position resolution
-            bias_noise_cfg=UniformNoiseCfg(n_min=-0.005, n_max=0.005, operation="abs"),  # [m] offset per episode
+        noise=NoiseModelWithAdditiveBiasCfg( # Randomize gripper width
+            noise_cfg=GaussianNoiseCfg(std=0.0004),
+            bias_noise_cfg=UniformNoiseCfg(n_min=-0.005, n_max=0.005, operation="abs"), 
         ),
     )
     last_action = ObsTerm(
@@ -381,9 +367,9 @@ class ActorObsCfg(ObsGroup):
         params={"num_random_nodes": 18, "command_name": "cloth_target"},
         noise=mdp.ClothPointsNoiseModelCfg(
             num_raised=1,
-            cloth_offset_range=(-0.003, 0.003),  # [m] per episode, all points
-            raised_offset_range=(-0.004, 0.004),  # [m] per episode, raised nodes
-            raised_noise_std=0.0025,  # [m] per frame, raised nodes
+            cloth_offset_range=(-0.003, 0.003),
+            raised_offset_range=(-0.004, 0.004),
+            raised_noise_std=0.0025,
         ),
     )
     # Cube Postion
@@ -422,25 +408,35 @@ class CriticObsCfg(ObsGroup):
     joint_velocities = ObsTerm(
         func=mdp.joint_vel_rel, params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])}
     )
-    ee_pose = ObsTerm(func=mdp.ee_pose_b)
+    ee_pose = ObsTerm(
+        func=mdp.ee_pose_b, params={"ee_frame_cfg": SceneEntityCfg("ee_frame"), "robot_cfg": SceneEntityCfg("robot")}
+    )
     ee_velocity = ObsTerm(
         func=mdp.ee_velocity_b, params={"hand_cfg": SceneEntityCfg("robot", body_names="base_link")}
     )
-    gripper_finger_width = ObsTerm(func=mdp.gripper_width)
+    gripper_finger_width = ObsTerm(
+        func=mdp.gripper_width
+    )
+    gripper_force = ObsTerm(
+        func=mdp.gripper_force
+    )
     last_action = ObsTerm(
         func=mdp.last_action
         )
 
     # ---------- Exteroception ----------
-    cloth_nodal_pos = ObsTerm(func=mdp.cloth_nodal_pos_b)
-    cloth_nodal_vel = ObsTerm(func=mdp.cloth_nodal_vel_b)
+    cloth_nodal_pos = ObsTerm(
+        func=mdp.cloth_nodal_pos_b
+    )
+    cloth_nodal_vel = ObsTerm(
+        func=mdp.cloth_nodal_vel_b
+    )
     grasp_node_pos = ObsTerm(
         func=mdp.grasp_node_pos_b, params={"command_name": "cloth_target"}
         )
     cloth_center_pos = ObsTerm(
         func=mdp.cloth_center_pos_b
     )
-    
     cube_pose = ObsTerm(
         func=mdp.object_pose_b, params={"asset_cfg": SceneEntityCfg("cube")}
         )
@@ -475,7 +471,7 @@ class CriticObsCfg(ObsGroup):
     grasp_node_capturable = ObsTerm(func=mdp.grasp_node_capturable)
     grasp_tried = ObsTerm(func=mdp.grasp_tried)
 
-    # Values of cube mass, cloth density and bending, cloth-table and cloth-cube friction
+    # Cube mass, Cloth parameters and all Friciton values
     domain_randomization = ObsTerm(func=mdp.domain_randomization_params)
 
     def __post_init__(self) -> None:
@@ -530,6 +526,8 @@ FRONTIER_SAMPLER_CFG = reset_strategies.FrontierSamplerCfg(
     kappa=1.0,  # small kappa = uniform, large = focus near target_success
     temperature=2.0,
     epsilon=1.0e-4,  # ensure 0 and 1 probability can also be drawn
+
+    # Advanced Sampling
     min_history=2,
     coverage_mix_max=0.25,
     coverage_mix_min=0.02,
@@ -637,12 +635,13 @@ class DefaultResetsCfg(DomainRandomizationCfg):
         params={
             # Cloth position and orientation
             "position_range": {"x": (-0.03, 0.03), "y": (-0.05, 0.05)},
-            "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),  # symmetrie covers all angles
-            # One raised node between the cube and the target, where the real lower-and-squeeze grasp happens
+            "yaw_range": (-0.25 * math.pi, 0.25 * math.pi),  # symmetrie 
+
+            # Raised Node
             "include_edge_nodes": False,
             "node_raise_height": 0.01,  # height above the table [m]
-            "grasp_distance_range": (0.08, 0.10),  # [m] from the cube towards the target, per episode
-            "grasp_lateral_range": (-0.01, 0.01),  # [m] sideways from that line, per episode
+            "grasp_distance_range": (0.08, 0.10),  # [m] from the cube towards the target
+            "grasp_lateral_range": (-0.01, 0.01),  # [m] sideways from that line
             "asset_cfg": SceneEntityCfg("deformable"),
         },
     )
@@ -665,10 +664,11 @@ class UniformResetsCfg(DomainRandomizationCfg):
     """Bank resets using fixed configured ratios between start stages."""
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_v13_one_raised_node.pt",  # approach 8000, grasp 1000, drag 100, goal 100
-        # one raised node between cube and target; later settings changes that leave the stored states valid pass
+        bank_path="logs/reset_banks/bank_v13_one_raised_node.pt",
         allow_settings_mismatch=True,
         start_stage_ratios={"approach": 0.30, "grasp": 0.45, "drag": 0.15, "goal": 0.10},
+
+        # Frontier Sampling
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
     )
@@ -679,15 +679,16 @@ class AdaptiveResetsCfg(DomainRandomizationCfg):
     """Bank resets whose start-stage ratios adapt to training success."""
 
     reset_from_bank = reset_strategies.ResetFromBankCfg(
-        bank_path="logs/reset_banks/bank_v13_one_raised_node.pt",  # approach 8000, grasp 1000, drag 100, goal 100
-        # one raised node between cube and target; later settings changes that leave the stored states valid pass
+        bank_path="logs/reset_banks/bank_v13_one_raised_node.pt",
         allow_settings_mismatch=True,
         start_stage_ratios={"approach": 0.35, "grasp": 0.45, "drag": 0.10, "goal": 0.10},
         min_stage_ratios={"grasp": 0.10, "drag": 0.01, "goal": 0.01},
+        
         # Ratio Changing Variables
         ratio_shift_success_range=(0.775, 0.95),
         ratio_max_shift_per_step=0.0016,
         ratio_hold_steps=300,
+
         # Frontier Sampling
         use_frontier_sampling=False,
         frontier_sampling_parameters=FRONTIER_SAMPLER_CFG,
@@ -778,31 +779,58 @@ class RewardsCfg:
         func=mdp.cloth_drag_termination_penalty,
         params={
             "term_keys": [
-                "cloth_out_of_bounds",
+                "cloth_off_table",
                 "ee_below_table",
-                "cube_fell",
+                "cube_off_cloth",
                 "gripper_cube_contact",
                 "nonfinite_state",
-                "joint_vel_out_of_limit",
+                "gripper_force_limit",
+                "joint_velocity_limit",
+                "joint_range_limit",
             ]
         },
         weight=-75.0,
     )
 
-    # -------------- Action Penalties --------------
-    # Smooth action magnitude to avoid action clipping
-    pen_action_magnitude = RewTerm(func=mdp.action_term_l2, params={"action_name": "arm_action"}, weight=-5e-1)
-    # Penalty on action rate to avoid jerky motion
-    pen_action_rate = RewTerm(func=mdp.action_term_rate_l2, params={"action_name": "arm_action"}, weight=-1e-1)
-    # Penalty for exceeding joint limits on position and veloctiy
-    pen_joint_limit_barrier = RewTerm(
-        func=mdp.joint_limit_barrier,
+    # -------------- Table Hitting --------------
+    # off until the curriculum gate opens
+    pen_gripper_force = RewTerm(
+        func=mdp.gripper_force_penalty, 
+        params={"min_force": 5.0}, 
+        weight=0.0
+    )
+
+    # -------------- Joint Limits --------------
+    # Squared bands up to the joint_velocity_limit and joint_range_limit terminations
+    pen_joint_speed = RewTerm(
+        func=mdp.joint_speed_penalty,
         params={
-            "action_name": "arm_action",
-            "margin": 0.1,
+            "min_fraction": 0.5,
+            "max_fraction": 0.6,
             "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
         },
-        weight=-10.0,
+        weight=-25.0,
+    )
+    pen_joint_range = RewTerm(
+        func=mdp.joint_range_penalty,
+        params={
+            "min_room": 0.05,  # [rad]
+            "max_room": 0.10,  # [rad]
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"]),
+        },
+        weight=-25.0,
+    )
+
+    # -------------- Action Penalties --------------
+    pen_action_magnitude = RewTerm(
+        func=mdp.action_term_l2, 
+        params={"action_name": "arm_action"}, 
+        weight=-5e-1
+    )
+    pen_action_rate = RewTerm(
+        func=mdp.action_term_rate_l2, 
+        params={"action_name": "arm_action"}, 
+        weight=-1e-1
     )
 
 
@@ -810,56 +838,63 @@ class RewardsCfg:
 class TerminationsCfg:
     """Termination terms for the MDP."""
 
-    # -------- Task Success --------
-    success = DoneTerm(func=mdp.cloth_drag_success)
-
-    # -------- Task Failure --------
-    # Episode timeout
-    time_out = DoneTerm(func=mdp.time_out, time_out=True)
-
-    # Grasp bank starts end as a truncation (value bootstrapped) once they lock a raised node (reach DRAG)
+    task_success = DoneTerm(func=mdp.cloth_drag_success)
+    task_timeout = DoneTerm(func=mdp.time_out, time_out=True)
+    nonfinite_state = DoneTerm(func=mdp.nonfinite_state)
+    cloth_off_table = DoneTerm(
+        func=mdp.deformable_outside_bounds,
+        params={"x_bounds": (-0.15, 1.25), "y_bounds": (-0.40, 0.40), "z_bounds": (-0.02, 1.0)},  # [m]
+    )
+    cube_off_cloth = DoneTerm(
+        func=mdp.root_height_below_minimum, 
+        params={"minimum_height": -0.1, "asset_cfg": SceneEntityCfg("cube")}  # [m]
+    )
+    gripper_cube_contact = DoneTerm(
+        func=mdp.physics_contact, 
+        params={"contact_name": "gripper_cube"})
+    gripper_force_limit = DoneTerm(
+        func=mdp.GripperForceLimit,
+        params={
+            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"], body_names="base_link"),
+            "max_force": math.inf,  # [N]
+            "all_axes": True,
+        },
+    )
+    ee_below_table = DoneTerm(
+        func=mdp.gripper_below_table, 
+        params={"max_penetration": 0.005}  # [m]
+    ) 
+    joint_velocity_limit = DoneTerm(
+        func=mdp.joint_speed_exceeded,
+        params={"max_fraction": 0.6, "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
+    )
+    joint_range_limit = DoneTerm(
+        func=mdp.joint_near_range_limit,
+        params={"margin": 0.05, "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},  # [rad]
+    )
+    # TODO: delete bank_start_advanced
     bank_start_advanced = DoneTerm(
         func=mdp.bank_start_advanced, params={"start_stages": ("grasp",), "steps_after_entry": 0}, time_out=True
     )
 
-    # Cloth fallen of table
-    cloth_out_of_bounds = DoneTerm(
-        func=mdp.deformable_outside_bounds,
+
+@configclass
+class CurriculumCfg:
+    """Curriculum to reduce force of gripper on the table"""
+
+    avoid_table_collision = CurrTerm(
+        func=mdp.AvoidTableCollisionCurriculum,
         params={
-            "x_bounds": (-0.15, 1.25),  # [m] table edges
-            "y_bounds": (-0.40, 0.40),  # [m] table edges
-            "z_bounds": (-0.02, 1.0),
-            "asset_cfg": SceneEntityCfg("deformable"),
+            "thresholds": (0.80, 0.90),
+            "dwell_iterations": 10,
+            "length_iterations": 100,  # from start to final values
+            "termination_force": (40.0, 20.0),
+            "final_values": {
+                "pen_gripper_force": -2.0,  # reward weight
+                "scale_z": 0.005,  # [m] z step of the arm action
+            },
         },
     )
-
-    # If robot reaches to far below the table (relevant with joint delta actions)
-    ee_below_table = DoneTerm(
-        func=mdp.ee_below_minimum,
-        params={"minimum_height": -0.1, "ee_frame_cfg": SceneEntityCfg("ee_frame")},
-    )
-
-    # Cube left the cloth (fallen through the table)
-    cube_fell = DoneTerm(
-        func=mdp.root_height_below_minimum, params={"minimum_height": -0.1, "asset_cfg": SceneEntityCfg("cube")}
-    )
-
-    # Gripper (hand or fingers) touched the cube, from the solver contacts after every physics substep
-    gripper_cube_contact = DoneTerm(func=mdp.physics_contact, params={"contact_name": "gripper_cube"})
-
-    # Physics blow-up that ended in NaN or Inf, which every threshold check above misses
-    nonfinite_state = DoneTerm(func=mdp.nonfinite_state)
-
-    # Termination if joints exceed their limits (gripper is excluded)
-    joint_vel_out_of_limit = DoneTerm(
-        func=mdp.joint_vel_out_of_sim_limit,
-        params={"asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},
-    )
-
-
-##
-# Environment configuration
-##
 
 
 @configclass
@@ -876,6 +911,7 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
     rewards: RewardsCfg = RewardsCfg()
     terminations: TerminationsCfg = TerminationsCfg()
     events: ResetStrategiesCfg = ResetStrategiesCfg()
+    curriculum: CurriculumCfg = CurriculumCfg()
 
     def __post_init__(self) -> None:
         # Simulation settings
@@ -896,3 +932,6 @@ class FrankaClothDragEnvCfg(ManagerBasedRLEnvCfg):
 
         # Reset Strategie settings
         self.events = DefaultResetsCfg()
+
+        # Play with full curriculum progress
+        self.curriculum.avoid_table_collision.params["initial_progress"] = 1.0
