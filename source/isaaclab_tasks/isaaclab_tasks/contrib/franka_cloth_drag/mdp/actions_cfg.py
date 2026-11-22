@@ -38,18 +38,6 @@ class TopDownDeltaEEActionCfg(DifferentialInverseKinematicsActionCfg):
     wrist_joint_limits: tuple[float, float] = (-2.0 * math.pi / 3.0, 2.0 * math.pi / 3.0)
     """Range of the wrist joint, in [rad]. ±120° to include overlap. Inside the hardware range (±166°)."""
 
-    limit_operation_space: bool = False
-    """Whether to clamp commanded EE positions to the workspace planes below."""
-
-    x_limits: tuple[float, float] = (0.30, 0.80)
-    """Planes towards and away from the robot base: end-effector x-range [m]."""
-
-    y_limits: tuple[float, float] = (-0.40, 0.40)
-    """Planes at the table sides: end-effector y-range [m]."""
-
-    z_min: float = 0.0193
-    """lowest end-effector height [m]. No target below table."""
-
     joint_vel_factor: float | None = None
     """Velocity-limit fraction used to cap PD position error by uniformly scaling the IK step."""
 

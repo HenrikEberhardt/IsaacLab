@@ -58,7 +58,7 @@ class ResetStateValidator:
         self.command = env.command_manager.get_term("cloth_target")
         self.gripper = env.action_manager.get_term("gripper_action")
         self.failure_terms = [
-            name for name in env.termination_manager.active_terms if name not in ("success", "time_out")
+            name for name in env.termination_manager.active_terms if name not in ("task_success", "task_timeout")
         ]
         self.reasons = [
             "restore_mismatch",
@@ -127,8 +127,8 @@ class ResetStateValidator:
             self._reject(self.alive & manager.get_term(name)[ids], f"termination:{name}")
         self._reject(self.alive & truncated[ids], "time_out")
         self._check_ee_down("ee_not_down_hold")
-        if "success" in manager.active_terms:
-            success = self.alive & manager.get_term("success")[ids] & (self.reason == 0)
+        if "task_success" in manager.active_terms:
+            success = self.alive & manager.get_term("task_success")[ids] & (self.reason == 0)
             late = self.start_stage >= START_STAGE_NAMES.index("drag")
             self.ended_ok |= success & late
             self._reject(success & ~late, "success_early")

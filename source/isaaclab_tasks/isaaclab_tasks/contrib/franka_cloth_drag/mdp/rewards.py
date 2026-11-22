@@ -825,7 +825,7 @@ class StageProgress(ManagerTermBase):
         return reward
 
 
-def cloth_drag_success_bonus(env: ManagerBasedRLEnv, termination_name: str = "success") -> torch.Tensor:
+def cloth_drag_success_bonus(env: ManagerBasedRLEnv, termination_name: str = "task_success") -> torch.Tensor:
     """Pay one on successful termination, compensating for reward-manager time integration."""
     return env.termination_manager.get_term(termination_name).float() / env.step_dt
 
@@ -844,6 +844,76 @@ def cloth_drag_termination_penalty(env: ManagerBasedRLEnv, term_keys: Sequence[s
     for name in term_keys:
         terminated |= env.termination_manager.get_term(name)
     return terminated.float() / env.step_dt
+
+
+def gripper_force_penalty(
+    env: ManagerBasedRLEnv, min_force: float = 5.0, termination_name: str = "gripper_force_limit"
+) -> torch.Tensor:
+    """Return the external force on the gripper beyond ``min_force`` [N]; lighter contact is free.
+
+    Reads the estimate of the :class:`~.terminations.GripperForceLimit` term ``termination_name``, which the
+    termination manager computes before the rewards. Use a negative weight.
+
+    Args:
+        env: The environment.
+        min_force: Force that costs nothing [N].
+        termination_name: Name of the :class:`~.terminations.GripperForceLimit` termination term.
+    """
+    return (env.termination_manager.get_term_cfg(termination_name).func.force - min_force).clamp(min=0.0)
+
+
+def joint_speed_penalty(
+    env: ManagerBasedRLEnv, min_fraction: float, max_fraction: float, asset_cfg: SceneEntityCfg, skip_steps: int = 3
+) -> torch.Tensor:
+    """Return a squared band penalty on the joint speeds between ``min_fraction`` and ``max_fraction`` of the velocity
+    limits. Use a negative weight.
+
+    Per joint ``clamp((|qd| / qd_max - min_fraction) / (max_fraction - min_fraction), 0, 1) ** 2``, summed over the
+    joints: zero up to ``min_fraction``, one per joint at ``max_fraction``, where
+    :func:`~.terminations.joint_speed_exceeded` ends the episode. Zero in the first ``skip_steps`` policy steps of an
+    episode, whose velocities come from the reset.
+
+    Args:
+        env: The environment.
+        min_fraction: Fraction of the joint velocity limits where the penalty starts.
+        max_fraction: Fraction of the joint velocity limits where the penalty reaches one.
+        asset_cfg: The robot and the penalized joints (the arm, not the gripper).
+        skip_steps: Policy steps after a reset without the penalty.
+    """
+    if max_fraction <= min_fraction:
+        raise ValueError(f"max_fraction must exceed min_fraction, got {min_fraction} and {max_fraction}.")
+    robot: Articulation = env.scene[asset_cfg.name]
+    fraction = robot.data.joint_vel.torch[:, asset_cfg.joint_ids].abs() / robot.data.joint_vel_limits.torch[
+        :, asset_cfg.joint_ids
+    ]
+    ramp = ((fraction - min_fraction) / (max_fraction - min_fraction)).clamp(0.0, 1.0)
+    penalty = torch.nan_to_num(ramp.square().sum(dim=1), nan=0.0, posinf=0.0, neginf=0.0)
+    return penalty * (env.episode_length_buf >= skip_steps)
+
+
+def joint_range_penalty(
+    env: ManagerBasedRLEnv, min_room: float, max_room: float, asset_cfg: SceneEntityCfg
+) -> torch.Tensor:
+    """Return a squared band penalty on the joints' distance to their hardware range. Use a negative weight.
+
+    Per joint ``clamp((max_room - room) / (max_room - min_room), 0, 1) ** 2``, summed over the joints, where ``room``
+    is the distance to the nearer hardware limit: zero with ``max_room`` of room, one per joint at ``min_room``, where
+    :func:`~.terminations.joint_near_range_limit` ends the episode.
+
+    Args:
+        env: The environment.
+        min_room: Distance to the limit where the penalty reaches one [rad].
+        max_room: Distance to the limit where the penalty starts [rad].
+        asset_cfg: The robot and the penalized joints (the arm, not the gripper).
+    """
+    if max_room <= min_room:
+        raise ValueError(f"max_room must exceed min_room, got {min_room} and {max_room}.")
+    robot: Articulation = env.scene[asset_cfg.name]
+    joint_pos = robot.data.joint_pos.torch[:, asset_cfg.joint_ids]
+    limits = robot.data.joint_pos_limits.torch[:, asset_cfg.joint_ids]
+    room = torch.minimum(joint_pos - limits[..., 0], limits[..., 1] - joint_pos)
+    ramp = ((max_room - room) / (max_room - min_room)).clamp(0.0, 1.0)
+    return torch.nan_to_num(ramp.square().sum(dim=1), nan=0.0, posinf=0.0, neginf=0.0)
 
 
 def cloth_held(env: ManagerBasedRLEnv, stages: Sequence[str], command_name: str = "cloth_target") -> torch.Tensor:

@@ -76,6 +76,9 @@ ROBOTIQ_PAD_WIDTH = 0.022
 ROBOTIQ_PAD_LENGTH = 0.038
 """Length [m] of the physical finger pad, along the EE frame's z-axis."""
 
+ROBOTIQ_PAD_THICKNESS = 0.0065
+"""Thickness [m] of the physical finger pad, along the EE frame's y-axis (the closing direction)."""
+
 ROBOTIQ_GAP_CURVE = (0.0127769, 0.1143161, -0.7077544)
 """``(a, b, c)`` of the gap between the pads' inner faces, ``a - b * sin(q + c)`` [m], over ``finger_joint`` ``q``
 [rad]: the parallel linkage moves the pads on a circle. Fitted to the pad hulls under the asset's forward kinematics

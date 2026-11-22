@@ -64,7 +64,7 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
     cfg: TopDownDeltaEEActionCfg
 
     def __init__(self, cfg: TopDownDeltaEEActionCfg, env: ManagerBasedEnv):
-        """Resolve the EE frame and initialize workspace, yaw and joint target bounds."""
+        """Resolve the EE frame and initialize yaw and joint target bounds."""
         if cfg.controller.command_type != "pose" or not cfg.controller.use_relative_mode:
             raise ValueError("TopDownDeltaEEAction needs an IK controller with relative pose commands.")
         ee_frame = env.scene[cfg.ee_frame_name].cfg.target_frames[0]
@@ -74,8 +74,6 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
         )
         super().__init__(cfg, env)
         self._scale[:] = torch.tensor((*cfg.scale_trans, cfg.scale_rot), device=self.device)
-        self._space_lower = torch.tensor((cfg.x_limits[0], cfg.y_limits[0], cfg.z_min), device=self.device)
-        self._space_upper = torch.tensor((cfg.x_limits[1], cfg.y_limits[1], math.inf), device=self.device)
         self._wrist_id = self._asset.find_joints(self._joint_names[-1])[0][0]
         self._pos_lower = self._pos_upper = self._max_offset = None
         lower, upper = _reduced_joint_pos_limits(self._asset, self._joint_ids, cfg.joint_range_margin or 0.0)
@@ -112,14 +110,21 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
         """Joint velocity reference for observation normalization [rad/s], shape [num_envs, num_joints]."""
         return self._joint_vel_limits
 
+    @property
+    def scale_trans(self) -> tuple[float, float, float]:
+        """Translation step (dx, dy, dz) per unit action [m]."""
+        return tuple(self._scale[0, :3].tolist())
+
+    @scale_trans.setter
+    def scale_trans(self, scale: tuple[float, float, float]) -> None:
+        """Set the translation step per unit action [m], e.g. from a curriculum; applies from the next action."""
+        self._scale[:, :3] = torch.tensor(scale, device=self.device)
+
     def process_actions(self, actions: torch.Tensor):
         """Convert translation and yaw deltas into a top-down IK command."""
         self._raw_actions[:] = actions
         self._processed_actions[:] = self.raw_actions * self._scale
         ee_pos, ee_quat = self._compute_frame_pose()
-        if self.cfg.limit_operation_space:
-            target = torch.clamp(ee_pos + self._processed_actions[:, :3], self._space_lower, self._space_upper)
-            self._processed_actions[:, :3] = target - ee_pos
         wrist_pos = self._asset.data.joint_pos.torch[:, self._wrist_id]
         lower, upper = self.cfg.wrist_joint_limits
         self._processed_actions[:, 3] = torch.clamp(self._processed_actions[:, 3], wrist_pos - upper, wrist_pos - lower)

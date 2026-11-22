@@ -11,6 +11,7 @@ __all__ = [
     "ClothPointsInBaseFrame",
     "cloth_center_to_target_b",
     "bank_start_advanced",
+    "gripper_below_table",
     "cloth_drag_success",
     "cloth_drag_drop_penalty",
     "cloth_held",
@@ -18,6 +19,7 @@ __all__ = [
     "cloth_drag_termination_penalty",
     "ClothTargetCommandCfg",
     "ActionRateCurriculum",
+    "AvoidTableCollisionCurriculum",
     "TopDownDeltaEEActionCfg",
     "TopDownStabilizedDeltaEEActionCfg",
     "cloth_between_fingers",
@@ -80,6 +82,14 @@ __all__ = [
     "object_slip_speed",
     "object_velocity_b",
     "physics_contact",
+    "GripperForceLimit",
+    "external_force_w",
+    "gripper_force",
+    "gripper_force_penalty",
+    "joint_near_range_limit",
+    "joint_speed_exceeded",
+    "joint_range_penalty",
+    "joint_speed_penalty",
     "object_to_target_b",
 ]
 
@@ -92,7 +102,7 @@ from .actions_cfg import (
     TopDownStabilizedDeltaEEActionCfg,
 )
 from .commands_cfg import ClothTargetCommandCfg
-from .curriculums import ActionRateCurriculum
+from .curriculums import ActionRateCurriculum, AvoidTableCollisionCurriculum
 from .events import (
     edge_included,
     interior_nodes,
@@ -119,6 +129,7 @@ from .observations import (
     grasp_node_capturable,
     grasp_tried,
     grasp_node_pos_b,
+    gripper_force,
     gripper_width,
     object_center_offset_b,
     object_pose_b,
@@ -162,8 +173,21 @@ from .rewards import (
     gripper_closed_on_cloth,
     gripper_closed_on_nothing,
     gripper_open,
+    gripper_force_penalty,
     joint_limit_barrier,
+    joint_range_penalty,
+    joint_speed_penalty,
     object_slip_speed,
 )
 from .stages import ClothDragStage
-from .terminations import bank_start_advanced, cloth_drag_success, nonfinite_state, physics_contact
+from .terminations import (
+    GripperForceLimit,
+    bank_start_advanced,
+    cloth_drag_success,
+    external_force_w,
+    gripper_below_table,
+    joint_near_range_limit,
+    joint_speed_exceeded,
+    nonfinite_state,
+    physics_contact,
+)

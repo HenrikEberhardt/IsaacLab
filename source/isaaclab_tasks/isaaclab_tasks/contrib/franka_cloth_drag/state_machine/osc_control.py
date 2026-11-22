@@ -33,10 +33,7 @@ def configure_state_machine_osc(env_cfg: ManagerBasedRLEnvCfg):
         scale_trans=action_cfg.scale_trans,
         scale_rot=action_cfg.scale_rot,
         wrist_joint_limits=action_cfg.wrist_joint_limits,
-        limit_operation_space=action_cfg.limit_operation_space,
-        x_limits=action_cfg.x_limits,
-        y_limits=action_cfg.y_limits,
-        z_min=action_cfg.z_min,
-        joint_vel_factor=action_cfg.joint_vel_factor,
-        joint_range_margin=action_cfg.joint_range_margin,
+        # the policy's action has no limiters (it learns the safety stops); the scripted demonstrator keeps them
+        joint_vel_factor=0.9,
+        joint_range_margin=0.05,  # [rad]
     )

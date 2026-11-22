@@ -86,7 +86,7 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     args_cli.visualizer = ["viser"]
     # a held state may reach the target: let it hold there instead of resetting
-    env_cfg.terminations.success = None
+    env_cfg.terminations.task_success = None
     env_cfg.rewards.success = None
     env_cfg.sim.visualizer_cfgs = [ViserVisualizerCfg(port=8760)]
 

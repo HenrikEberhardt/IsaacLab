@@ -17,12 +17,13 @@ episodes started from stored reset states of later stages (uniform and adaptive 
 more easily.
 
 The curriculum manager calls the terms at the start of every reset, with the environments being reset. The state is
-not stored in policy checkpoints: a resumed run starts again from ``initial_progress``. The task configuration
-currently uses no curriculum: the actor observes and acts as on the real robot from the first step.
+not stored in policy checkpoints: a resumed run starts again from ``initial_progress``. The task configuration uses
+:class:`AvoidTableCollisionCurriculum`, which tightens the safety penalties once the task is learned.
 """
 
 from __future__ import annotations
 
+import math
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
@@ -207,3 +208,100 @@ class ActionRateCurriculum(_SuccessGatedRamp):
             "progress": self.progress,
             "weight": weight,
         }
+
+
+class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
+    """Success-gated ramp that teaches the policy to stay inside the real robot's force safety stop once the task is
+    learned.
+
+    The gripper force stop is off (infinite) until the gate first opens: a stop from the start kept the policy from
+    learning to grasp. With the progress ``p`` after that:
+
+    * the force limit [N] of the :class:`~.terminations.GripperForceLimit` term goes linearly from
+      ``termination_force[0]`` to ``termination_force[1]``;
+    * every entry of ``final_values`` goes linearly from its configured value to its final value: a reward term name
+      sets that term's weight, ``"scale_z"`` the z step [m] of the arm action. A smaller z step bounds the descent
+      speed and how deep a target can lie inside the table, and so the pressing force.
+    """
+
+    def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
+        """Read the start weights and the start action scale."""
+        super().__init__(cfg, env)
+        names = [name for name in cfg.params["final_values"] if name != "scale_z"]
+        self._reward_cfgs = {name: env.reward_manager.get_term_cfg(name) for name in names}
+        self._start_weights = {name: float(term_cfg.weight) for name, term_cfg in self._reward_cfgs.items()}
+        self._action = env.action_manager.get_term(cfg.params.get("action_name", "arm_action"))
+        self._start_scale = self._action.scale_trans
+        self._termination_name = cfg.params.get("termination_name", "gripper_force_limit")
+        self._termination_cfg = env.termination_manager.get_term_cfg(self._termination_name)
+
+    def __call__(
+        self,
+        env: ManagerBasedRLEnv,
+        env_ids: Sequence[int] | slice,
+        thresholds: tuple[float, float],
+        dwell_iterations: int,
+        length_iterations: int,
+        termination_force: tuple[float, float],
+        final_values: dict[str, float],
+        command_name: str = "cloth_target",
+        termination_name: str = "gripper_force_limit",
+        action_name: str = "arm_action",
+        ema_episodes: int = 2048,
+        initial_progress: float = 0.0,
+        steps_per_iteration: int = 24,
+    ) -> dict[str, float]:
+        """Advance the progress and set the force limit, the penalty weights and the z step.
+
+        Args:
+            env: The environment.
+            env_ids: The environments being reset.
+            thresholds: Success average ``(min, max)`` of the approach starts: the ramp opens above ``max`` and,
+                once open, pauses below ``min``.
+            dwell_iterations: Training iterations the average must stay above the threshold before the ramp opens or
+                resumes.
+            length_iterations: Training iterations from the start values to ``final_values``.
+            termination_force: Gripper force limit ``(when the gate opens, at full progress)`` [N]; off before.
+            final_values: Values at full progress: reward weights by term name, and ``"scale_z"`` [m].
+            command_name: Name of the cloth target command.
+            termination_name: Name of the :class:`~.terminations.GripperForceLimit` termination term.
+            action_name: Name of the :class:`~.actions.TopDownDeltaEEAction` term.
+            ema_episodes: Number of finished episodes the success average spans (its time constant).
+            initial_progress: Progress at the start of training, read once at initialization.
+            steps_per_iteration: Environment steps per training iteration, the agent's ``num_steps_per_env``.
+
+        Returns:
+            The state to log: success average, gate, progress, force limit (zero while off), the weight of every
+            penalty and the z step.
+        """
+        min_success, max_success = thresholds
+        dwell_steps = dwell_iterations * steps_per_iteration
+        length_steps = length_iterations * steps_per_iteration
+        self._update(
+            env,
+            env_ids,
+            command_name,
+            max_success,
+            length_steps,
+            ema_episodes,
+            dwell_steps,
+            None,
+            dwell_steps,
+            min_success,
+        )
+        p = self.progress
+        state = {"success_ema": self.success_ema, "gate_open": float(self.gate_open), "progress": p}
+        limit = math.inf if p <= 0.0 else termination_force[0] + p * (termination_force[1] - termination_force[0])
+        self._termination_cfg.params["max_force"] = limit
+        env.termination_manager.set_term_cfg(self._termination_name, self._termination_cfg)
+        state["termination_force"] = limit if math.isfinite(limit) else 0.0
+        for name, term_cfg in self._reward_cfgs.items():
+            term_cfg.weight = self._start_weights[name] + p * (final_values[name] - self._start_weights[name])
+            env.reward_manager.set_term_cfg(name, term_cfg)
+            state[f"weight_{name}"] = term_cfg.weight
+        scale_x, scale_y, scale_z = self._start_scale
+        if "scale_z" in final_values:
+            scale_z += p * (final_values["scale_z"] - scale_z)
+            self._action.scale_trans = (scale_x, scale_y, scale_z)
+        state["scale_z"] = scale_z
+        return state

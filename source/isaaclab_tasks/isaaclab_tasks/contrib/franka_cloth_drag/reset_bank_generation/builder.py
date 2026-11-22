@@ -173,7 +173,7 @@ class ResetBankBuilder:
             bank_term: The reset event term that restores the candidates.
             cfg: The generation settings.
         """
-        if "success" not in env.termination_manager.active_terms:
+        if "task_success" not in env.termination_manager.active_terms:
             raise ValueError("The collection needs the task's success termination to end successful rollouts.")
         self.env = env
         self.runner = runner
@@ -283,8 +283,8 @@ class ResetBankBuilder:
             # rollouts that ended in this step: hand the slots of the successful ones to the pool
             if dones.any():
                 manager = env.termination_manager
-                success = dones & manager.get_term("success")
-                for name in self.validator.failure_terms + ["time_out"]:
+                success = dones & manager.get_term("task_success")
+                for name in self.validator.failure_terms + ["task_timeout"]:
                     self.stats[f"rollouts_failed/{name}"] += int((dones & ~success & manager.get_term(name)).sum())
                 self.stats["rollouts_succeeded"] += int(success.sum())
                 done_ids = dones.nonzero(as_tuple=False).squeeze(-1)
