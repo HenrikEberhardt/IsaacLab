@@ -326,6 +326,7 @@ class ActionsCfg:
         ),
         scale_trans=(0.015, 0.015, 0.015),  # [m] per action step (dx, dy, dz)
         scale_rot=0.2,  # [rad] per action step (dyaw)
+        z_min=0.0193,  # [m] limit ee to table hight to avoid penetration
         command_delay_range=(0, 4),  # IK target latency steps at 120 Hz
     )
 
@@ -784,7 +785,7 @@ class RewardsCfg:
                 "cube_off_cloth",
                 "gripper_cube_contact",
                 "nonfinite_state",
-                "gripper_force_limit",
+                "gripper_force_limit",  # off (infinite) until the curriculum gate opens, so paid only after it
                 "joint_velocity_limit",
                 "joint_range_limit",
             ]
@@ -792,13 +793,20 @@ class RewardsCfg:
         weight=-75.0,
     )
 
-    # -------------- Table Hitting --------------
-    # off until the curriculum gate opens
-    pen_gripper_force = RewTerm(
-        func=mdp.gripper_force_penalty, 
-        params={"min_force": 5.0}, 
-        weight=0.0
+    # -------------- Table and Cloth Contact --------------
+    # The force is the simulator's push of the gripper into the table and the cloth (gripper_force_limit), zero in
+    # free air. Gentle contact pays in GRASP and DRAG: the fingers slide over the cloth to pinch a crease and keep it
+    # while dragging. Gaussian over the push, 1 at 5 N, 0.14 at 10 N, zero below 0.5 N (no contact). Off until the
+    # curriculum gate opens, then in full
+    grasp_force_kernel = RewTerm(
+        func=mdp.gripper_force_kernel,
+        params={"stages": ["grasp", "drag"], "target_force": 5.0, "std": 2.5, "min_force": 0.5},  # [N]
+        weight=0.0,
     )
+    # Small penalty per N above 40 N from the start, so the grasp is still learned
+    pen_force_over_40 = RewTerm(func=mdp.gripper_force_penalty, params={"min_force": 40.0}, weight=-0.1)
+    # Penalty per N above 10 N, off until the curriculum gate opens
+    pen_force_over_10 = RewTerm(func=mdp.gripper_force_penalty, params={"min_force": 10.0}, weight=0.0)
 
     # -------------- Joint Limits --------------
     # Squared bands up to the joint_velocity_limit and joint_range_limit terminations
@@ -852,13 +860,10 @@ class TerminationsCfg:
     gripper_cube_contact = DoneTerm(
         func=mdp.physics_contact, 
         params={"contact_name": "gripper_cube"})
+    # The gripper's push into the table and the cloth, averaged over the policy step
     gripper_force_limit = DoneTerm(
         func=mdp.GripperForceLimit,
-        params={
-            "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"], body_names="base_link"),
-            "max_force": math.inf,  # [N]
-            "all_axes": True,
-        },
+        params={"max_force": math.inf},  # [N] off until the curriculum gate opens; then pen_termination pays on it
     )
     ee_below_table = DoneTerm(
         func=mdp.gripper_below_table, 
@@ -872,10 +877,6 @@ class TerminationsCfg:
         func=mdp.joint_near_range_limit,
         params={"margin": 0.05, "asset_cfg": SceneEntityCfg("robot", joint_names=["panda_joint.*"])},  # [rad]
     )
-    # TODO: delete bank_start_advanced
-    bank_start_advanced = DoneTerm(
-        func=mdp.bank_start_advanced, params={"start_stages": ("grasp",), "steps_after_entry": 0}, time_out=True
-    )
 
 
 @configclass
@@ -887,12 +888,14 @@ class CurriculumCfg:
         params={
             "thresholds": (0.80, 0.90),
             "dwell_iterations": 10,
-            "length_iterations": 100,  # from start to final values
-            "termination_force": (40.0, 20.0),
+            "length_iterations": 150,  # from start to final values
+            "termination_force": (40.0, 20.0),  # [N] force stop when the gate opens, at full progress
             "final_values": {
-                "pen_gripper_force": -2.0,  # reward weight
+                "pen_force_over_10": -1.0,  # reward weight
                 "scale_z": 0.005,  # [m] z step of the arm action
             },
+            # switched on in full when the gate opens: gentle contact pays while the penalties ramp in
+            "gate_values": {"grasp_force_kernel": 2.0},  # reward weight
         },
     )
 

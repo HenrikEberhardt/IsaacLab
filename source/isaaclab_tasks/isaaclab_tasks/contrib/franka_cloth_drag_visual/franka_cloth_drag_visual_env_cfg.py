@@ -16,6 +16,7 @@ import math
 
 from isaaclab_visualizers.viser import ViserVisualizerCfg
 
+from isaaclab.cloner import expand_env_regex_ns
 from isaaclab.envs import ManagerBasedRLEnvCfg
 from isaaclab.managers import EventTermCfg as EventTerm
 from isaaclab.managers import ObservationGroupCfg as ObsGroup
@@ -239,3 +240,29 @@ class FrankaClothDragVisualEnvCfg(FrankaClothDragJointEnvCfg):
             mode="reset",
             params={"sensor_cfg": SceneEntityCfg("wrist_camera"), "colors": SHAPE_COLORS},
         )
+
+    def play_mode(self):
+        """Play settings of the joint env plus a second Viser server that streams the wrist camera."""
+        super().play_mode()
+        self.sim.visualizer_cfgs = [*self.sim.visualizer_cfgs, wrist_camera_stream_cfg()]
+
+
+def wrist_camera_stream_cfg(port: int = 8757, num_envs: int = 16) -> ViserVisualizerCfg:
+    """Viser server that shows only the wrist camera's RGB images of the first environments.
+
+    The stream is the camera's raw render: the cloth keeps its simulation color, and the image observation's latency,
+    frame holds and augmentation are not applied.
+
+    Args:
+        port: Port of the server, next to the scene view's.
+        num_envs: Number of environments shown, from the first one.
+    """
+    return ViserVisualizerCfg(
+        port=port,
+        streaming_view=True,
+        streaming_sensor_prim_path=expand_env_regex_ns(WRIST_CAMERA_CFG.prim_path),
+        streaming_gt_types=("rgb",),
+        streaming_envs=num_envs,
+        max_visible_envs=num_envs,
+        randomly_sample_visible_envs=False,
+    )

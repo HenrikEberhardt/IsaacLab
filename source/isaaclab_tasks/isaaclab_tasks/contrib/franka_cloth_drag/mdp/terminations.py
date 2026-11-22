@@ -56,36 +56,89 @@ def external_force_w(robot: Articulation, joint_ids: torch.Tensor, body_id: int)
 
 
 class GripperForceLimit(ManagerTermBase):
-    """Terminate when the external force on the gripper exceeds ``max_force`` [N], as the real robot's safety stop.
+    """Terminate when the gripper presses down harder than ``max_force`` [N], as the real robot's safety stop.
 
-    The force is :func:`external_force_w` at the hand, whatever the gripper touches: the real Franka cannot tell the
-    table from the cloth lying on it (a policy checked only in gripper-table contact learned to press the cloth into
-    the table at 66 N). With ``all_axes`` it is the largest axis ``max(|F_x|, |F_y|, |F_z|)``, as the Franka's per-axis
-    collision thresholds; otherwise the upward ``F_z`` (the gripper pressing down). The term keeps it in :attr:`force`
-    for :func:`~.rewards.gripper_force_penalty` and the critic; the termination manager computes before the reward and
-    observation managers.
+    The force is the simulator's own contact force on the gripper: the coupler's feedback from everything the gripper
+    proxies touch in the cloth solver (table, cloth, cube), see
+    :meth:`~..physics.coupler.NewtonClothDragCouplerManager.proxy_body_force`. It is exactly zero in free air, unlike
+    :func:`external_force_w`, which reads up to 35 N there. The term uses its vertical part, the push into the table
+    and the cloth ``F_down = max(0, F_z)``, averaged over the policy step's physics substeps (33 ms), which filters
+    single-substep impact spikes as the real robot's filtered estimate would.
+
+    The term keeps the push in :attr:`force` for :func:`~.rewards.gripper_force_penalty`,
+    :func:`~.rewards.gripper_force_kernel` and the critic; the termination manager computes before the reward and
+    observation managers. At every reset it logs the finished episodes' force statistics under ``Force/``.
     """
 
+    _LOG_THRESHOLDS = (10.0, 20.0)
+    """Forces [N] whose share of exceeding episodes is logged."""
+
+    _CONTACT_FORCE = 0.5
+    """Push [N] above which a step counts as contact for the ``*_contact_mean`` logs."""
+
     def __init__(self, cfg: TerminationTermCfg, env: ManagerBasedRLEnv):
-        """Resolve the arm joints and the hand body."""
+        """Allocate the force and the episode statistics."""
         super().__init__(cfg, env)
-        asset_cfg: SceneEntityCfg = cfg.params["asset_cfg"]
-        self._robot: Articulation = env.scene[asset_cfg.name]
-        self._joint_ids = torch.tensor(asset_cfg.joint_ids, device=env.device)
-        self._body_id = asset_cfg.body_ids[0]
         self.force = torch.zeros(env.num_envs, device=env.device)
-        """External force on the gripper in the last step [N], zero after a reset."""
+        """Push of the gripper into the table and the cloth in the last policy step [N], zero after a reset."""
+        self.force_peak = torch.zeros(env.num_envs, device=env.device)
+        """Largest push of a single physics substep in the last policy step [N]."""
+        self._episode_max = torch.zeros(env.num_envs, device=env.device)
+        self._episode_peak = torch.zeros(env.num_envs, device=env.device)
+        # per stage (GRASP, DRAG): force sum and step count, over all steps and over contact steps
+        self._stage_sum = torch.zeros(env.num_envs, 2, device=env.device)
+        self._stage_steps = torch.zeros(env.num_envs, 2, device=env.device)
+        self._contact_steps = torch.zeros(env.num_envs, 2, device=env.device)
 
     def reset(self, env_ids: Sequence[int] | None = None) -> None:
-        """Zero the force of the reset environments."""
-        self.force[slice(None) if env_ids is None else env_ids] = 0.0
+        """Log the finished episodes' force statistics and zero the force of the reset environments."""
+        env_ids = slice(None) if env_ids is None else env_ids
+        if getattr(self._env, "common_step_counter", 0) > 0 and self._episode_max[env_ids].numel() > 0:
+            episode_max = self._episode_max[env_ids]
+            log = {
+                "Force/episode_max": episode_max.mean().item(),
+                "Force/episode_substep_peak": self._episode_peak[env_ids].mean().item(),
+            }
+            for threshold in self._LOG_THRESHOLDS:
+                log[f"Force/episodes_over_{threshold:.0f}N"] = (episode_max > threshold).float().mean().item()
+            stage_sum, steps, contact = self._stage_sum[env_ids], self._stage_steps[env_ids], self._contact_steps[env_ids]
+            for k, name in enumerate(("grasp", "drag")):
+                if (steps[:, k] > 0).any():
+                    log[f"Force/{name}_mean"] = (stage_sum[:, k].sum() / steps[:, k].sum()).item()
+                if (contact[:, k] > 0).any():
+                    # steps below the contact force add (almost) nothing to the sum
+                    log[f"Force/{name}_contact_mean"] = (stage_sum[:, k].sum() / contact[:, k].sum()).item()
+            # own top-level prefix: the environment recreates the log dict before the managers reset
+            self._env.extras.setdefault("log", {}).update(log)
+        for buffer in (self.force, self.force_peak, self._episode_max, self._episode_peak):
+            buffer[env_ids] = 0.0
+        for buffer in (self._stage_sum, self._stage_steps, self._contact_steps):
+            buffer[env_ids] = 0.0
 
-    def __call__(
-        self, env: ManagerBasedRLEnv, asset_cfg: SceneEntityCfg, max_force: float, all_axes: bool = True
-    ) -> torch.Tensor:
-        """Update :attr:`force` and terminate where it exceeds ``max_force`` [N]."""
-        force = torch.nan_to_num(external_force_w(self._robot, self._joint_ids, self._body_id), nan=0.0)
-        self.force[:] = force.abs().amax(dim=1) if all_axes else force[:, 2].clamp(min=0.0)
+    def __call__(self, env: ManagerBasedRLEnv, max_force: float, command_name: str = "cloth_target") -> torch.Tensor:
+        """Read the push of this policy step, update the statistics, and terminate where it exceeds ``max_force``.
+
+        Args:
+            env: The environment.
+            max_force: Push that ends the episode [N]; ``math.inf`` for none.
+            command_name: Name of the cloth target command.
+        """
+        from .stages import ClothDragStage
+
+        physics = env.sim.physics_manager
+        force, up_peak = physics.proxy_body_force()
+        physics.clear_proxy_body_force()
+        self.force[:] = torch.nan_to_num(force[:, 2], nan=0.0).clamp(min=0.0)
+        self.force_peak[:] = torch.nan_to_num(up_peak, nan=0.0).clamp(min=0.0)
+        self._episode_max = torch.maximum(self._episode_max, self.force)
+        self._episode_peak = torch.maximum(self._episode_peak, self.force_peak)
+        stage = env.command_manager.get_term(command_name).stage
+        touching = (self.force > self._CONTACT_FORCE).float()
+        for k, stage_id in enumerate((ClothDragStage.GRASP, ClothDragStage.DRAG)):
+            in_stage = (stage == int(stage_id)).float()
+            self._stage_sum[:, k] += self.force * in_stage
+            self._stage_steps[:, k] += in_stage
+            self._contact_steps[:, k] += in_stage * touching
         return self.force > max_force
 
 
@@ -149,13 +202,15 @@ def cloth_drag_success(env: ManagerBasedRLEnv, command_name: str = "cloth_target
     return command.holding
 
 
-def gripper_below_table(
-    env: ManagerBasedRLEnv, max_penetration: float, command_name: str = "cloth_target"
-) -> torch.Tensor:
-    """Terminate when a finger pad's lower end is more than ``max_penetration`` [m] below the table top (z = 0).
+def pad_lowest_height(env: ManagerBasedRLEnv, command_name: str = "cloth_target") -> torch.Tensor:
+    """Height of the lowest finger-pad corner above the table top (z = 0) [m], shape [num_envs].
 
-    Checks the corners of both pads' lower ends from the measured finger joint, so the limit holds in every gripper
-    state (the pads move 13.5 mm along the EE frame's z-axis while closing) and for a tilted hand.
+    Uses the corners of both pads' lower ends from the measured finger joint, so it holds in every gripper state (the
+    pads move 13.5 mm along the EE frame's z-axis while closing) and for a tilted hand.
+
+    Args:
+        env: The environment.
+        command_name: Name of the cloth target command.
     """
     cfg = env.command_manager.get_term(command_name).cfg
     action_cfg = gripper_cfg(env, cfg)
@@ -176,7 +231,17 @@ def gripper_below_table(
     ).reshape(num_envs, 8, 3)
     ee_quat_w = ee_frame.data.target_quat_w.torch[:, 0].unsqueeze(1).expand(-1, 8, -1)
     corner_z = quat_apply(ee_quat_w, corners)[..., 2] + ee_frame.data.target_pos_w.torch[:, 0, 2].unsqueeze(1)
-    return corner_z.amin(dim=1) - env.scene.env_origins[:, 2] < -max_penetration
+    return corner_z.amin(dim=1) - env.scene.env_origins[:, 2]
+
+
+def gripper_below_table(
+    env: ManagerBasedRLEnv, max_penetration: float, command_name: str = "cloth_target"
+) -> torch.Tensor:
+    """Terminate when a finger pad's lower end is more than ``max_penetration`` [m] below the table top (z = 0).
+
+    See :func:`pad_lowest_height`.
+    """
+    return pad_lowest_height(env, command_name) < -max_penetration
 
 
 def physics_contact(env: ManagerBasedRLEnv, contact_name: str) -> torch.Tensor:
@@ -190,40 +255,3 @@ def physics_contact(env: ManagerBasedRLEnv, contact_name: str) -> torch.Tensor:
     touched = physics.contact_latch(contact_name).clone()
     physics.clear_contact_latch(contact_name)
     return touched
-
-
-def bank_start_advanced(
-    env: ManagerBasedRLEnv,
-    start_stages: tuple[str, ...] = ("grasp", "drag"),
-    steps_after_entry: int = 0,
-    command_name: str = "cloth_target",
-) -> torch.Tensor:
-    """End an episode that started in one of ``start_stages`` of a reset bank once it reaches the next stage.
-
-    Use as a truncation (``time_out=True``) so the value of the reached stage is bootstrapped: bank starts become short,
-    stage-local episodes and the critic chains the stages. Approach and goal starts are never ended by it.
-
-    The time-out bootstrap uses the value of the state before the last action. With ``steps_after_entry`` zero that
-    state is the one before the stage entry, whose value already anticipates the reward paid for the entry; one or more
-    steps end the episode only that many steps after the entry, so the bootstrapped state lies past it.
-
-    Args:
-        env: The environment.
-        start_stages: Bank start stages whose episodes are ended, out of ``"grasp"`` and ``"drag"``.
-        steps_after_entry: Environment steps the episode keeps running in the reached stage before it ends.
-        command_name: Name of the cloth target command.
-    """
-    from .stages import START_STAGE_NAMES, ClothDragStage
-
-    command = env.command_manager.get_term(command_name)
-    start = command.start_stage
-    bank_start = torch.zeros_like(start, dtype=torch.bool)
-    for name in start_stages:
-        stage_id = START_STAGE_NAMES.index(name)
-        if stage_id not in (int(ClothDragStage.GRASP), int(ClothDragStage.DRAG)):
-            raise ValueError(f"start_stages must be out of 'grasp' and 'drag', got {start_stages}.")
-        bank_start |= start == stage_id
-    advanced = bank_start & (command.stage > start)
-    if steps_after_entry > 0:
-        advanced &= command.time_in_stage >= (steps_after_entry - 0.5) * env.step_dt
-    return advanced

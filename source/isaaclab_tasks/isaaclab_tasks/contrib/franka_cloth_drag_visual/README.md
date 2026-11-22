@@ -60,7 +60,7 @@ The physics randomization of the teacher env is kept. Resets are the task-start 
 | Requested | Implemented | Why |
 |---|---|---|
 | Wrist camera position ±1 cm, rotation ±1° | `randomize_camera_offset` per reset | Calibration error of the mount |
-| Focal length / FOV | No | The calibrated OpenCV lens cannot take new intrinsics; Joran and Mike don't randomize it either |
+| Focal length / FOV | No | The calibrated OpenCV lens cannot take new intrinsics; Joran and Mike don't randomize it either. The Newton renderer traces it with its calibrated fx/fy/cx/cy and distortion, scaled to 160x120 |
 | Third-person camera, depth | No | Wrist RGB only |
 | Texture vs. color, texture maps | Solid per-episode colors: beech-like table, tinted robot, orange cube, cloth from a blue towel palette (recolor); cube and cloth colors are placeholders until the real ones are fixed | The Warp renderer has no PBR materials. Joran's textured table tops can be ported later |
 | Roughness, metallic, specular | No | Not in the Warp renderer |

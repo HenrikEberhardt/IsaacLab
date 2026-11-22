@@ -849,9 +849,9 @@ def cloth_drag_termination_penalty(env: ManagerBasedRLEnv, term_keys: Sequence[s
 def gripper_force_penalty(
     env: ManagerBasedRLEnv, min_force: float = 5.0, termination_name: str = "gripper_force_limit"
 ) -> torch.Tensor:
-    """Return the external force on the gripper beyond ``min_force`` [N]; lighter contact is free.
+    """Return the gripper's push into the table and the cloth beyond ``min_force`` [N]; lighter contact is free.
 
-    Reads the estimate of the :class:`~.terminations.GripperForceLimit` term ``termination_name``, which the
+    Reads the push of the :class:`~.terminations.GripperForceLimit` term ``termination_name``, which the
     termination manager computes before the rewards. Use a negative weight.
 
     Args:
@@ -860,6 +860,36 @@ def gripper_force_penalty(
         termination_name: Name of the :class:`~.terminations.GripperForceLimit` termination term.
     """
     return (env.termination_manager.get_term_cfg(termination_name).func.force - min_force).clamp(min=0.0)
+
+
+def gripper_force_kernel(
+    env: ManagerBasedRLEnv,
+    stages: Sequence[str],
+    target_force: float = 5.0,
+    std: float = 2.5,
+    min_force: float = 0.5,
+    termination_name: str = "gripper_force_limit",
+    command_name: str = "cloth_target",
+) -> torch.Tensor:
+    """Return a Gaussian kernel on the gripper's push into the table and the cloth, one at ``target_force`` [N], in
+    the active ``stages`` while the gripper touches.
+
+    It pays for gentle contact: the fingers slide over the cloth to pinch a crease up and keep it while dragging. With
+    the defaults it is 0.2 just above ``min_force`` and 0.14 at 10 N. Below ``min_force`` it is zero, so hovering
+    earns nothing. It reads the push of the :class:`~.terminations.GripperForceLimit` term ``termination_name``.
+
+    Args:
+        env: The environment.
+        stages: Names of the stages the term is active in.
+        target_force: Push of the largest reward [N].
+        std: Standard deviation of the kernel [N].
+        min_force: Push below which the gripper does not count as touching [N].
+        termination_name: Name of the :class:`~.terminations.GripperForceLimit` termination term.
+        command_name: Name of the cloth target command.
+    """
+    force = env.termination_manager.get_term_cfg(termination_name).func.force
+    kernel = torch.exp(-0.5 * ((force - target_force) / std).square()) * (force > min_force)
+    return _stage_gate(kernel, _command(env, command_name).stage, stages, saturate=False)
 
 
 def joint_speed_penalty(

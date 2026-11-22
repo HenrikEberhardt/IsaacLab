@@ -187,9 +187,10 @@ Critic-only terms.
 def gripper_force(
     env: ManagerBasedRLEnv, termination_name: str = "gripper_force_limit", scale: float = 20.0
 ) -> torch.Tensor:
-    """External force on the gripper divided by ``scale`` [N], shape [N, 1]; one at a ``scale`` safety stop.
+    """Push of the gripper into the table and the cloth divided by ``scale`` [N], shape [N, 1]; one at a ``scale``
+    safety stop.
 
-    Reads the estimate of the :class:`~.terminations.GripperForceLimit` term ``termination_name``, which the
+    Reads the push of the :class:`~.terminations.GripperForceLimit` term ``termination_name``, which the
     termination manager computes before the observations; reset environments read zero. Zero while the managers are
     built: the observation manager evaluates its terms once before the termination manager exists.
     """

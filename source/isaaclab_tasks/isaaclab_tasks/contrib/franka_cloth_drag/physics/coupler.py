@@ -96,6 +96,24 @@ def _latch_touching_pairs(
             latch[world, i] = 1
 
 
+@wp.kernel
+def _accumulate_proxy_body_forces(
+    coupling_forces: wp.array(dtype=wp.spatial_vector),
+    proxy_ids: wp.array2d(dtype=wp.int32),
+    force_sum: wp.array(dtype=wp.vec3),
+    up_peak: wp.array(dtype=wp.float32),
+    substeps: wp.array(dtype=wp.int32),
+):
+    """Add the summed linear proxy feedback on one world's proxied bodies to its running sum and upward peak."""
+    world = wp.tid()
+    force = wp.vec3(0.0)
+    for i in range(proxy_ids.shape[1]):
+        force += wp.spatial_top(coupling_forces[proxy_ids[world, i]])
+    force_sum[world] = force_sum[world] + force
+    up_peak[world] = wp.max(up_peak[world], force[2])
+    substeps[world] = substeps[world] + 1
+
+
 def _shapes_matching(pattern: str, shape_labels, shape_body, body_labels) -> np.ndarray:
     """Return the ids of the shapes whose label, or whose body's label, fully matches ``pattern``."""
     regex = re.compile(pattern)
@@ -121,6 +139,8 @@ class NewtonClothDragCouplerManager(NewtonCouplerManager):
     * Cube: inverse kinematics after each substep, so Isaac Lab sees the motion of VBD-integrated bodies.
     * ``collision_filter_pairs``: shape pairs that never collide.
     * ``monitored_contacts``: per-world touch latch of shape pairs, see :meth:`contact_latch`.
+    * Proxy force: the force the other entry exerts on the proxied bodies (the gripper: table, cloth and cube), summed
+      over the substeps, see :meth:`proxy_body_force`. It is the simulator's own contact force, not an estimate.
     * :meth:`get_cloth_rest` / :meth:`set_cloth_rest`: read and change the cloth rest shape at runtime.
     * :meth:`get_cloth_material` / :meth:`set_cloth_material` and :meth:`find_shapes` / :meth:`get_shape_friction` /
       :meth:`set_shape_friction`: per-environment cloth material and contact friction, for domain randomization.
@@ -146,6 +166,18 @@ class NewtonClothDragCouplerManager(NewtonCouplerManager):
 
     _contact_buffers: list | None = None
     """Contacts of the proxy pipelines, looked up at the first substep; None until then."""
+
+    _proxy_force_sources: list = []
+    """``(coupling_forces, proxy_ids [num_worlds, bodies_per_world])`` of every body-proxy mapping."""
+
+    _proxy_force_sum: wp.array | None = None
+    """Per-world sum over the substeps of the force on the proxied bodies [N], shape [num_worlds] of vec3."""
+
+    _proxy_force_up_peak: wp.array | None = None
+    """Per-world largest upward force on the proxied bodies of a substep [N], shape [num_worlds]."""
+
+    _proxy_force_substeps: wp.array | None = None
+    """Per-world number of substeps summed since the last :meth:`clear_proxy_body_force`, shape [num_worlds]."""
 
     @classmethod
     def _prepare_builder_for_finalize(cls, builder: ModelBuilder) -> None:
@@ -189,6 +221,62 @@ class NewtonClothDragCouplerManager(NewtonCouplerManager):
             if mask.any():
                 cls._vbd_articulation_mask = wp.array(mask, dtype=wp.bool, device=model.device)
         cls._build_contact_monitor(model, solver_cfg)
+        cls._build_proxy_force_monitor(model)
+
+    @classmethod
+    def _build_proxy_force_monitor(cls, model: Model) -> None:
+        """Group every body-proxy mapping's proxy ids by world and allocate the force sums before any graph capture."""
+        body_world = model.body_world.numpy()
+        cls._proxy_force_sources = []
+        for mapping in getattr(NewtonManager._solver, "_proxy_mappings", []):
+            if mapping.coupling_forces is None or mapping.src_ids is None or mapping.src_ids.shape[0] == 0:
+                continue
+            src = mapping.src_ids.numpy()
+            proxy = mapping.proxy_ids_global.numpy()
+            per_world = [proxy[body_world[src] == world] for world in range(model.world_count)]
+            if len({len(ids) for ids in per_world}) != 1:
+                raise RuntimeError("Proxy force monitor: every world needs the same number of proxied bodies.")
+            ids = wp.array(np.stack(per_world).astype(np.int32), dtype=wp.int32, device=model.device)
+            cls._proxy_force_sources.append((mapping.coupling_forces, ids))
+        cls._proxy_force_sum = wp.zeros(model.world_count, dtype=wp.vec3, device=model.device)
+        cls._proxy_force_up_peak = wp.zeros(model.world_count, dtype=wp.float32, device=model.device)
+        cls._proxy_force_substeps = wp.zeros(model.world_count, dtype=wp.int32, device=model.device)
+
+    @classmethod
+    def _accumulate_proxy_force(cls, model: Model) -> None:
+        """Add this substep's force on the proxied bodies to the per-world sums.
+
+        The coupler applies ``coupling_forces`` to the source bodies (the gripper) as external body forces: the
+        reaction of everything the proxies touch in the destination entry (table, cloth, cube).
+        """
+        for coupling_forces, ids in cls._proxy_force_sources:
+            wp.launch(
+                _accumulate_proxy_body_forces,
+                dim=ids.shape[0],
+                inputs=[coupling_forces, ids],
+                outputs=[cls._proxy_force_sum, cls._proxy_force_up_peak, cls._proxy_force_substeps],
+                device=model.device,
+            )
+
+    @classmethod
+    def proxy_body_force(cls) -> tuple[torch.Tensor, torch.Tensor]:
+        """Return the force on the proxied bodies since the last :meth:`clear_proxy_body_force`.
+
+        Returns:
+            The mean over the substeps of the summed force in the world frame [N], shape [num_worlds, 3], and the
+            largest upward force of a single substep [N], shape [num_worlds]. Both are zero without a substep.
+        """
+        if cls._proxy_force_sum is None:
+            raise RuntimeError("The proxy force monitor is not built.")
+        substeps = wp.to_torch(cls._proxy_force_substeps).clamp(min=1).unsqueeze(1).float()
+        return wp.to_torch(cls._proxy_force_sum) / substeps, wp.to_torch(cls._proxy_force_up_peak).clone()
+
+    @classmethod
+    def clear_proxy_body_force(cls) -> None:
+        """Restart the force sums of every world."""
+        wp.to_torch(cls._proxy_force_sum).zero_()
+        wp.to_torch(cls._proxy_force_up_peak).zero_()
+        wp.to_torch(cls._proxy_force_substeps).zero_()
 
     @classmethod
     def _build_contact_monitor(cls, model: Model, solver_cfg: CouplerCfg) -> None:
@@ -236,6 +324,8 @@ class NewtonClothDragCouplerManager(NewtonCouplerManager):
             eval_ik(model, state_1, state_1.joint_q, state_1.joint_qd, mask=cls._vbd_articulation_mask)
         if cls._contact_latch is not None:
             cls._latch_contacts(model, state_1)
+        if cls._proxy_force_sources:
+            cls._accumulate_proxy_force(model)
 
     @classmethod
     def _latch_contacts(cls, model: Model, state: State) -> None:
@@ -414,3 +504,7 @@ class NewtonClothDragCouplerManager(NewtonCouplerManager):
         cls._contact_shape_groups = None
         cls._contact_latch = None
         cls._contact_buffers = None
+        cls._proxy_force_sources = []
+        cls._proxy_force_sum = None
+        cls._proxy_force_up_peak = None
+        cls._proxy_force_substeps = None

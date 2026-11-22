@@ -221,13 +221,16 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
       ``termination_force[0]`` to ``termination_force[1]``;
     * every entry of ``final_values`` goes linearly from its configured value to its final value: a reward term name
       sets that term's weight, ``"scale_z"`` the z step [m] of the arm action. A smaller z step bounds the descent
-      speed and how deep a target can lie inside the table, and so the pressing force.
+      speed and how deep a target can lie inside the table, and so the pressing force;
+    * every reward term in ``gate_values`` keeps its configured weight until the gate first opens and has the given
+      weight from then on, without a ramp: a reward for gentle contact pays in full as soon as the penalties start.
     """
 
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
         """Read the start weights and the start action scale."""
         super().__init__(cfg, env)
         names = [name for name in cfg.params["final_values"] if name != "scale_z"]
+        names += list(cfg.params.get("gate_values", {}))
         self._reward_cfgs = {name: env.reward_manager.get_term_cfg(name) for name in names}
         self._start_weights = {name: float(term_cfg.weight) for name, term_cfg in self._reward_cfgs.items()}
         self._action = env.action_manager.get_term(cfg.params.get("action_name", "arm_action"))
@@ -244,6 +247,7 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
         length_iterations: int,
         termination_force: tuple[float, float],
         final_values: dict[str, float],
+        gate_values: dict[str, float] | None = None,
         command_name: str = "cloth_target",
         termination_name: str = "gripper_force_limit",
         action_name: str = "arm_action",
@@ -263,6 +267,7 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
             length_iterations: Training iterations from the start values to ``final_values``.
             termination_force: Gripper force limit ``(when the gate opens, at full progress)`` [N]; off before.
             final_values: Values at full progress: reward weights by term name, and ``"scale_z"`` [m].
+            gate_values: Reward weights by term name that switch on, unramped, when the gate first opens.
             command_name: Name of the cloth target command.
             termination_name: Name of the :class:`~.terminations.GripperForceLimit` termination term.
             action_name: Name of the :class:`~.actions.TopDownDeltaEEAction` term.
@@ -295,8 +300,13 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
         self._termination_cfg.params["max_force"] = limit
         env.termination_manager.set_term_cfg(self._termination_name, self._termination_cfg)
         state["termination_force"] = limit if math.isfinite(limit) else 0.0
+        gate_values = gate_values or {}
         for name, term_cfg in self._reward_cfgs.items():
-            term_cfg.weight = self._start_weights[name] + p * (final_values[name] - self._start_weights[name])
+            start = self._start_weights[name]
+            if name in gate_values:
+                term_cfg.weight = gate_values[name] if p > 0.0 else start
+            else:
+                term_cfg.weight = start + p * (final_values[name] - start)
             env.reward_manager.set_term_cfg(name, term_cfg)
             state[f"weight_{name}"] = term_cfg.weight
         scale_x, scale_y, scale_z = self._start_scale

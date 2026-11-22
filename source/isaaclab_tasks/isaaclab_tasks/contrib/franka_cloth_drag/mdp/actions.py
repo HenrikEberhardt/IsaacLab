@@ -125,6 +125,10 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
         self._raw_actions[:] = actions
         self._processed_actions[:] = self.raw_actions * self._scale
         ee_pos, ee_quat = self._compute_frame_pose()
+        if self.cfg.z_min is not None:
+            # shorten the z step so the target ends on the floor at the lowest
+            target_z = (ee_pos[:, 2] + self._processed_actions[:, 2]).clamp(min=self.cfg.z_min)
+            self._processed_actions[:, 2] = target_z - ee_pos[:, 2]
         wrist_pos = self._asset.data.joint_pos.torch[:, self._wrist_id]
         lower, upper = self.cfg.wrist_joint_limits
         self._processed_actions[:, 3] = torch.clamp(self._processed_actions[:, 3], wrist_pos - upper, wrist_pos - lower)

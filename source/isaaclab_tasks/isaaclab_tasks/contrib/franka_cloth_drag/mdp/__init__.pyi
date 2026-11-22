@@ -10,7 +10,7 @@ __all__ = [
     "StageProgress",
     "ClothPointsInBaseFrame",
     "cloth_center_to_target_b",
-    "bank_start_advanced",
+    "pad_lowest_height",
     "gripper_below_table",
     "cloth_drag_success",
     "cloth_drag_drop_penalty",
@@ -85,6 +85,7 @@ __all__ = [
     "GripperForceLimit",
     "external_force_w",
     "gripper_force",
+    "gripper_force_kernel",
     "gripper_force_penalty",
     "joint_near_range_limit",
     "joint_speed_exceeded",
@@ -173,6 +174,7 @@ from .rewards import (
     gripper_closed_on_cloth,
     gripper_closed_on_nothing,
     gripper_open,
+    gripper_force_kernel,
     gripper_force_penalty,
     joint_limit_barrier,
     joint_range_penalty,
@@ -182,12 +184,12 @@ from .rewards import (
 from .stages import ClothDragStage
 from .terminations import (
     GripperForceLimit,
-    bank_start_advanced,
     cloth_drag_success,
     external_force_w,
     gripper_below_table,
     joint_near_range_limit,
     joint_speed_exceeded,
     nonfinite_state,
+    pad_lowest_height,
     physics_contact,
 )
