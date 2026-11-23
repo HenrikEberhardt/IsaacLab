@@ -3,17 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Save the student's wrist images over an episode and time the visual env.
-
-Runs ``IsaacContrib-Drag-Cloth-Franka-Visual`` with the teacher acting through its joint-delta labels, so the arm
-does the task while the camera records. Writes one PNG grid (rows: environments, columns: time) of the student's
-image observation, as the network sees it (after latency, frame drops, recolor and augmentation), and prints the
-time per environment step.
-
-Usage (from the IsaacLab root, one GPU):
-    uv run python source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag_visual/scripts/save_image_strip.py \\
-        --num_envs 64 --num_steps 300 --out /tmp/strip.png --viz none
-"""
+"""Wrist image grid (rows: envs, columns: time) of the newest stacked frame as the network sees it, and ms/step."""
 
 import argparse
 import sys
@@ -52,23 +42,26 @@ def main():
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
     if args_cli.clean:
-        env_cfg.observations.student_image.enable_corruption = False
+        env_cfg.observations.student_image.rgb.params["augmentation"] = None
 
     with launch_simulation(env_cfg, args_cli):
         from PIL import Image
 
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
-        from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher import teacher_actions_to_joint_deltas
+        from isaaclab_tasks.contrib.franka_cloth_drag_visual.action_mapping import teacher_actions_to_joint_deltas
+        from isaaclab_tasks.contrib.franka_cloth_drag_visual.franka_cloth_drag_visual_env_cfg import ACTION_MAPPING_CFG
+        from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher import TEACHER_CHECKPOINT
         from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher.loading import load_teacher
-        from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher_cfg import IK_LABEL_CFG, TEACHER_CHECKPOINT
 
         gym_env = gym.make(TASK, cfg=env_cfg)
         env = gym_env.unwrapped
         wrapped = RslRlVecEnvWrapper(gym_env)
         obs = wrapped.get_observations()
         teacher = load_teacher(obs, args_cli.checkpoint or TEACHER_CHECKPOINT, env.device)
-        print(f"[STRIP] image {tuple(obs['student_image'].shape[1:])}, proprio {obs['student_proprio'].shape[-1]}")
+        label_cfg = ACTION_MAPPING_CFG.replace(joint_delta_scale=env_cfg.actions.arm_action.scale)
+        image, proprio = obs["student_image"], obs["student_proprio"]
+        print(f"[STRIP] image {tuple(image.shape[1:])} {image.dtype}, proprio {proprio.shape[-1]}")
 
         keep = set(torch.linspace(0, args_cli.num_steps - 1, args_cli.columns).round().long().tolist())
         frames = []
@@ -77,10 +70,10 @@ def main():
         start = time.perf_counter()
         for step in range(args_cli.num_steps):
             with torch.inference_mode():
-                labels, _ = teacher_actions_to_joint_deltas(teacher(obs), obs["ik_state"], IK_LABEL_CFG)
+                labels, _ = teacher_actions_to_joint_deltas(teacher(obs), obs["ik_state"], label_cfg)
             obs, _, dones, _ = wrapped.step(labels)
             if step in keep:
-                frames.append(obs["student_image"][: args_cli.rows].clamp(0.0, 1.0).cpu())
+                frames.append(obs["student_image"][: args_cli.rows, -1].float().div(255.0).cpu())  # newest frame
             done_ids = dones.nonzero(as_tuple=False).squeeze(-1)
             episodes += len(done_ids)
             successes += int(env.termination_manager.get_term("task_success")[done_ids].sum())

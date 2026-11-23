@@ -3,7 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Load the teacher actor outside the distillation runner (evaluation and inspection scripts)."""
+"""Load the teacher actor outside the distillation runner (check scripts)."""
 
 from __future__ import annotations
 
@@ -14,23 +14,13 @@ from tensordict import TensorDict
 
 
 def load_teacher(obs: TensorDict, checkpoint: str, device: str, group: str = "teacher") -> torch.nn.Module:
-    """The teacher actor as the distillation runner builds it, loaded strictly from a PPO checkpoint.
-
-    Args:
-        obs: Observations of the distillation env, with the teacher's group.
-        checkpoint: Path of the teacher's PPO checkpoint.
-        device: Torch device of the model.
-        group: Observation group of the teacher.
-
-    Returns:
-        The teacher in eval mode; calling it returns its deterministic actions, shape [N, 5].
-    """
+    """The teacher actor in eval mode, strictly loaded from a PPO checkpoint; returns deterministic actions [N, 5]."""
     from rsl_rl.utils import resolve_class
 
     from isaaclab_rl.rsl_rl import handle_deprecated_rsl_rl_cfg
 
-    from ..agents.rsl_rl_distillation_cfg import FrankaClothDragDistillationRunnerCfg
-    from ..teacher_cfg import TEACHER_NUM_ACTIONS
+    from ..student.agent_cfg import FrankaClothDragDistillationRunnerCfg
+    from .teacher_cfg import TEACHER_NUM_ACTIONS
 
     agent_cfg = handle_deprecated_rsl_rl_cfg(FrankaClothDragDistillationRunnerCfg(), metadata.version("rsl-rl-lib"))
     model_class, model_cfg = resolve_class(agent_cfg.to_dict()["teacher"])

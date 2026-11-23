@@ -222,21 +222,41 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
     * every entry of ``final_values`` goes linearly from its configured value to its final value: a reward term name
       sets that term's weight, ``"scale_z"`` the z step [m] of the arm action. A smaller z step bounds the descent
       speed and how deep a target can lie inside the table, and so the pressing force;
+    * ``"scale_rot"`` in ``final_values`` sets the yaw step [rad] of the arm action the same way. A smaller yaw step
+      bounds the wrist's joint target step, which a joint-speed stop alone does not (the wrist PD is slow);
+    * ``"joint_speed_fraction"`` in ``final_values`` sets ``max_fraction`` of the
+      :func:`~.terminations.joint_speed_exceeded` term the same way, as the real robot's servo speed limit. The band
+      of the :func:`~.rewards.joint_speed_penalty` term moves with it, keeping its ratio to the stop;
     * every reward term in ``gate_values`` keeps its configured weight until the gate first opens and has the given
       weight from then on, without a ramp: a reward for gentle contact pays in full as soon as the penalties start.
     """
 
+    _SPECIAL_KEYS = ("scale_z", "scale_rot", "joint_speed_fraction")
+    """``final_values`` keys that are no reward weights."""
+
     def __init__(self, cfg: CurriculumTermCfg, env: ManagerBasedRLEnv):
         """Read the start weights and the start action scale."""
         super().__init__(cfg, env)
-        names = [name for name in cfg.params["final_values"] if name != "scale_z"]
+        names = [name for name in cfg.params["final_values"] if name not in self._SPECIAL_KEYS]
         names += list(cfg.params.get("gate_values", {}))
         self._reward_cfgs = {name: env.reward_manager.get_term_cfg(name) for name in names}
         self._start_weights = {name: float(term_cfg.weight) for name, term_cfg in self._reward_cfgs.items()}
         self._action = env.action_manager.get_term(cfg.params.get("action_name", "arm_action"))
         self._start_scale = self._action.scale_trans
+        self._start_scale_rot = self._action.scale_rot
         self._termination_name = cfg.params.get("termination_name", "gripper_force_limit")
         self._termination_cfg = env.termination_manager.get_term_cfg(self._termination_name)
+        # joint speed stop and its penalty band, ramped only with "joint_speed_fraction"
+        self._speed_cfgs = None
+        if "joint_speed_fraction" in cfg.params["final_values"]:
+            speed_name = cfg.params.get("speed_termination_name", "joint_velocity_limit")
+            penalty_name = cfg.params.get("speed_penalty_name", "pen_joint_speed")
+            speed_cfg = env.termination_manager.get_term_cfg(speed_name)
+            penalty_cfg = env.reward_manager.get_term_cfg(penalty_name)
+            self._speed_cfgs = (speed_name, speed_cfg, penalty_name, penalty_cfg)
+            self._start_speed = float(speed_cfg.params["max_fraction"])
+            # penalty band start as a fraction of the stop, kept while the stop moves
+            self._band_ratio = float(penalty_cfg.params["min_fraction"]) / float(penalty_cfg.params["max_fraction"])
 
     def __call__(
         self,
@@ -251,6 +271,8 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
         command_name: str = "cloth_target",
         termination_name: str = "gripper_force_limit",
         action_name: str = "arm_action",
+        speed_termination_name: str = "joint_velocity_limit",
+        speed_penalty_name: str = "pen_joint_speed",
         ema_episodes: int = 2048,
         initial_progress: float = 0.0,
         steps_per_iteration: int = 24,
@@ -266,18 +288,21 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
                 resumes.
             length_iterations: Training iterations from the start values to ``final_values``.
             termination_force: Gripper force limit ``(when the gate opens, at full progress)`` [N]; off before.
-            final_values: Values at full progress: reward weights by term name, and ``"scale_z"`` [m].
+            final_values: Values at full progress: reward weights by term name, ``"scale_z"`` [m], ``"scale_rot"``
+                [rad] and ``"joint_speed_fraction"`` (of the joint velocity limits).
             gate_values: Reward weights by term name that switch on, unramped, when the gate first opens.
             command_name: Name of the cloth target command.
             termination_name: Name of the :class:`~.terminations.GripperForceLimit` termination term.
             action_name: Name of the :class:`~.actions.TopDownDeltaEEAction` term.
+            speed_termination_name: Name of the :func:`~.terminations.joint_speed_exceeded` termination term.
+            speed_penalty_name: Name of the :func:`~.rewards.joint_speed_penalty` reward term.
             ema_episodes: Number of finished episodes the success average spans (its time constant).
             initial_progress: Progress at the start of training, read once at initialization.
             steps_per_iteration: Environment steps per training iteration, the agent's ``num_steps_per_env``.
 
         Returns:
             The state to log: success average, gate, progress, force limit (zero while off), the weight of every
-            penalty and the z step.
+            penalty, the z and yaw steps and the joint speed fraction.
         """
         min_success, max_success = thresholds
         dwell_steps = dwell_iterations * steps_per_iteration
@@ -314,4 +339,18 @@ class AvoidTableCollisionCurriculum(_SuccessGatedRamp):
             scale_z += p * (final_values["scale_z"] - scale_z)
             self._action.scale_trans = (scale_x, scale_y, scale_z)
         state["scale_z"] = scale_z
+        scale_rot = self._start_scale_rot
+        if "scale_rot" in final_values:
+            scale_rot += p * (final_values["scale_rot"] - scale_rot)
+            self._action.scale_rot = scale_rot
+        state["scale_rot"] = scale_rot
+        if self._speed_cfgs is not None:
+            speed_name, speed_cfg, penalty_name, penalty_cfg = self._speed_cfgs
+            fraction = self._start_speed + p * (final_values["joint_speed_fraction"] - self._start_speed)
+            speed_cfg.params["max_fraction"] = fraction
+            env.termination_manager.set_term_cfg(speed_name, speed_cfg)
+            penalty_cfg.params["min_fraction"] = self._band_ratio * fraction
+            penalty_cfg.params["max_fraction"] = fraction
+            env.reward_manager.set_term_cfg(penalty_name, penalty_cfg)
+            state["joint_speed_fraction"] = fraction
         return state

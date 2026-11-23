@@ -45,7 +45,7 @@ stages, the task-start states included. Version 6 (2026-11-13): no ``labels`` gr
 per-state rollout labels are dropped), the generator settings in ``meta`` identify the bank. Version 7 (2026-11-16):
 the Robotiq finger angle in ``task.held_finger_pos`` replaces the Panda finger opening."""
 
-STRICT_FINGERPRINT_KEYS = ("num_nodes", "joint_names", "scene_entities")
+STRICT_FINGERPRINT_KEYS = ("num_nodes", "joint_names")
 """Fingerprint entries that must match exactly: without them the stored states do not fit the task's tensors."""
 
 SOFT_FINGERPRINT_KEYS = ("physics_hash", "task_hash")
@@ -132,12 +132,18 @@ class ResetBank:
             allow_settings_mismatch: Whether states made with other physics or task settings may be used.
 
         Raises:
-            ValueError: If the mesh, the joints or the scene differ, or, unless allowed, the settings.
+            ValueError: If the mesh, the joints or the scene differ (added sensors are allowed), or, unless allowed,
+                the settings.
         """
         stored = self.meta.get("fingerprint", {})
         for key in STRICT_FINGERPRINT_KEYS:
             if stored.get(key) != fingerprint.get(key):
                 raise ValueError(f"The reset bank does not fit the task: '{key}' differs. Generate a new bank.")
+        # the task may add sensors (e.g. a camera), which hold no stored state
+        stored_entities, entities = set(stored.get("scene_entities", [])), set(fingerprint.get("scene_entities", []))
+        extra = entities - stored_entities - set(fingerprint.get("scene_sensors", []))
+        if stored_entities - entities or extra:
+            raise ValueError("The reset bank does not fit the task: 'scene_entities' differs. Generate a new bank.")
         stored_mesh = torch.tensor(stored.get("mesh_default_local", []))
         mesh = torch.tensor(fingerprint.get("mesh_default_local", []))
         if stored_mesh.shape != mesh.shape or not torch.allclose(stored_mesh, mesh, atol=1.0e-5):
@@ -160,8 +166,8 @@ def task_fingerprint(
 ) -> dict[str, Any]:
     """Return what the stored states depend on, to check a bank against the task it is loaded into.
 
-    Strict entries: the number of cloth nodes, the robot's joint names, the scene's entity names and the cloth's default
-    nodes relative to the environment origin. Soft entries: hashes of the physics settings (solver, time step,
+    Strict entries: the number of cloth nodes, the robot's joint names, the scene's entity names (of which
+    ``scene_sensors`` may be missing from the bank) and the cloth's default nodes relative to the environment origin. Soft entries: hashes of the physics settings (solver, time step,
     decimation, robot, cloth, cube) and of the task settings (gripper action, command). The default reset events are not
     part of it: a strategy that resets from the bank has none.
 
@@ -200,6 +206,7 @@ def task_fingerprint(
         "num_nodes": int(mesh.shape[0]),
         "joint_names": list(robot.joint_names),
         "scene_entities": sorted(env.scene.keys()),
+        "scene_sensors": sorted(env.scene.sensors.keys()),
         "mesh_default_local": [[round(float(x), 6) for x in node] for node in mesh.tolist()],
         "physics_hash": stable_hash(physics),
         "task_hash": stable_hash(task),

@@ -106,6 +106,16 @@ def test_fingerprint_mismatch():
     bank.check_fingerprint(FINGERPRINT | {"physics_hash": "other"}, allow_settings_mismatch=True)
 
 
+def test_fingerprint_allows_added_sensors_only():
+    bank = _bank([1])
+    entities = [*FINGERPRINT["scene_entities"], "wrist_camera"]
+    bank.check_fingerprint(FINGERPRINT | {"scene_entities": entities, "scene_sensors": ["wrist_camera"]})
+    with pytest.raises(ValueError, match="scene_entities"):
+        bank.check_fingerprint(FINGERPRINT | {"scene_entities": entities})  # an added asset
+    with pytest.raises(ValueError, match="scene_entities"):
+        bank.check_fingerprint(FINGERPRINT | {"scene_entities": ["cube", "robot"]})  # a missing entity
+
+
 def test_stable_hash_is_deterministic_and_sensitive():
     cfg = {"dt": 1.0 / 120, "solver": SimpleNamespace, "values": (1, 2)}
     assert stable_hash(cfg) == stable_hash(dict(cfg))

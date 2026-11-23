@@ -55,6 +55,13 @@ class ClothTargetCommandCfg(CommandTermCfg):
     resampling_time_range: tuple[float, float] = (1.0e6, 1.0e6)  # no resampling based on time
     """Time between resamples during an episode [s]. The target is only resampled when the episode resets."""
 
+    cmd_kind: str | None = "command/body/target_position"
+    """LEAPP input kind of the exported target: on the robot, Isaac ROS Deploy reads it from the position of the first
+    pose of an ``isaac_ros_deploy_interfaces/msg/BodyCommand``."""
+
+    element_names: list[str] | list[list[str]] | None = ["x", "y", "z"]
+    """Target position in the robot's root frame [m]."""
+
     asset_name: str = MISSING
     """Name of the robot whose root frame the target is expressed in."""
 

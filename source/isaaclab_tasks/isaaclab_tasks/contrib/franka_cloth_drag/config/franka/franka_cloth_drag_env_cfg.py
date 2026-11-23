@@ -195,7 +195,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         spawn=sim_utils.UsdFileCfg(
             usd_path=os.path.join(CLOTH_MESH_DIR, "120_nodes_optimized_mesh.usd"),
             deformable_props=NewtonDeformableBodyPropertiesCfg(),
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.95, 0.85, 0.1)),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.406, 0.507, 0.263)),  # linear RGB of the green cloth, sRGB (0.67, 0.74, 0.55)
             physics_material=NewtonSurfaceDeformableBodyMaterialCfg(
                 density=0.2,  # areal density [kg/m^2]
                 particle_radius=0.002,
@@ -214,7 +214,7 @@ class FrankaClothDragSceneCfg(InteractiveSceneCfg):
         init_state=RigidObjectCfg.InitialStateCfg(pos=(0.62, 0.0, 0.005 + 0.004 + 0.5 * 0.04)),
         spawn=sim_utils.CuboidCfg(
             size=(0.04, 0.04, 0.04),  # [m]
-            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(0.1, 0.3, 0.9)),
+            visual_material=sim_utils.PreviewSurfaceCfg(diffuse_color=(1.0, 0.136, 0.014)),  # linear RGB of PETG Basic Orange #FF671F
             rigid_props=sim_utils.RigidBodyPropertiesCfg(),
             mass_props=sim_utils.MassPropertiesCfg(mass=0.1), # [kg]
             collision_props=sim_utils.CollisionPropertiesCfg(),
@@ -705,7 +705,7 @@ class ResetStrategiesCfg(PresetCfg):
     uniform_resets: UniformResetsCfg = UniformResetsCfg()
     adaptive_resets: AdaptiveResetsCfg = AdaptiveResetsCfg()
 
-    default = default_resets
+    default = adaptive_resets
 
 
 @configclass
@@ -860,10 +860,9 @@ class TerminationsCfg:
     gripper_cube_contact = DoneTerm(
         func=mdp.physics_contact, 
         params={"contact_name": "gripper_cube"})
-    # The gripper's push into the table and the cloth, averaged over the policy step
     gripper_force_limit = DoneTerm(
         func=mdp.GripperForceLimit,
-        params={"max_force": math.inf},  # [N] off until the curriculum gate opens; then pen_termination pays on it
+        params={"max_force": math.inf},  # inf => only pressent in the curriculum
     )
     ee_below_table = DoneTerm(
         func=mdp.gripper_below_table, 
@@ -888,14 +887,16 @@ class CurriculumCfg:
         params={
             "thresholds": (0.80, 0.90),
             "dwell_iterations": 10,
-            "length_iterations": 150,  # from start to final values
-            "termination_force": (40.0, 20.0),  # [N] force stop when the gate opens, at full progress
+            "length_iterations": 130,  # from start to final values
+            "termination_force": (40.0, 15.0),  # [N] 
             "final_values": {
-                "pen_force_over_10": -1.0,  # reward weight
+                "pen_force_over_10": -1.0,  # penalty on high forces
                 "scale_z": 0.005,  # [m] z step of the arm action
+                "scale_rot": 0.05,  # [rad] yaw step of the arm action 
+                "joint_speed_fraction": 0.35,
             },
-            # switched on in full when the gate opens: gentle contact pays while the penalties ramp in
-            "gate_values": {"grasp_force_kernel": 2.0},  # reward weight
+            # switch on fully instantly to reward some force during grasp
+            "gate_values": {"grasp_force_kernel": 3.0},  # reward weight
         },
     )
 

@@ -3,7 +3,16 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""The IK teacher's arm action and the conversion of its actions into joint-delta labels."""
+"""Everything pinned to the teacher checkpoint: its arm action, actor network and curriculum state."""
 
-from .ik_action import TeacherTopDownIKAction, TeacherTopDownIKActionCfg
-from .ik_label import IK_STATE_DIM, IKLabelCfg, teacher_actions_to_joint_deltas, teacher_joint_step
+from .ik_action import TeacherTopDownIKAction, TeacherTopDownIKActionCfg, top_down_quat
+from .teacher_cfg import (
+    TEACHER_ACTOR_CFG,
+    TEACHER_ARM_CFG,
+    TEACHER_CHECKPOINT,
+    TEACHER_CURRICULUM_PROGRESS,
+    TEACHER_NUM_ACTIONS,
+    TEACHER_SCALE_ROT,
+    TEACHER_SCALE_Z,
+    apply_final_curriculum_values,
+)

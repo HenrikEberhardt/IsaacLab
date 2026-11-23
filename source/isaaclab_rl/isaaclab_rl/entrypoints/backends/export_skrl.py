@@ -240,7 +240,7 @@ def run_export_with_hydra(args_cli: argparse.Namespace, hydra_args: list[str]) -
 
     try:
 
-        @hydra_task_config(args_cli.task, agent_cfg_entry_point)
+        @hydra_task_config(args_cli.task, agent_cfg_entry_point, play_mode=True)  # inference-time task configuration
         def _main(env_cfg, experiment_cfg) -> None:
             nonlocal exported
             with launch_simulation(env_cfg, args_cli):

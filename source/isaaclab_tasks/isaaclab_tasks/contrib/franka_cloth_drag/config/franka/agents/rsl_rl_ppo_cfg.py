@@ -25,7 +25,7 @@ class FrankaClothDragPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     seed = 42
     experiment_name = "cloth_drag_task"
     num_steps_per_env = 24
-    max_iterations = 500
+    max_iterations = 750
     save_interval = 50
     logger = "wandb"
     wandb_project = "non-prehensile_cloth_task"

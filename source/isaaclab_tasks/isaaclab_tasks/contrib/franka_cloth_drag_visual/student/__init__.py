@@ -3,4 +3,4 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Distillation agent configurations."""
+"""The deployed student: wrist camera, action space, inputs, network and runner config."""

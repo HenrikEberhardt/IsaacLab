@@ -3,8 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-# oak_camera_cfg follows srl-ethz/IsaacLab-Cloth (branch cloth-fold-environments), src/Cloth_Manipulation/assets/robotiq.py,
-# which follows mmichelis/IsaacLab-Soft (branch liftsoft-robotiq), src/isaaclab_soft/assets/robotiq_oak.py.
+# oak_camera_cfg follows srl-ethz/IsaacLab-Cloth (cloth-fold-environments), src/Cloth_Manipulation/assets/robotiq.py
 
 """The OAK-1 Lite W wrist camera on the Robotiq gripper."""
 
@@ -28,12 +27,7 @@ OAK_CAMERA_PATH = ROBOTIQ_BASE_PATH + "/OAKHardware/Mount/CameraHousing/OpticalC
 
 
 def oak_camera_cfg(base: CameraCfg) -> CameraCfg:
-    """The OAK's optical camera of the robot asset as a camera, keeping ``base``'s acquisition and render settings.
-
-    The pose relative to the Robotiq ``base_link`` and the calibrated OpenCV lens (ChArUco at 1352x1014) are read from
-    the asset. The camera prim already exists there, so it is not spawned again, but Newton's ray tracer reads its lens
-    model from ``spawn``.
-    """
+    """The asset's OAK camera (mount pose and calibrated OpenCV lens from the USD) with ``base``'s settings."""
     stage = Usd.Stage.Open(FRANKA_PANDA_ROBOTIQ_USD)
     root = stage.GetDefaultPrim()
     camera = root.GetPrimAtPath(OAK_CAMERA_PATH)
@@ -60,20 +54,16 @@ def oak_camera_cfg(base: CameraCfg) -> CameraCfg:
     return base.replace(
         prim_path="{ENV_REGEX_NS}/Robot/" + OAK_CAMERA_PATH,
         offset=offset,
-        spawn=spawn.replace(distortion=lens),
+        spawn=spawn.replace(distortion=lens),  # the prim exists; Newton reads the lens from spawn
     )
 
 
 WRIST_CAMERA_CFG = oak_camera_cfg(
     CameraCfg(
         prim_path="",
-        # the camera rides on the hand, so the renderer needs its pose refreshed every capture
-        update_latest_camera_pose=True,
-        # the segmentation output is unused: requesting it makes the renderer fill the shape-index buffer that
-        # image_rgb_deploy reads to find and recolor the cloth
-        data_types=["rgb", "instance_segmentation"],
-        # the raw, distorted OAK frame resized to this resolution
-        width=160,
+        update_latest_camera_pose=True,  # the camera rides on the hand
+        data_types=["rgb", "instance_segmentation"],  # segmentation fills the shape-index buffer for the cloth recolor
+        width=160,  # raw distorted OAK frame resized
         height=120,
         spawn=sim_utils.PinholeCameraCfg(clipping_range=(0.01, 3.0)),  # [m]
         renderer_cfg=NewtonWarpRendererCfg(enable_shadows=True, colorize_instance_segmentation=False),

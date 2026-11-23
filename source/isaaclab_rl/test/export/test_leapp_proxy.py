@@ -4,17 +4,21 @@
 # SPDX-License-Identifier: BSD-3-Clause
 
 import math
+from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
 import torch
 import warp as wp
 
-pytest.importorskip("leapp")
+leapp = pytest.importorskip("leapp")
 
 from isaaclab.assets.articulation import BaseArticulationData
 from isaaclab.envs import mdp
+from isaaclab.envs.leapp_deployment_env import LeappDeploymentEnv, StateInputSpec
+from isaaclab.sensors.camera import CameraData
 from isaaclab.utils import math as math_utils
+from isaaclab.utils.buffers import CircularBuffer
 from isaaclab.utils.leapp import utils as leapp_utils
 from isaaclab.utils.leapp.export_annotator import ExportPatcher
 from isaaclab.utils.leapp.leapp_semantics import InputKindEnum
@@ -131,6 +135,85 @@ def test_projected_gravity_observation_exports_root_quat_w_input(monkeypatch: py
     assert semantics.name == "robot_root_quat_w"
     assert semantics.kind == InputKindEnum.BODY_ROTATION
     assert semantics.extra == {"isaaclab_connection": "state:robot:root_quat_w"}
+
+
+def test_camera_output_mapping_round_trips_through_deployment(monkeypatch: pytest.MonkeyPatch):
+    """Test camera buffers are independently wired and resolved during deployment."""
+    annotated_inputs = _capture_leapp_inputs(monkeypatch)
+    camera_data = CameraData()
+    camera_data._output = {
+        "rgb": ProxyArray(wp.from_torch(torch.zeros(1, 4, 4, 4, dtype=torch.uint8))),
+        "depth": ProxyArray(wp.from_torch(torch.ones(1, 4, 4, 1, dtype=torch.float32))),
+    }
+    proxy = _DataProxy(
+        camera_data,
+        entity_name="camera",
+        task_name="camera-task",
+        property_resolution_cache={},
+        cache={},
+        input_name_resolver=lambda property_name: f"camera_{property_name}",
+    )
+
+    assert proxy.output["rgb"].torch.shape == (1, 4, 4, 4)
+    assert proxy.output["depth"].torch.shape == (1, 4, 4, 1)
+    _ = proxy.output["rgb"].torch  # Re-reading a buffer must not add another graph input.
+    assert len(annotated_inputs) == 2
+    assert set(semantics.name for _, semantics in annotated_inputs) == {"camera_output_rgb", "camera_output_depth"}
+    assert {semantics.extra["isaaclab_connection"] for _, semantics in annotated_inputs} == {
+        "state:camera:output.rgb",
+        "state:camera:output.depth",
+    }
+
+    rgb_semantics = next(semantics for _, semantics in annotated_inputs if semantics.name == "camera_output_rgb")
+    _, entity_name, property_name = rgb_semantics.extra["isaaclab_connection"].split(":", 2)
+    env = object.__new__(LeappDeploymentEnv)
+    env.scene = {entity_name: SimpleNamespace(data=camera_data)}
+    env._input_mapping = {
+        "camera-task/camera_output_rgb": StateInputSpec(entity_name=entity_name, property_name=property_name)
+    }
+    assert env._read_inputs() == {"camera-task/camera_output_rgb": camera_data.output["rgb"].torch}
+
+
+@pytest.mark.parametrize("stack_dim", [None, 1])
+def test_observation_history_export_preserves_buffer_behavior(tmp_path: Path, stack_dim: int | None):
+    """Test both history layouts, partial backfill, and compiled feedback against the runtime buffer."""
+    from leapp import InferenceManager, annotate
+
+    buffer = CircularBuffer(3, 2, "cpu", stack_dim=stack_dim)
+    reference = CircularBuffer(3, 2, "cpu", stack_dim=stack_dim)
+    patcher = ExportPatcher(export_method="onnx-dynamo", required_obs_groups={"policy"})
+    patcher.task_name = "history"
+    obs_manager = SimpleNamespace(
+        _group_obs_term_cfgs={"policy": [SimpleNamespace(func=lambda env: None, history_length=3)]},
+        _group_obs_term_names={"policy": ["positions"]},
+        _group_obs_term_history_buffer={"policy": {"positions": buffer}},
+    )
+    patcher._patch_history_buffers(obs_manager)
+    frames = [torch.arange(6, dtype=torch.float32).reshape(2, 3) + value for value in (0, 10, 30)]
+    for frame in frames:
+        buffer.append(frame)
+        reference.append(frame)
+        torch.testing.assert_close(buffer.buffer, reference.buffer)
+        buffer.reset([0])
+        reference.reset([0])
+    # Capture with one reset environment and one populated history.
+
+    leapp.start("history", save_path=str(tmp_path))
+    try:
+        for frame in frames:
+            frame = annotate.input_tensors("history", {"frame": frame})
+            buffer.append(frame)
+            annotate.output_tensors("history", {"observation": buffer.buffer.clone()}, export_with="onnx-dynamo")
+    finally:
+        leapp.stop()
+    leapp.compile_graph(visualize=False, validate=True)
+
+    manager = InferenceManager(str(tmp_path / "history" / "history.yaml"))
+    assert manager.inputs == ["history/frame"]
+    for frame in frames[::-1]:
+        reference.append(frame)
+        actual = manager.run_policy({"history/frame": frame})["history/observation"]
+        torch.testing.assert_close(actual, reference.buffer)
 
 
 def test_named_last_action_observations_use_independent_feedback_states(monkeypatch: pytest.MonkeyPatch):

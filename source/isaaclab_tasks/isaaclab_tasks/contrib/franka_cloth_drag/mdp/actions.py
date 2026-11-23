@@ -120,6 +120,16 @@ class TopDownDeltaEEAction(DifferentialInverseKinematicsAction):
         """Set the translation step per unit action [m], e.g. from a curriculum; applies from the next action."""
         self._scale[:, :3] = torch.tensor(scale, device=self.device)
 
+    @property
+    def scale_rot(self) -> float:
+        """Yaw step per unit action [rad]."""
+        return float(self._scale[0, 3])
+
+    @scale_rot.setter
+    def scale_rot(self, scale: float) -> None:
+        """Set the yaw step per unit action [rad], e.g. from a curriculum; applies from the next action."""
+        self._scale[:, 3] = scale
+
     def process_actions(self, actions: torch.Tensor):
         """Convert translation and yaw deltas into a top-down IK command."""
         self._raw_actions[:] = actions

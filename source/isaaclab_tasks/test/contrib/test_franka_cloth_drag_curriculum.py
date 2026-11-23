@@ -12,7 +12,7 @@ import torch
 
 from isaaclab.managers import CurriculumTermCfg
 
-from isaaclab_tasks.contrib.franka_cloth_drag.mdp.curriculums import ActionRateCurriculum
+from isaaclab_tasks.contrib.franka_cloth_drag.mdp.curriculums import ActionRateCurriculum, AvoidTableCollisionCurriculum
 
 START_WEIGHT = -1e-3
 FINAL_WEIGHT = -1e-1
@@ -207,3 +207,56 @@ def test_success_gate_counts_only_default_starts():
     # with the default resets every episode starts at the beginning, so every episode counts
     env.command_manager.get_term("cloth_target").start_stage.zero_()
     assert _call(gated, env, gated_params, step=3, env_ids=torch.tensor([1, 2]))["success_ema"] == 1.0
+
+
+class _TermCfgs:
+    """Term cfgs by name, like the reward and termination managers' get/set term cfg."""
+
+    def __init__(self, **cfgs):
+        self.cfgs = cfgs
+
+    def get_term_cfg(self, name):
+        return self.cfgs[name]
+
+    def set_term_cfg(self, name, cfg):
+        self.cfgs[name] = cfg
+
+
+@pytest.mark.parametrize("progress", [0.0, 0.5, 1.0])
+def test_avoid_table_collision_ramps_yaw_step_and_joint_speed_stop(progress):
+    """The yaw step and the joint speed stop go linearly to their final values; the penalty band keeps its ratio."""
+    env, _ = _env(num_envs=4)
+    env.reward_manager = _TermCfgs(
+        pen_force_over_10=SimpleNamespace(weight=0.0),
+        grasp_force_kernel=SimpleNamespace(weight=0.0),
+        pen_joint_speed=SimpleNamespace(params={"min_fraction": 0.5, "max_fraction": 0.6}),
+    )
+    env.termination_manager = _TermCfgs(
+        gripper_force_limit=SimpleNamespace(params={"max_force": 0.0}),
+        joint_velocity_limit=SimpleNamespace(params={"max_fraction": 0.6}),
+    )
+    arm = SimpleNamespace(scale_trans=(0.015, 0.015, 0.015), scale_rot=0.2)
+    env.action_manager = SimpleNamespace(get_term=lambda name: arm)
+    params = {
+        "thresholds": (0.8, 0.9),
+        "dwell_iterations": 0,
+        "length_iterations": 10,
+        "termination_force": (40.0, 15.0),
+        "final_values": {"pen_force_over_10": -1.0, "scale_z": 0.005, "scale_rot": 0.05, "joint_speed_fraction": 0.3},
+        "gate_values": {"grasp_force_kernel": 3.0},
+        "ema_episodes": 0,
+        "initial_progress": progress,
+    }
+    term = AvoidTableCollisionCurriculum(CurriculumTermCfg(func=AvoidTableCollisionCurriculum, params=params), env)
+    state = _call(term, env, params, step=0)
+
+    fraction = 0.6 + progress * (0.3 - 0.6)
+    assert state["progress"] == pytest.approx(progress)
+    assert arm.scale_rot == pytest.approx(0.2 + progress * (0.05 - 0.2)) == state["scale_rot"]
+    assert env.termination_manager.get_term_cfg("joint_velocity_limit").params["max_fraction"] == pytest.approx(
+        fraction
+    )
+    band = env.reward_manager.get_term_cfg("pen_joint_speed").params
+    assert band["max_fraction"] == pytest.approx(fraction)
+    assert band["min_fraction"] == pytest.approx(fraction * 0.5 / 0.6)
+    assert state["joint_speed_fraction"] == pytest.approx(fraction)

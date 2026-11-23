@@ -3,23 +3,7 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Check the conversion of the IK teacher's actions into joint-delta labels.
-
-Plays the teacher checkpoint deterministically in the distillation env ``IsaacContrib-Drag-Cloth-Franka-Joint``, in
-one of three modes:
-
-    native:  the teacher drives its own IK arm action (the frozen copy of the teacher run's term). Reference success.
-    labels:  the teacher's actions are converted into the student's 8 joint-delta labels, which drive the env's
-             joint-delta action. The student can at best match this success.
-    check:   as native, with the IK target delay off, and compares the converted label with the joint target offset
-             the IK term applied in its first physics substep. The difference should be at float precision.
-
-Everything else (scene, randomization, default resets, terminations) is the same in all modes.
-
-Usage (from the IsaacLab root, one GPU):
-    uv run python source/isaaclab_tasks/isaaclab_tasks/contrib/franka_cloth_drag_visual/scripts/teacher_joint_replay.py \\
-        --mode labels --num_envs 128 --num_steps 900 --viz none
-"""
+"""Teacher-label conversion check: --mode native (reference), labels (teacher through its labels), check (float diff)."""
 
 import argparse
 import sys
@@ -40,6 +24,8 @@ parser.add_argument("--checkpoint", default=None, help="Teacher checkpoint (defa
 parser.add_argument("--num_envs", type=int, default=128)
 parser.add_argument("--num_steps", type=int, default=900, help="Environment steps.")
 parser.add_argument("--seed", type=int, default=0)
+parser.add_argument("--resets", choices=("default", "adaptive"), default="default", help="Task-start or bank resets.")
+parser.add_argument("--reanchor", action="store_true", help="Student target re-anchored every physics step.")
 parser.add_argument("--clean_teacher_obs", action="store_true", help="Disable the corruption of the teacher's group.")
 parser.add_argument(
     "--joint_scale", type=float, nargs="+", default=None, help="Student joint-delta scale [rad], one or seven values."
@@ -54,14 +40,17 @@ sys.argv = [sys.argv[0]] + hydra_args
 
 
 def configure(env_cfg):
-    """Apply the mode's action space."""
+    """Apply the mode's action space and the reset strategy."""
     from isaaclab.envs import mdp as isaaclab_mdp
     from isaaclab.managers import ObservationTermCfg as ObsTerm
 
-    from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher_cfg import TEACHER_ARM_CFG
+    from isaaclab_tasks.contrib.franka_cloth_drag.config.franka.franka_cloth_drag_env_cfg import DefaultResetsCfg
+    from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher import TEACHER_ARM_CFG
 
     env_cfg.scene.num_envs = args_cli.num_envs
     env_cfg.seed = args_cli.seed
+    if args_cli.resets == "default":
+        env_cfg.events = DefaultResetsCfg()
     if args_cli.mode in ("native", "check"):
         env_cfg.actions.arm_action = TEACHER_ARM_CFG.copy()
         env_cfg.observations.teacher.last_action = ObsTerm(func=isaaclab_mdp.last_action)
@@ -69,6 +58,8 @@ def configure(env_cfg):
             env_cfg.actions.arm_action.command_delay_range = (0, 0)
     if args_cli.clean_teacher_obs:
         env_cfg.observations.teacher.enable_corruption = False
+    if args_cli.mode == "labels":
+        env_cfg.actions.arm_action.anchor_per_policy_step = not args_cli.reanchor
     scale = joint_scale()
     if scale is not None and args_cli.mode == "labels":
         if isinstance(scale, float):
@@ -78,7 +69,7 @@ def configure(env_cfg):
 
 
 def joint_scale() -> float | tuple[float, ...] | None:
-    """The ``--joint_scale`` override: one float, seven per-joint values or None."""
+    """The --joint_scale override: one float, seven values or None."""
     if args_cli.joint_scale is None:
         return None
     if len(args_cli.joint_scale) not in (1, 7):
@@ -96,22 +87,24 @@ def main():
     with launch_simulation(env_cfg, args_cli):
         from isaaclab_rl.rsl_rl import RslRlVecEnvWrapper
 
-        from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher import (
+        from isaaclab_tasks.contrib.franka_cloth_drag_visual.action_mapping import (
             teacher_actions_to_joint_deltas,
             teacher_joint_step,
         )
+        from isaaclab_tasks.contrib.franka_cloth_drag_visual.franka_cloth_drag_visual_env_cfg import ACTION_MAPPING_CFG
+        from isaaclab_tasks.contrib.franka_cloth_drag_visual.student.actions import STUDENT_JOINT_DELTA_SCALE
+        from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher import TEACHER_CHECKPOINT
         from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher.loading import load_teacher
-        from isaaclab_tasks.contrib.franka_cloth_drag_visual.teacher_cfg import IK_LABEL_CFG, TEACHER_CHECKPOINT
 
         gym_env = gym.make(TASK, cfg=env_cfg)
         env = gym_env.unwrapped
         wrapped = RslRlVecEnvWrapper(gym_env)
         obs = wrapped.get_observations()
         teacher = load_teacher(obs, args_cli.checkpoint or TEACHER_CHECKPOINT, env.device)
-        label_cfg = IK_LABEL_CFG.replace(preserve_direction=not args_cli.per_joint_clip)
-        if joint_scale() is not None:
-            label_cfg = label_cfg.replace(joint_delta_scale=joint_scale())
-        print(f"[REPLAY] scale {label_cfg.joint_delta_scale}, preserve direction {label_cfg.preserve_direction}")
+        label_cfg = ACTION_MAPPING_CFG.replace(
+            preserve_direction=not args_cli.per_joint_clip, joint_delta_scale=joint_scale() or STUDENT_JOINT_DELTA_SCALE
+        )
+        print(f"[REPLAY] scale {label_cfg.joint_delta_scale}, preserve direction {label_cfg.preserve_direction}, reanchor {args_cli.reanchor}")
         arm = env.action_manager.get_term("arm_action")
         print(f"[REPLAY] mode {args_cli.mode}, teacher obs {obs['teacher'].shape[-1]}, ik_state {obs['ik_state'].shape[-1]}")
 
